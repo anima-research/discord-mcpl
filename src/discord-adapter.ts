@@ -208,6 +208,13 @@ export class DiscordAdapter {
     }));
   }
 
+  async sendTyping(channelId: string): Promise<void> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (channel && 'sendTyping' in channel) {
+      await (channel as TextChannel).sendTyping();
+    }
+  }
+
   async listGuilds(): Promise<DiscordGuildInfo[]> {
     return this.client.guilds.cache.map((g: Guild) => ({
       id: g.id,

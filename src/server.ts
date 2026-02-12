@@ -236,6 +236,17 @@ export class DiscordMcplServer {
         break;
       }
 
+      case 'notifications/typing': {
+        const p = notif.params as { channelId?: string };
+        if (p.channelId) {
+          const parsed = parseMcplChannelId(p.channelId);
+          if (parsed) {
+            this.discord.sendTyping(parsed.channelId).catch(() => {});
+          }
+        }
+        break;
+      }
+
       default:
         // Ignore unknown notifications
         break;
