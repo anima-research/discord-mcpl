@@ -301,7 +301,7 @@ describe('DiscordMcplServer', () => {
       client.sendResponse(regMsg.request.id, {});
     }
 
-    // Simulate a Discord message
+    // Simulate a Discord message (mentioning the bot so it passes the filter)
     discord.simulateMessage({
       id: 'dm1',
       content: 'Hello agent!',
@@ -310,7 +310,7 @@ describe('DiscordMcplServer', () => {
       isBot: false,
       channelId: 'c1',
       guildId: 'g1',
-      mentions: [],
+      mentions: ['bot_123'],
       timestamp: new Date(),
     });
 
@@ -349,7 +349,7 @@ describe('DiscordMcplServer', () => {
     })) as ChannelsOpenResult;
     assert.ok(openResult.channel.id.includes('c1'));
 
-    // Simulate a Discord message on the open channel
+    // Simulate a Discord message on the open channel (mentioning bot)
     discord.simulateMessage({
       id: 'dm2',
       content: 'Message on open channel',
@@ -358,7 +358,7 @@ describe('DiscordMcplServer', () => {
       isBot: false,
       channelId: 'c1',
       guildId: 'g1',
-      mentions: [],
+      mentions: ['bot_123'],
       timestamp: new Date(),
     });
 

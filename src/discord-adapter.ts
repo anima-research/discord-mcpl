@@ -215,6 +215,10 @@ export class DiscordAdapter {
     }
   }
 
+  getGuildName(guildId: string): string {
+    return this.client.guilds.cache.get(guildId)?.name ?? guildId;
+  }
+
   async listGuilds(): Promise<DiscordGuildInfo[]> {
     return this.client.guilds.cache.map((g: Guild) => ({
       id: g.id,

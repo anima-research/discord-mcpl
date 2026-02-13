@@ -41,6 +41,8 @@ import type {
   StateRollbackResult,
   ChannelDescriptor,
   ContentBlock,
+  ChannelsOutgoingChunkParams,
+  ChannelsOutgoingCompleteParams,
 } from '@connectome/mcpl-core';
 
 import type { DiscordAdapter, DiscordMessageData } from './discord-adapter.js';
@@ -55,6 +57,8 @@ export class DiscordMcplServer {
   private enabledFeatureSets = new Set<string>();
   private channelManager = new ChannelManager();
   private stateTracker = new StateTracker();
+  /** Buffers for channels/outgoing/chunk streams, keyed by inferenceId */
+  private outgoingBuffers = new Map<string, { channelId: string; chunks: string[] }>();
 
   constructor(private discord: DiscordAdapter) {}
 
@@ -232,6 +236,40 @@ export class DiscordMcplServer {
         }
         if (p.disabled) {
           for (const name of p.disabled) this.enabledFeatureSets.delete(name);
+        }
+        break;
+      }
+
+      case method.CHANNELS_OUTGOING_CHUNK: {
+        const p = notif.params as ChannelsOutgoingChunkParams;
+        const buf = this.outgoingBuffers.get(p.inferenceId);
+        if (buf) {
+          buf.chunks[p.index] = p.delta;
+        } else {
+          const chunks: string[] = [];
+          chunks[p.index] = p.delta;
+          this.outgoingBuffers.set(p.inferenceId, { channelId: p.channelId, chunks });
+        }
+        break;
+      }
+
+      case method.CHANNELS_OUTGOING_COMPLETE: {
+        const p = notif.params as ChannelsOutgoingCompleteParams;
+        this.outgoingBuffers.delete(p.inferenceId);
+
+        // Extract text and send to Discord
+        const text = p.content
+          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+          .map((b) => b.text)
+          .join('\n');
+
+        if (text) {
+          const parsed = parseMcplChannelId(p.channelId);
+          if (parsed) {
+            this.discord.sendMessage(parsed.channelId, text).catch((err) => {
+              console.error('[discord-mcpl] outgoing/complete send failed:', (err as Error).message);
+            });
+          }
         }
         break;
       }
@@ -497,10 +535,34 @@ export class DiscordMcplServer {
       });
     });
 
+    this.discord.onMessageEdit((channelId, messageId, newContent) => {
+      if (!this.conn || !this.mcplEnabled) return;
+      if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
+      this.conn.sendRequest(method.PUSH_EVENT, {
+        featureSet: 'discord.messaging',
+        eventId: `discord_edit_${messageId}`,
+        timestamp: new Date().toISOString(),
+        origin: { source: 'discord', channelId },
+        payload: { content: [textContent(`[message edited] ${newContent}`)] },
+      } satisfies PushEventParams).catch(() => {});
+    });
+
+    this.discord.onMessageDelete((channelId, messageId) => {
+      if (!this.conn || !this.mcplEnabled) return;
+      if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
+      this.conn.sendRequest(method.PUSH_EVENT, {
+        featureSet: 'discord.messaging',
+        eventId: `discord_delete_${messageId}`,
+        timestamp: new Date().toISOString(),
+        origin: { source: 'discord', channelId },
+        payload: { content: [textContent(`[message deleted] ${messageId}`)] },
+      } satisfies PushEventParams).catch(() => {});
+    });
+
     this.discord.onChannelCreate((guildId, channel) => {
       if (!this.conn || !this.mcplEnabled) return;
-      const guild = this.discord.isConnected ? guildId : guildId;
-      const desc = toDescriptor(guildId, guild, channel);
+      const guildName = this.discord.getGuildName(guildId);
+      const desc = toDescriptor(guildId, guildName, channel);
       this.channelManager.register(desc);
       this.conn.sendNotification(method.CHANNELS_CHANGED, {
         added: [desc],
