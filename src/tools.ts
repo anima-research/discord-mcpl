@@ -13,42 +13,64 @@ export interface ToolDefinition {
   };
 }
 
+/** Reusable schema for the optional `files` attachment parameter on send tools. */
+const FILES_PROP = {
+  type: 'array',
+  description:
+    'Optional file attachments to upload with the message. Each entry is read ' +
+    'from a local filesystem path on the host (e.g. a file you created in your ' +
+    'workspace or sandbox). Up to 10 files per message; size limits are enforced ' +
+    'by Discord.',
+  items: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Absolute local filesystem path to the file to upload' },
+      name: { type: 'string', description: 'Optional display filename (defaults to the basename of path)' },
+      description: { type: 'string', description: 'Optional alt-text / description shown for accessibility' },
+    },
+    required: ['path'],
+  },
+};
+
 export const toolDefinitions: ToolDefinition[] = [
   {
     name: 'send_message',
-    description: 'Send a message to a Discord channel',
+    description: 'Send a message to a Discord channel, optionally with file attachments',
     inputSchema: {
       type: 'object',
       properties: {
         channelId: { type: 'string', description: 'Discord channel ID' },
-        content: { type: 'string', description: 'Message content' },
+        content: { type: 'string', description: 'Message content (optional if files are attached)' },
+        files: FILES_PROP,
       },
-      required: ['channelId', 'content'],
+      required: ['channelId'],
     },
   },
   {
     name: 'reply_message',
-    description: 'Reply to a specific message in a Discord channel',
+    description: 'Reply to a specific message in a Discord channel, optionally with file attachments',
     inputSchema: {
       type: 'object',
       properties: {
         channelId: { type: 'string', description: 'Discord channel ID' },
         messageId: { type: 'string', description: 'Message ID to reply to' },
-        content: { type: 'string', description: 'Reply content' },
+        content: { type: 'string', description: 'Reply content (optional if files are attached)' },
+        files: FILES_PROP,
       },
-      required: ['channelId', 'messageId', 'content'],
+      required: ['channelId', 'messageId'],
     },
   },
   {
     name: 'send_dm',
-    description: 'Send a direct message to a Discord user',
+    description: 'Send a direct message to a Discord user, optionally with file attachments',
     inputSchema: {
       type: 'object',
       properties: {
         userId: { type: 'string', description: 'Discord user ID' },
-        content: { type: 'string', description: 'Message content' },
+        content: { type: 'string', description: 'Message content (optional if files are attached)' },
+        files: FILES_PROP,
       },
-      required: ['userId', 'content'],
+      required: ['userId'],
     },
   },
   {

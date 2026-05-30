@@ -13,12 +13,54 @@ import {
   TextChannel,
   DMChannel,
   ChannelType,
+  AttachmentBuilder,
   type Message,
   type Guild,
   type GuildBasedChannel,
   type GuildMember,
   type User,
 } from 'discord.js';
+import { existsSync, statSync } from 'node:fs';
+import { basename } from 'node:path';
+
+/** Maximum attachments Discord accepts on a single message. */
+const MAX_DISCORD_ATTACHMENTS = 10;
+
+/** A file the agent wants to upload, read from a local path on the host. */
+export interface OutgoingFile {
+  /** Absolute local filesystem path to the file to upload. */
+  path: string;
+  /** Optional display filename (defaults to the basename of `path`). */
+  name?: string;
+  /** Optional alt-text / description shown for accessibility. */
+  description?: string;
+}
+
+/**
+ * Turn `OutgoingFile[]` specs into discord.js `AttachmentBuilder`s, validating
+ * each path up front so a bad path yields a clear error rather than an opaque
+ * discord.js failure mid-send. discord.js reads the path lazily at send time.
+ */
+function buildAttachments(files?: OutgoingFile[]): AttachmentBuilder[] {
+  if (!files || files.length === 0) return [];
+  if (files.length > MAX_DISCORD_ATTACHMENTS) {
+    throw new Error(
+      `Too many files: ${files.length} (Discord allows up to ${MAX_DISCORD_ATTACHMENTS} per message)`,
+    );
+  }
+  return files.map((f) => {
+    if (!f || typeof f.path !== 'string' || !f.path.trim()) {
+      throw new Error('Each file must have a non-empty string "path"');
+    }
+    if (!existsSync(f.path) || !statSync(f.path).isFile()) {
+      throw new Error(`File not found (or not a regular file): ${f.path}`);
+    }
+    const name = f.name && f.name.trim() ? f.name : basename(f.path);
+    const attachment = new AttachmentBuilder(f.path, { name });
+    if (f.description) attachment.setDescription(f.description);
+    return attachment;
+  });
+}
 
 // ── Public Types ──
 
@@ -243,35 +285,54 @@ export class DiscordAdapter {
   async sendMessage(
     channelId: string,
     content: string,
-    options?: { replyTo?: string },
+    options?: { replyTo?: string; files?: OutgoingFile[] },
   ): Promise<{ messageId: string }> {
     const channel = await this.client.channels.fetch(channelId);
     if (!channel || !('send' in channel)) {
       throw new Error(`Channel ${channelId} not found or not a text channel`);
     }
     const resolved = await this.resolveOutgoingMentions(channel, content);
+    const attachments = buildAttachments(options?.files);
     const chunks = this.splitForDiscord(resolved);
+    // Files-only message (no text): still send one message carrying the files.
+    if (chunks.length === 0 && attachments.length > 0) chunks.push('');
     let lastId = '';
     for (let i = 0; i < chunks.length; i++) {
+      // Attach files to the LAST chunk so they render after the full text.
+      const isLast = i === chunks.length - 1;
       const sent = await (channel as TextChannel | DMChannel).send({
-        content: chunks[i],
+        content: chunks[i] || undefined,
         reply: i === 0 && options?.replyTo ? { messageReference: options.replyTo } : undefined,
+        files: isLast && attachments.length > 0 ? attachments : undefined,
       });
       lastId = sent.id;
     }
     return { messageId: lastId };
   }
 
-  async sendDM(userId: string, content: string): Promise<{ messageId: string; channelId: string }> {
+  async sendDM(
+    userId: string,
+    content: string,
+    options?: { files?: OutgoingFile[] },
+  ): Promise<{ messageId: string; channelId: string }> {
     const user = await this.client.users.fetch(userId);
     // For DMs, the only resolvable user is the recipient. We resolve against
     // the DM channel we're about to send to. Return the DM channel ID too so
     // the caller can update sticky-reply state.
     const dm = await user.createDM();
     const resolved = await this.resolveOutgoingMentions(dm, content);
+    const attachments = buildAttachments(options?.files);
     const chunks = this.splitForDiscord(resolved);
+    if (chunks.length === 0 && attachments.length > 0) chunks.push('');
     let lastId = '';
-    for (const ch of chunks) { const sent = await user.send(ch); lastId = sent.id; }
+    for (let i = 0; i < chunks.length; i++) {
+      const isLast = i === chunks.length - 1;
+      const sent = await user.send({
+        content: chunks[i] || undefined,
+        files: isLast && attachments.length > 0 ? attachments : undefined,
+      });
+      lastId = sent.id;
+    }
     return { messageId: lastId, channelId: dm.id };
   }
 

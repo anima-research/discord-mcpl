@@ -45,13 +45,20 @@ import type {
   ChannelsOutgoingCompleteParams,
 } from '@connectome/mcpl-core';
 
-import type { DiscordAdapter, DiscordMessageData, DiscordAttachment } from './discord-adapter.js';
+import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile } from './discord-adapter.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor } from './channels.js';
 import { StateTracker } from './state.js';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+
+/** A Discord message must carry text and/or attachments — reject empty sends. */
+function requireContentOrFiles(content: string, files: OutgoingFile[] | undefined): void {
+  if ((!content || !content.trim()) && (!files || files.length === 0)) {
+    throw new Error('Provide "content", "files", or both — a message cannot be empty.');
+  }
+}
 
 /** chx-compat ignore prefix. ChapterX-style Discord bots send `m continue`
  *  as a no-op trigger to wake their model and immediately delete the message
@@ -485,39 +492,38 @@ export class DiscordMcplServer {
 
       case 'send_message': {
         const channelId = args.channelId as string;
-        const result = await this.discord.sendMessage(
-          channelId,
-          args.content as string,
-        );
-        this.stateTracker.recordSent(
-          result.messageId,
-          channelId,
-          args.content as string,
-        );
+        const content = (args.content as string | undefined) ?? '';
+        const files = args.files as OutgoingFile[] | undefined;
+        requireContentOrFiles(content, files);
+        const result = await this.discord.sendMessage(channelId, content, { files });
+        this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
         return this.augmentSendResult(result.messageId, channelId, shifted);
       }
 
       case 'reply_message': {
         const channelId = args.channelId as string;
+        const content = (args.content as string | undefined) ?? '';
+        const files = args.files as OutgoingFile[] | undefined;
+        requireContentOrFiles(content, files);
         const result = await this.discord.sendMessage(
           channelId,
-          args.content as string,
-          { replyTo: args.messageId as string },
+          content,
+          { replyTo: args.messageId as string, files },
         );
-        this.stateTracker.recordSent(
-          result.messageId,
-          channelId,
-          args.content as string,
-        );
+        this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
         return this.augmentSendResult(result.messageId, channelId, shifted);
       }
 
       case 'send_dm': {
+        const content = (args.content as string | undefined) ?? '';
+        const files = args.files as OutgoingFile[] | undefined;
+        requireContentOrFiles(content, files);
         const result = await this.discord.sendDM(
           args.userId as string,
-          args.content as string,
+          content,
+          { files },
         );
         const shifted = this.markOutboundSend(result.channelId);
         return this.augmentSendResult(result.messageId, result.channelId, shifted);
