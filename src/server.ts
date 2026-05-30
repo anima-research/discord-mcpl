@@ -217,16 +217,15 @@ export class DiscordMcplServer {
       channels: true,
       rollback: true,
       featureSets,
-      // Sticky-reply: we hook afterInference to auto-post the agent's
-      // text-only responses to the last-active channel. Blocking so the
-      // host awaits the Discord round-trip before proceeding to the next
-      // turn (10s timeout — plenty for a REST send). `beforeInference:
-      // false` because we don't inject context that way (mcpl-core-ts
-      // types ContextHooksCap with both fields required).
-      contextHooks: {
-        beforeInference: false,
-        afterInference: { blocking: true },
-      },
+      // NOTE: we intentionally no longer declare `contextHooks.afterInference`.
+      // Output routing ("where does a plain-text reply go") is a HOST concern,
+      // not a per-surface one — only the host sees the merged cross-surface
+      // event stream and can pick the true conversational locus. The host
+      // (agent-framework) now publishes text-only turns to the locus via
+      // channels/publish; this server is a pure publish executor. The old
+      // sticky auto-post that lived here would double-post against the host
+      // router and races the moment a second surface (e.g. Telegram) exists.
+      // See forking-knowledge-miner/docs/LOCUS-ROUTING-DESIGN.md.
     };
 
     const capabilities: InitializeCapabilities = {
@@ -619,36 +618,19 @@ export class DiscordMcplServer {
 
   // ── Sticky-reply state mutators ──
 
-  /** Build the tool-result object for a successful send_*. Always includes
-   *  the messageId; when the sticky channel just shifted as a side effect
-   *  of this send, also includes a human-readable note + the new sticky
-   *  channelId so the agent gets a clear signal that her text-only
-   *  replies will route to the new place from now on. */
+  /** Build the tool-result object for a successful send_*. Just the messageId
+   *  now — the old "sticky channel is now X / your text-only replies route
+   *  here" note was tied to the retired per-surface sticky and would be
+   *  misleading under host-owned routing (the host routes plain-text turns to
+   *  the conversational locus, i.e. the most recent *incoming* channel, not
+   *  the last channel this bot sent to). `_shifted` is kept in the signature
+   *  for call-site compatibility but no longer used. */
   private async augmentSendResult(
     messageId: string,
-    channelId: string,
-    shifted: boolean,
-  ): Promise<{ messageId: string; stickyChannel?: string; note?: string }> {
-    if (!shifted) {
-      return { messageId };
-    }
-    // Best-effort channel describe — falls back to the raw id if anything
-    // goes wrong, never throws.
-    let label = channelId;
-    try {
-      const desc = await this.discord.describeChannel(channelId);
-      label = desc.label;
-    } catch {
-      // keep the id
-    }
-    return {
-      messageId,
-      stickyChannel: channelId,
-      note:
-        `Sticky channel is now ${label}. Plain-text responses in your next ` +
-        `turn will auto-route here until a new inbound from elsewhere ` +
-        `(or another explicit send) moves it.`,
-    };
+    _channelId: string,
+    _shifted: boolean,
+  ): Promise<{ messageId: string }> {
+    return { messageId };
   }
 
 
@@ -673,90 +655,18 @@ export class DiscordMcplServer {
     return shifted;
   }
 
-  /** Handle the host's context/afterInference request. If the agent's
-   *  response was text-only (no send_* tool call) and there's a sticky
-   *  channel from a recent interaction, post the text there as if she'd
-   *  called send_message. Empty text and chx-noop strings are skipped. */
-  private async handleAfterInference(params: unknown): Promise<void> {
-    const p = (params ?? {}) as { assistantMessage?: string };
-    const text = (typeof p.assistantMessage === 'string' ? p.assistantMessage : '').trim();
-    const channelId = this.lastChannelId;
-    const replyTo = this.lastInboundMessageId;
-    const wasSent = this.sentInCurrentTurn;
-    // Reset turn state immediately — regardless of what we do below, the
-    // next inference is a fresh turn.
+  /** RETIRED: sticky auto-reply.
+   *
+   *  Output routing is now host-owned (the framework publishes text-only turns
+   *  to the conversational locus via channels/publish — see
+   *  LOCUS-ROUTING-DESIGN.md). This server no longer declares the
+   *  `contextHooks.afterInference` capability, so the host won't call this. The
+   *  stub is retained only so a stray afterInference request (e.g. from an
+   *  older host that still calls it) is a harmless no-op rather than a
+   *  double-post against the host router. */
+  private async handleAfterInference(_params: unknown): Promise<void> {
     this.sentInCurrentTurn = false;
-
-    if (!this.stickyReplyEnabled) {
-      dbg('afterInference:skip', { reason: 'disabled-by-env' });
-      return;
-    }
-    if (wasSent) {
-      dbg('afterInference:skip', { reason: 'agent-sent-via-tool' });
-      return;
-    }
-    if (!text) {
-      dbg('afterInference:skip', { reason: 'empty-text' });
-      return;
-    }
-    if (!channelId) {
-      dbg('afterInference:skip', { reason: 'no-sticky-channel', textPreview: text.slice(0, 80) });
-      return;
-    }
-    if (text.startsWith(CHX_NOOP_PREFIX)) {
-      dbg('afterInference:skip', { reason: 'chx-noop' });
-      return;
-    }
-    if (!isEnabled('discord.messaging', this.enabledFeatureSets)) {
-      dbg('afterInference:skip', { reason: 'discord.messaging-not-enabled' });
-      return;
-    }
-
-    try {
-      const result = await this.discord.sendMessage(
-        channelId,
-        text,
-        replyTo ? { replyTo } : undefined,
-      );
-      dbg('afterInference:sent', {
-        channelId,
-        messageId: result.messageId,
-        hadReplyTo: !!replyTo,
-        textLen: text.length,
-      });
-      // Clear replyTo after using it so subsequent auto-sends post as
-      // standalone messages rather than chaining replies to the same
-      // inbound. (Sticky channel stays.)
-      this.lastInboundMessageId = null;
-    } catch (err) {
-      const e = err as Error;
-      console.error('[discord-mcpl] sticky-reply auto-send failed:', e.message);
-      dbg('afterInference:send-failed', {
-        channelId,
-        error: e.message,
-        errorName: e.name,
-      });
-
-      // Surface the failure back into the agent's chronicle so it is visible
-      // rather than a silent divergence between her memory and the world. The
-      // event uses a "[discord-send-failed]" prefix so recipes can add a wake
-      // policy with a `filter` matching that prefix to enter-without-triggering
-      // (avoiding a retry loop on persistent failures). Without such a policy,
-      // the agent will simply wake on it and may respond.
-      if (this.conn && this.mcplEnabled && isEnabled('discord.messaging', this.enabledFeatureSets)) {
-        const errPreview = (e.message || String(e)).slice(0, 240);
-        this.conn.sendRequest(method.PUSH_EVENT, {
-          featureSet: 'discord.messaging',
-          eventId: `discord_send_failed_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          timestamp: new Date().toISOString(),
-          origin: { source: 'discord', channelId, kind: 'send-failed', errorName: e.name },
-          payload: { content: [textContent(
-            `[discord-send-failed] Your auto-reply to channel ${channelId} was not delivered: ${errPreview}. ` +
-            `The text remains in your chronicle.`,
-          )] },
-        } satisfies PushEventParams).catch(() => {});
-      }
-    }
+    dbg('afterInference:noop', { reason: 'sticky-retired-host-owns-routing' });
   }
 
   // ── Subscription persistence ──
@@ -1079,14 +989,22 @@ export class DiscordMcplServer {
     // `behavior: skip` (context yes, wake no).
     const botId = this.discord.botUserId;
     const isDM = msg.guildId === null;
-    // Direct @-mention OR a reply to one of the bot's own messages.
-    // Discord's "ping replied user" toggle controls only whether the
-    // bot appears in msg.mentions; the reply itself is addressed to the
-    // bot either way, so we treat both as the same flavor of "direct
-    // address" for wake + subscription-bypass purposes.
+    // Granular address signals. We expose these separately in the event
+    // metadata so the host's wake gate can compose intentional policies —
+    // notably: let a *bot* activate this bot only by an explicit @mention,
+    // never by a mere reply. That breaks auto-reply loops between two bots
+    // (a reply is structural; an @mention is deliberate) while humans keep
+    // waking the bot via reply or mention as before.
+    const isExplicitMention = botId !== null && msg.mentions.includes(botId);
+    // Discord's "ping replied user" toggle controls only whether the bot
+    // appears in msg.mentions; the reply itself is addressed to the bot
+    // either way.
     const isReplyToBot = botId !== null && msg.replyToUserId === botId;
-    const isMention =
-      (botId !== null && msg.mentions.includes(botId)) || isReplyToBot;
+    const isBot = msg.isBot;
+    // `isMention` (explicit OR reply) is retained for subscription-bypass /
+    // backward compatibility only — the wake decision uses the granular
+    // flags above via the gate.
+    const isMention = isExplicitMention || isReplyToBot;
     if (!isMention && !isDM && !this.isChannelSubscribed(msg.channelId)) {
       dbg('handleDiscordMessage:drop', {
         reason: 'ambient-not-subscribed',
@@ -1232,6 +1150,9 @@ export class DiscordMcplServer {
             threadName: msg.threadName,
             rawContent: msg.content,
             isMention,
+            isExplicitMention,
+            isReplyToBot,
+            isBot,
             isDM,
           },
         }],
@@ -1261,6 +1182,9 @@ export class DiscordMcplServer {
           authorId: msg.authorId,
           authorName: msg.authorName,
           isMention,
+          isExplicitMention,
+          isReplyToBot,
+          isBot,
           isDM,
         } as Record<string, unknown>,
         payload: {
