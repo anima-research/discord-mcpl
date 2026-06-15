@@ -127,13 +127,13 @@ async function normalizeImageForInference(
     // Animated: don't resize frames here. Inline as-is if small enough.
     if (isAnimated) {
       return buf.length <= IMAGE_OUTPUT_RAW_CAP
-        ? { data: buf.toString('base64'), mimeType: declaredCt || 'image/gif' }
+        ? { data: buf.toString('base64'), mimeType: `image/${meta.format ?? 'gif'}` }
         : null;
     }
 
     // Already within bounds and under cap → inline original bytes unchanged.
     if (longest > 0 && longest <= IMAGE_LONG_EDGE_MAX && buf.length <= IMAGE_OUTPUT_RAW_CAP) {
-      return { data: buf.toString('base64'), mimeType: declaredCt || `image/${meta.format ?? 'png'}` };
+      return { data: buf.toString('base64'), mimeType: `image/${meta.format ?? 'png'}` };
     }
 
     // Fresh pipeline per encode (sharp instances aren't safely reusable across
