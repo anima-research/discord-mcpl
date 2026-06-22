@@ -18,6 +18,7 @@ import {
   type Guild,
   type GuildBasedChannel,
   type GuildMember,
+  type Role,
   type User,
   type ChatInputCommandInteraction,
   type ApplicationCommandDataResolvable,
@@ -158,6 +159,47 @@ export interface HistoryMessage {
    *  signal here. */
   mentionsBot: boolean;
   timestamp: Date;
+}
+
+/** A possible mention target gathered from the guild/DM: a user or a role,
+ *  with the case-insensitive names it can be addressed by. */
+export interface MentionCandidate {
+  id: string;
+  aliases: string[];
+  kind: 'user' | 'role';
+}
+
+/** Rewrite human-readable `@handle` tokens in `content` to Discord ping syntax
+ *  — `<@id>` for users, `<@&id>` for roles — using the supplied candidates.
+ *
+ *  Pure (no Discord I/O) so it can be unit-tested. Rules:
+ *    - `@everyone` / `@here` are left as-is (Discord handles them natively).
+ *    - Users take priority on a name collision; a role is only used when no
+ *      user matches that handle.
+ *    - Only an unambiguous single match resolves; zero or multiple matches
+ *      leave the original text untouched (fail to ping over mis-ping).
+ *    - Single-token handles only ([A-Za-z0-9_.-]); multi-word names won't
+ *      resolve, matching the original behaviour. */
+export function applyMentionCandidates(
+  content: string,
+  candidates: MentionCandidate[],
+): string {
+  if (candidates.length === 0) return content;
+  return content.replace(/@([A-Za-z0-9_.][A-Za-z0-9_.-]*)/g, (whole, handle) => {
+    const lower = String(handle).toLowerCase();
+    if (lower === 'everyone' || lower === 'here') return whole;
+    const matches = (kind: 'user' | 'role') =>
+      candidates.filter(
+        (c) => c.kind === kind && c.aliases.some((a) => a.toLowerCase() === lower),
+      );
+    const users = matches('user');
+    if (users.length === 1) return `<@${users[0].id}>`;
+    if (users.length === 0) {
+      const roles = matches('role');
+      if (roles.length === 1) return `<@&${roles[0].id}>`;
+    }
+    return whole;
+  });
 }
 
 // ── Adapter ──
@@ -400,25 +442,34 @@ export class DiscordAdapter {
   }
 
   /** Resolve human-readable @handle mentions in outgoing content to Discord's
-   *  `<@USER_ID>` syntax. Lena learns the @handle form from incoming
-   *  cleanContent and tends to imitate it, but Discord only treats `<@id>`
-   *  as an actual ping. Resolution checks (case-insensitive) the channel's
-   *  guild members against:
-   *    - server nickname
-   *    - user's global display name
-   *    - user's username (handle)
-   *  Skips `@everyone` / `@here` (Discord handles those natively) and the
-   *  bot's own identity (don't self-ping when Lena writes about herself in
-   *  third person). Leaves the original text untouched when there are zero
-   *  matches or multiple ambiguous matches — better to fail to ping than
-   *  to ping the wrong person. */
+   *  ping syntax — `<@USER_ID>` for users, `<@&ROLE_ID>` for roles. Lena learns
+   *  the @handle form from incoming cleanContent and tends to imitate it, but
+   *  Discord only treats the bracket syntax as an actual ping.
+   *
+   *  User resolution checks (case-insensitive) the channel's guild members
+   *  against server nickname, global display name, and username. Role
+   *  resolution checks guild role names.
+   *
+   *  Priority: when a name matches both a user and a role, the USER wins
+   *  (people are pinged more often than roles, and a wrong role ping is
+   *  noisier). Roles are only used when no user matches that handle.
+   *
+   *  Skips `@everyone` / `@here` (Discord handles those natively, and so is the
+   *  default @everyone role) and the bot's own identity (don't self-ping when
+   *  Lena writes about herself in third person). Leaves the original text
+   *  untouched when there are zero matches or multiple ambiguous matches —
+   *  better to fail to ping than to ping the wrong person/role.
+   *
+   *  Note: emitting `<@&id>` only produces an actual ping if the role is
+   *  mentionable or the bot has the Mention Everyone permission; otherwise it
+   *  renders as a styled role link without notifying. That's a Discord-side
+   *  permission concern, not a parsing one. */
   private async resolveOutgoingMentions(
     channel: unknown,
     content: string,
   ): Promise<string> {
     const selfId = this.client.user?.id;
-    type Candidate = { id: string; aliases: string[] };
-    const candidates: Candidate[] = [];
+    const candidates: MentionCandidate[] = [];
 
     const ch = channel as { guild?: Guild; recipient?: User };
     if (ch.guild) {
@@ -436,7 +487,16 @@ export class DiscordAdapter {
           member.user.displayName,
           member.user.username,
         ].filter((s): s is string => typeof s === 'string' && s.length > 0);
-        candidates.push({ id: member.user.id, aliases });
+        candidates.push({ id: member.user.id, aliases, kind: 'user' });
+      }
+      // Roles. The role cache is gateway-maintained (Guilds intent) like
+      // members. Skip the default @everyone role (its id equals the guild id) —
+      // Discord pings @everyone natively and that handle is short-circuited.
+      for (const role of ch.guild.roles.cache.values() as IterableIterator<Role>) {
+        if (role.id === ch.guild.id) continue;
+        if (typeof role.name === 'string' && role.name.length > 0) {
+          candidates.push({ id: role.id, aliases: [role.name], kind: 'role' });
+        }
       }
     } else if (ch.recipient) {
       if (ch.recipient.id !== selfId) {
@@ -445,24 +505,11 @@ export class DiscordAdapter {
           ch.recipient.displayName,
           ch.recipient.username,
         ].filter((s): s is string => typeof s === 'string' && s.length > 0);
-        candidates.push({ id: ch.recipient.id, aliases });
+        candidates.push({ id: ch.recipient.id, aliases, kind: 'user' });
       }
     }
 
-    if (candidates.length === 0) return content;
-
-    // Discord usernames allow [a-z0-9._]; we match anything in that charset
-    // following `@`. Display names can contain spaces / unicode but allowing
-    // multi-word matches has too high a false-positive rate. Single-token
-    // handles only.
-    return content.replace(/@([A-Za-z0-9_.][A-Za-z0-9_.-]*)/g, (whole, handle) => {
-      const lower = String(handle).toLowerCase();
-      if (lower === 'everyone' || lower === 'here') return whole;
-      const matches = candidates.filter((c) =>
-        c.aliases.some((a) => a.toLowerCase() === lower),
-      );
-      return matches.length === 1 ? `<@${matches[0].id}>` : whole;
-    });
+    return applyMentionCandidates(content, candidates);
   }
 
   async deleteMessage(channelId: string, messageId: string): Promise<void> {

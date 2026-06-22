@@ -31,7 +31,13 @@ import type {
 } from '@connectome/mcpl-core';
 
 import { DiscordMcplServer } from '../src/server.js';
-import type { DiscordAdapter, DiscordMessageData, DiscordChannelInfo } from '../src/discord-adapter.js';
+import { applyMentionCandidates } from '../src/discord-adapter.js';
+import type {
+  DiscordAdapter,
+  DiscordMessageData,
+  DiscordChannelInfo,
+  MentionCandidate,
+} from '../src/discord-adapter.js';
 
 // ── Mock Discord Adapter ──
 
@@ -606,5 +612,52 @@ describe('DiscordMcplServer', () => {
       delete process.env.DISCORD_WATERMARK_FILE;
       if (existsSync(wmPath)) unlinkSync(wmPath);
     }
+  });
+});
+
+describe('applyMentionCandidates', () => {
+  const cands: MentionCandidate[] = [
+    { id: 'u_alice', aliases: ['Alice', 'alice_g'], kind: 'user' },
+    { id: 'r_mods', aliases: ['Moderators'], kind: 'role' },
+    { id: 'u_mods', aliases: ['Moderators'], kind: 'user' }, // name collision w/ role
+    { id: 'r_team', aliases: ['Team'], kind: 'role' },
+  ];
+
+  it('resolves a role mention to <@&id>', () => {
+    assert.equal(applyMentionCandidates('ping @Team please', cands), 'ping <@&r_team> please');
+  });
+
+  it('resolves a user mention to <@id>', () => {
+    assert.equal(applyMentionCandidates('hi @Alice', cands), 'hi <@u_alice>');
+  });
+
+  it('is case-insensitive for roles', () => {
+    assert.equal(applyMentionCandidates('@team', cands), '<@&r_team>');
+  });
+
+  it('prefers a user over a role on a name collision', () => {
+    // Both u_mods (user) and r_mods (role) are named "Moderators" → user wins.
+    assert.equal(applyMentionCandidates('@Moderators', cands), '<@u_mods>');
+  });
+
+  it('leaves @everyone / @here untouched', () => {
+    assert.equal(applyMentionCandidates('@everyone @here', cands), '@everyone @here');
+  });
+
+  it('leaves unknown handles untouched', () => {
+    assert.equal(applyMentionCandidates('@nobody', cands), '@nobody');
+  });
+
+  it('falls through to a role only when no user matches', () => {
+    const roleOnly: MentionCandidate[] = [{ id: 'r_x', aliases: ['Ops'], kind: 'role' }];
+    assert.equal(applyMentionCandidates('@Ops', roleOnly), '<@&r_x>');
+  });
+
+  it('does not resolve when a role name is ambiguous', () => {
+    const ambiguous: MentionCandidate[] = [
+      { id: 'r_a', aliases: ['Dup'], kind: 'role' },
+      { id: 'r_b', aliases: ['Dup'], kind: 'role' },
+    ];
+    assert.equal(applyMentionCandidates('@Dup', ambiguous), '@Dup');
   });
 });
