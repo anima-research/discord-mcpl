@@ -219,24 +219,27 @@ export class DiscordMcplServer {
   private sweepDone = false;
 
   /** Max messages to scan per channel during the reconnect catch-up sweep.
-   *  Tunable via DISCORD_CATCHUP_LIMIT; clamped to [1, 300]. Bounds REST cost
-   *  when a channel accumulated a lot while the bot was offline. */
+   *  Tunable via DISCORD_CATCHUP_LIMIT; clamped to [1, 10000], default 3000.
+   *  discord.js paginates the REST 100/call limit transparently. A long
+   *  offline gap in an active channel needs thousands scanned to surface all
+   *  missed mentions — 300 was far too low (a busy 2-week gap can be >1900). */
   private get catchupLimit(): number {
     const raw = process.env.DISCORD_CATCHUP_LIMIT;
-    if (!raw) return 100;
+    if (!raw) return 3000;
     const n = parseInt(raw, 10);
-    return Number.isFinite(n) && n > 0 && n <= 300 ? n : 100;
+    return Number.isFinite(n) && n > 0 && n <= 10000 ? n : 3000;
   }
 
-  /** How many backscroll messages to fetch on first interaction in a
-   *  channel. Tunable via DISCORD_BACKSCROLL_LIMIT env var; clamped to
-   *  [1, 300] (Discord's REST limit per fetch call is 100, but discord.js
-   *  paginates above that — see messages.fetch). */
+  /** How many backscroll messages to fetch on first interaction / via the
+   *  history tools. Tunable via DISCORD_BACKSCROLL_LIMIT; clamped to
+   *  [1, 10000], default 80 (Discord's REST limit per fetch is 100, but
+   *  discord.js paginates above that — see messages.fetch). Raise it to let
+   *  the agent browse deep back to old mentions. */
   private get backscrollLimit(): number {
     const raw = process.env.DISCORD_BACKSCROLL_LIMIT;
     if (!raw) return 80;
     const n = parseInt(raw, 10);
-    return Number.isFinite(n) && n > 0 && n <= 300 ? n : 80;
+    return Number.isFinite(n) && n > 0 && n <= 10000 ? n : 80;
   }
 
   // ── Sticky-channel auto-reply ──
