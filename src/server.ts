@@ -1333,6 +1333,9 @@ export class DiscordMcplServer {
       const meta = await this.discord.getChannelMeta(channelId).catch(() => null);
       const attrs: string[] = [];
       if (meta?.name) attrs.push(`channel="#${meta.name}"`);
+      // channelId is load-bearing: it's what fetch_around/fetch_history need to
+      // let the agent jump to any of these messages and read the full context.
+      attrs.push(`channelId="${channelId}"`);
       if (meta?.guildName) attrs.push(`guild=${JSON.stringify(meta.guildName)}`);
       else if (isDM) attrs.push('dm="true"');
       attrs.push(`count="${kept.length}"`);
@@ -1345,7 +1348,9 @@ export class DiscordMcplServer {
             : '';
         // In a full-backscroll block, flag which lines were the actual pings.
         const mark = keepAll && m.mentionsBot ? ' (mention)' : '';
-        return `[${ts}] ${m.authorName}${mark}: ${m.cleanContent}${att}`;
+        // Lead each line with the message id so the agent can
+        // fetch_around(channelId, id) to read the surrounding conversation.
+        return `[${ts} id=${m.id}] ${m.authorName}${mark}: ${m.cleanContent}${att}`;
       });
       const block = [
         `<missed ${attrs.join(' ')}>`,
