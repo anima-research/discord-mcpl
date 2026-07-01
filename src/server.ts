@@ -2073,6 +2073,12 @@ export class DiscordMcplServer {
           guildId: msg.guildId,
           guildName: msg.guildName,
           channelId: msg.channelId,
+          // The MCPL composite channel id (`discord:{guild|dm}:{channel}`) — the
+          // form the host registers and routes replies to. Raw `channelId` above
+          // is Discord-internal; DMs especially only ever arrive via push/event
+          // (channel closed), so without this the host can't route a reply back
+          // to the DM (item-3 redux, DM sub-case).
+          mcplChannelId: channelMcplId,
           channelName: msg.channelName,
           threadId: msg.threadId,
           threadName: msg.threadName,
