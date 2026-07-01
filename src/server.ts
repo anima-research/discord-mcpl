@@ -186,6 +186,13 @@ export class DiscordMcplServer {
   private subscribedChannels = new Set<string>();
   private subscriptionsLoaded = false;
 
+  /** Channels the agent has explicitly MUTED: no ambient, no mention/reply wake,
+   *  and no auto-subscribe-on-mention. Dropped at the top of
+   *  handleDiscordMessage. Persisted to a sibling of DISCORD_SUBSCRIPTIONS_FILE
+   *  (…​.muted.json), or DISCORD_MUTED_CHANNELS_FILE if set. */
+  private mutedChannels = new Set<string>();
+  private mutedLoaded = false;
+
   /** Per-channel watermark of the highest Discord message id forwarded to
    *  the host. Used by the auto-subscribe-on-mention flow to fetch only
    *  the backscroll Lena hasn't already seen, and by the reconnect catch-up
@@ -1008,6 +1015,37 @@ export class DiscordMcplServer {
           : `Channel ${channelId} was not subscribed.`;
       }
 
+      case 'mute_channel': {
+        const channelId = args.channelId as string;
+        if (typeof channelId !== 'string' || channelId.length === 0) {
+          throw new Error('channelId is required');
+        }
+        this.ensureMutedLoaded();
+        const wasNew = !this.mutedChannels.has(channelId);
+        this.mutedChannels.add(channelId);
+        if (wasNew) this.saveMuted();
+        // Muting implies leaving: drop any ambient subscription so the channel
+        // stops delivering; it also won't auto-subscribe back in while muted.
+        this.ensureSubscriptionsLoaded();
+        if (this.subscribedChannels.delete(channelId)) this.saveSubscriptions();
+        return wasNew
+          ? `Muted channel ${channelId}: no ambient, no wake on mention/reply, and it will not auto-subscribe you back in. Reverse with unmute_channel("${channelId}").`
+          : `Channel ${channelId} was already muted.`;
+      }
+
+      case 'unmute_channel': {
+        const channelId = args.channelId as string;
+        if (typeof channelId !== 'string' || channelId.length === 0) {
+          throw new Error('channelId is required');
+        }
+        this.ensureMutedLoaded();
+        const removed = this.mutedChannels.delete(channelId);
+        if (removed) this.saveMuted();
+        return removed
+          ? `Unmuted channel ${channelId}. Mentions and DMs will reach you again; use subscribe_channel("${channelId}") to also receive ambient.`
+          : `Channel ${channelId} was not muted.`;
+      }
+
       case 'list_subscriptions': {
         this.ensureSubscriptionsLoaded();
         this.ensureWatermarkLoaded();
@@ -1173,6 +1211,48 @@ export class DiscordMcplServer {
   private isChannelSubscribed(channelId: string): boolean {
     this.ensureSubscriptionsLoaded();
     return this.subscribedChannels.has(channelId);
+  }
+
+  // Mute persistence: DISCORD_MUTED_CHANNELS_FILE, else a sibling of the
+  // subscriptions file (…​.muted.json). In-memory when neither is available.
+  private mutedFile(): string | undefined {
+    const explicit = process.env.DISCORD_MUTED_CHANNELS_FILE;
+    if (explicit && explicit.length > 0) return explicit;
+    const sub = this.subscriptionsFile();
+    if (!sub) return undefined;
+    return sub.replace(/\.json$/i, '') + '.muted.json';
+  }
+
+  private ensureMutedLoaded(): void {
+    if (this.mutedLoaded) return;
+    this.mutedLoaded = true;
+    const path = this.mutedFile();
+    if (!path || !existsSync(path)) return;
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8'));
+      if (Array.isArray(parsed)) {
+        for (const id of parsed) if (typeof id === 'string' && id.length > 0) this.mutedChannels.add(id);
+      }
+      dbg('muted:loaded', { count: this.mutedChannels.size, path });
+    } catch (err) {
+      console.error('[discord-mcpl] Failed to load muted channels:', (err as Error).message);
+    }
+  }
+
+  private saveMuted(): void {
+    const path = this.mutedFile();
+    if (!path) return;
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify([...this.mutedChannels].sort(), null, 2) + '\n');
+    } catch (err) {
+      console.error('[discord-mcpl] Failed to save muted channels:', (err as Error).message);
+    }
+  }
+
+  private isChannelMuted(channelId: string): boolean {
+    this.ensureMutedLoaded();
+    return this.mutedChannels.has(channelId);
   }
 
   // ── Watermark persistence (for offline catch-up) ──
@@ -1809,6 +1889,14 @@ export class DiscordMcplServer {
 
     if (!isEnabled('discord.messaging', this.enabledFeatureSets)) {
       dbg('handleDiscordMessage:drop', { reason: 'discord.messaging-disabled', enabled: [...this.enabledFeatureSets] });
+      return;
+    }
+
+    // Muted channel: drop everything — ambient AND mentions/replies — before the
+    // mention/auto-subscribe logic below, so a muted channel can neither wake the
+    // agent nor auto-subscribe it back in.
+    if (this.isChannelMuted(msg.channelId)) {
+      dbg('handleDiscordMessage:drop', { reason: 'muted', channelId: msg.channelId });
       return;
     }
 

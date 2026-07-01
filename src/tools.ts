@@ -267,6 +267,34 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
   {
+    name: 'mute_channel',
+    description:
+      'Mute a Discord channel entirely: no ambient messages, no wake on @mentions ' +
+      'or replies, and it will NOT auto-subscribe you back in when mentioned. Also ' +
+      'drops any existing ambient subscription. Use this to stay out of a channel ' +
+      'that keeps pulling you in. Persisted across restarts. Reverse with unmute_channel.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'Channel to mute. ' + CHANNEL_ID_DESC },
+      },
+      required: ['channelId'],
+    },
+  },
+  {
+    name: 'unmute_channel',
+    description:
+      'Un-mute a Discord channel: mentions and DMs reach you again. Does not by ' +
+      'itself re-subscribe ambient — use subscribe_channel for that. Persisted across restarts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'Channel to unmute. ' + CHANNEL_ID_DESC },
+      },
+      required: ['channelId'],
+    },
+  },
+  {
     name: 'list_subscriptions',
     description:
       'List the Discord channels currently subscribed for ambient message ' +

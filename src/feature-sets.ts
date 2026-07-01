@@ -85,6 +85,8 @@ export function featureSetForTool(toolName: string): string | undefined {
       return 'discord.history';
     case 'subscribe_channel':
     case 'unsubscribe_channel':
+    case 'mute_channel':
+    case 'unmute_channel':
     case 'list_subscriptions':
     case 'channel_missed':
       return 'discord.subscriptions';
