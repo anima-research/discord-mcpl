@@ -258,6 +258,40 @@ export class DiscordMcplServer {
     return Number.isFinite(n) && n > 0 && n <= 10000 ? n : 80;
   }
 
+  /** Per-channel backscroll limits: DISCORD_BACKSCROLL_CHANNELS=
+   *  "<channelId>:<n>,<channelId>:<n>". For a listed channel the value
+   *  overrides DISCORD_BACKSCROLL_LIMIT for first-interaction backscroll AND
+   *  hard-caps agent-requested history (fetch_history / fetch_around) in that
+   *  channel. Use for channels whose history the agent should only ever see a
+   *  sliver of (e.g. sensitive or classifier-tripping backlogs). Unlisted
+   *  channels behave as before. Parsed per call so env edits + restart apply;
+   *  malformed entries are ignored. */
+  private get backscrollChannelLimits(): Map<string, number> {
+    const out = new Map<string, number>();
+    const raw = process.env.DISCORD_BACKSCROLL_CHANNELS;
+    if (!raw) return out;
+    for (const part of raw.split(',')) {
+      const [id, nStr] = part.trim().split(':');
+      const n = parseInt(nStr ?? '', 10);
+      if (id && Number.isFinite(n) && n >= 0 && n <= 10000) out.set(id, n);
+    }
+    return out;
+  }
+
+  /** Effective first-interaction backscroll for a channel: per-channel
+   *  override when configured, else the global backscrollLimit. */
+  private backscrollLimitFor(channelId: string): number {
+    return this.backscrollChannelLimits.get(channelId) ?? this.backscrollLimit;
+  }
+
+  /** Cap an agent-requested history limit by the channel's configured
+   *  per-channel backscroll limit. Channels without a per-channel entry are
+   *  NOT capped (agent may browse freely, as before). */
+  private capHistoryLimit(channelId: string, requested: number): number {
+    const cap = this.backscrollChannelLimits.get(channelId);
+    return cap === undefined ? requested : Math.min(requested, cap);
+  }
+
   // ── Sticky-channel auto-reply ──
   //
   // When the agent emits a text-only response (no send_* tool call), there's
@@ -1039,7 +1073,9 @@ export class DiscordMcplServer {
         return await this.discord.fetchHistory(
           args.channelId as string,
           {
-            limit: (args.limit as number) ?? 50,
+            // Per-channel backscroll cap (DISCORD_BACKSCROLL_CHANNELS) also
+            // bounds agent-requested history in that channel.
+            limit: this.capHistoryLimit(args.channelId as string, (args.limit as number) ?? 50),
             ...(args.before ? { before: args.before as string } : {}),
             ...(args.after ? { after: args.after as string } : {}),
           },
@@ -1049,7 +1085,7 @@ export class DiscordMcplServer {
         return await this.discord.fetchAround(
           args.channelId as string,
           args.messageId as string,
-          (args.limit as number) ?? 50,
+          this.capHistoryLimit(args.channelId as string, (args.limit as number) ?? 50),
         );
 
       case 'create_text_channel':
@@ -2160,7 +2196,7 @@ export class DiscordMcplServer {
       let backscrollMsgs: Awaited<ReturnType<typeof this.discord.fetchHistory>> = [];
       try {
         backscrollMsgs = await this.discord.fetchHistory(msg.channelId, {
-          limit: this.backscrollLimit,
+          limit: this.backscrollLimitFor(msg.channelId),
           before: msg.id, // never include the triggering message itself
           ...(watermark ? { after: watermark } : {}),
         });
