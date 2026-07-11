@@ -51,6 +51,7 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor } from './channels.js';
+import { saveFiltersFile, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -1235,9 +1236,128 @@ export class DiscordMcplServer {
         };
       }
 
+      case 'filters_get': {
+        const f = this.discord.getFilters();
+        const path = process.env.DISCORD_FILTERS_FILE;
+        return {
+          hotAdjustable: !!path,
+          filtersFile: path ?? null,
+          guildIds: f.guildIds ?? null,
+          guildChannels: f.guildChannels ?? null,
+          dmUsers: f.dmUsers ?? null,
+          note:
+            'null = unrestricted. These filters gate which Discord events reach you; ' +
+            'they are not Discord-side permissions — the bot must also be a member of a guild to see it.' +
+            (path
+              ? ''
+              : ' Hot updates are disabled: set DISCORD_FILTERS_FILE in the environment (one restart) to enable filters_update.'),
+        };
+      }
+
+      case 'filters_update':
+        return await this.filtersUpdate(args);
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
+  }
+
+  /** Hot-apply a whitelist change: mutate the filters file (source of truth),
+   *  swap the adapter's in-memory filters, and register any newly-visible
+   *  channels with the host. See tools.ts for the argument semantics. */
+  private async filtersUpdate(args: Record<string, unknown>): Promise<unknown> {
+    const path = process.env.DISCORD_FILTERS_FILE;
+    if (!path) {
+      throw new Error(
+        'Hot filter updates are disabled: DISCORD_FILTERS_FILE is not set. ' +
+          'Set it in the environment and restart once to enable.',
+      );
+    }
+    const current = this.discord.getFilters();
+    const next: DiscordFilters = {
+      guildIds: current.guildIds ? [...current.guildIds] : undefined,
+      guildChannels: current.guildChannels
+        ? Object.fromEntries(Object.entries(current.guildChannels).map(([g, c]) => [g, [...c]]))
+        : undefined,
+      dmUsers: current.dmUsers ? [...current.dmUsers] : undefined,
+    };
+    const notes: string[] = [];
+
+    const addGuilds = (args.addGuilds as string[] | undefined) ?? [];
+    const removeGuilds = (args.removeGuilds as string[] | undefined) ?? [];
+    if ((addGuilds.length || removeGuilds.length) && !next.guildIds?.length) {
+      // Currently unrestricted: materialize the implicit allow-list (every
+      // guild the bot is in) so an add doesn't silently become "ONLY this
+      // guild" and a remove has something to remove from.
+      next.guildIds = (await this.discord.listGuilds()).map((g) => g.id);
+      notes.push(
+        'Guild filter was unrestricted; materialized it as the list of all current guilds before applying your change.',
+      );
+    }
+    for (const entry of addGuilds) {
+      const [gid, chans] = entry.split(':', 2);
+      if (!gid) continue;
+      if (!next.guildIds!.includes(gid)) next.guildIds!.push(gid);
+      if (chans) {
+        const wanted = chans.split('+').map((s) => s.trim()).filter(Boolean);
+        const existing = next.guildChannels?.[gid];
+        if (existing) {
+          (next.guildChannels ??= {})[gid] = [...new Set([...existing, ...wanted])];
+        } else if (!current.guildIds?.includes(gid)) {
+          // New guild with an explicit channel list -> restrict to it.
+          (next.guildChannels ??= {})[gid] = wanted;
+        } else {
+          notes.push(
+            `Guild ${gid} already allows all channels; the channel list on "${entry}" is a no-op.`,
+          );
+        }
+      } else if (next.guildChannels?.[gid]) {
+        // Bare guild id = whole guild -> drop the channel restriction.
+        delete next.guildChannels[gid];
+        notes.push(`Guild ${gid}: channel restriction removed — all channels now allowed.`);
+      }
+    }
+    for (const gid of removeGuilds) {
+      next.guildIds = next.guildIds!.filter((g) => g !== gid);
+      if (next.guildChannels) delete next.guildChannels[gid];
+    }
+
+    if (args.setDmUsers !== undefined) {
+      const list = (args.setDmUsers as string[]).map(String).filter(Boolean);
+      next.dmUsers = list.length ? list : undefined;
+      if (!list.length) notes.push('DM whitelist cleared — DMs from ANYONE are now delivered.');
+    }
+
+    saveFiltersFile(path, next);
+    const diff = this.discord.updateFilters(next);
+    const refreshed = diff.addedGuilds.length ? this.refreshChannels() : null;
+    console.error(
+      `[discord-mcpl] filters updated via tool (guilds +${diff.addedGuilds.length}/-${diff.removedGuilds.length})`,
+    );
+
+    const applied = this.discord.getFilters();
+    if (diff.removedGuilds.length) {
+      notes.push(
+        'Removed guilds stop delivering events immediately, but their channels stay listed on the host until restart.',
+      );
+    }
+    return {
+      applied: {
+        guildIds: applied.guildIds ?? null,
+        guildChannels: applied.guildChannels ?? null,
+        dmUsers: applied.dmUsers ?? null,
+      },
+      guildsNowDelivering: diff.addedGuilds,
+      guildsStoppedDelivering: diff.removedGuilds,
+      newChannelsRegistered: refreshed?.added ?? [],
+      notes,
+    };
+  }
+
+  /** Re-register channels after an externally-driven filter change (the
+   *  filters-file hot-reload poller in index.ts). */
+  applyFilterChange(): void {
+    this.refreshChannels();
   }
 
   // ── Sticky-reply state mutators ──

@@ -15,12 +15,25 @@
  *                       When set, DMs from anyone else are dropped.
  *   DISCORD_ADMIN_USERS - Optional: Comma-separated user IDs allowed to use
  *                       admin slash commands (/undo). Unset = nobody.
+ *   DISCORD_FILTERS_FILE - Optional: path to a JSON file holding the guild/
+ *                       channel + DM whitelists (see filters.ts for schema).
+ *                       When set, the file wins over DISCORD_GUILD_ID /
+ *                       DISCORD_DM_USERS (and is seeded from them if absent),
+ *                       and edits to it are HOT-RELOADED within ~3s — no
+ *                       restart. Also enables the filters_get/filters_update
+ *                       agent tools.
  */
 
 import * as net from 'node:net';
 import { McplConnection } from '@connectome/mcpl-core';
 import { DiscordAdapter } from './discord-adapter.js';
 import { DiscordMcplServer } from './server.js';
+import {
+  parseFiltersFromEnv,
+  loadFiltersFile,
+  saveFiltersFile,
+  filtersFileMtime,
+} from './filters.js';
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -39,28 +52,35 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // DISCORD_GUILD_ID entries are either a bare guild id (all channels) or
-  // `guildId:channelId+channelId+…` to whitelist specific channels in that
-  // guild (threads under a whitelisted channel are included).
-  //   e.g. DISCORD_GUILD_ID=111,222:333+444
-  const rawGuilds = process.env.DISCORD_GUILD_ID?.split(',').map((s) => s.trim()).filter(Boolean);
-  let guildIds: string[] | undefined;
-  let guildChannels: Record<string, string[]> | undefined;
-  if (rawGuilds?.length) {
-    guildIds = [];
-    for (const entry of rawGuilds) {
-      const [gid, chans] = entry.split(':', 2);
-      guildIds.push(gid);
-      if (chans) {
-        (guildChannels ??= {})[gid] = chans.split('+').map((s) => s.trim()).filter(Boolean);
+  // Event filters: env vars are the seed; DISCORD_FILTERS_FILE (when set)
+  // becomes the live source of truth and is hot-reloaded below.
+  const filtersFile = process.env.DISCORD_FILTERS_FILE;
+  let filters = parseFiltersFromEnv();
+  if (filtersFile) {
+    const fromFile = loadFiltersFile(filtersFile);
+    if (fromFile) {
+      filters = fromFile;
+      console.error(`[discord-mcpl] filters loaded from ${filtersFile}`);
+    } else {
+      try {
+        saveFiltersFile(filtersFile, filters);
+        console.error(`[discord-mcpl] filters file seeded from env -> ${filtersFile}`);
+      } catch (err) {
+        console.error(
+          `[discord-mcpl] could not seed filters file ${filtersFile}:`,
+          (err as Error).message,
+        );
       }
     }
   }
 
-  const dmUsers = process.env.DISCORD_DM_USERS?.split(',').map((s) => s.trim()).filter(Boolean);
-
   // Connect Discord first
-  const discord = new DiscordAdapter({ token, guildIds, guildChannels, dmUsers });
+  const discord = new DiscordAdapter({
+    token,
+    guildIds: filters.guildIds,
+    guildChannels: filters.guildChannels,
+    dmUsers: filters.dmUsers,
+  });
 
   const discordReady = new Promise<void>((resolve) => {
     discord.onReady(() => {
@@ -73,6 +93,36 @@ async function main(): Promise<void> {
   await discordReady;
 
   const server = new DiscordMcplServer(discord);
+
+  // Hot-reload: poll the filters file mtime and apply changes live. Covers
+  // edits from any source (human, ops tooling, the filters_update tool —
+  // which also applies its change directly; the poller is then an idempotent
+  // no-op re-apply). Parse failures keep the previous filters (fail-safe).
+  if (filtersFile) {
+    let lastMtime = filtersFileMtime(filtersFile);
+    const poll = setInterval(() => {
+      const m = filtersFileMtime(filtersFile);
+      if (m === null || m === lastMtime) return; // missing (mid-rename) or unchanged
+      lastMtime = m;
+      const next = loadFiltersFile(filtersFile);
+      if (!next) {
+        console.error(
+          `[discord-mcpl] filters file changed but is unparseable — keeping previous filters (${filtersFile})`,
+        );
+        return;
+      }
+      const diff = discord.updateFilters(next);
+      console.error(
+        `[discord-mcpl] filters hot-reloaded from ${filtersFile} ` +
+          `(guilds +${diff.addedGuilds.length}/-${diff.removedGuilds.length})`,
+      );
+      if (diff.addedGuilds.length) {
+        // Newly-allowed guilds: make their channels known to the host.
+        server.applyFilterChange();
+      }
+    }, 3000);
+    poll.unref();
+  }
 
   // Register slash commands (/undo) and wire the interaction handler.
   // Fail-open: command registration needs the applications.commands scope;

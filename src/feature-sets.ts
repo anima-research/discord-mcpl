@@ -96,6 +96,8 @@ export function featureSetForTool(toolName: string): string | undefined {
     case 'list_guilds':
     case 'list_channels':
     case 'refresh_channels':
+    case 'filters_get':
+    case 'filters_update':
       return undefined; // Always available
     default:
       return undefined;

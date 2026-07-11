@@ -181,6 +181,53 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
   {
+    name: 'filters_get',
+    description:
+      'Show the active event filters: which guilds/channels can deliver events to you ' +
+      '(guild whitelist, optional per-guild channel whitelist) and which users may DM you. ' +
+      'null means unrestricted. Filters gate delivery only — the bot must also be a ' +
+      'member of a guild to see it at all.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'filters_update',
+    description:
+      'Hot-adjust the event filters — takes effect immediately, no restart. Requires ' +
+      'DISCORD_FILTERS_FILE to be configured (filters_get tells you). If the guild filter ' +
+      'is currently unrestricted, the first add/remove materializes it as the list of all ' +
+      'current guilds first, so nothing silently drops. Newly-allowed guilds have their ' +
+      'channels registered right away.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        addGuilds: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Guilds to allow. Each entry is a raw guild id ("111" = every channel; on an ' +
+            'already-restricted guild this LIFTS the channel restriction) or ' +
+            '"111:222+333" (only those channel ids; merges into an existing channel list).',
+        },
+        removeGuilds: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Guild ids to remove from the whitelist. Their events stop being delivered immediately.',
+        },
+        setDmUsers: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Replace the DM-user whitelist with these user ids. CAREFUL: an empty array ' +
+            'means UNRESTRICTED (DMs from anyone), matching the env-unset semantics. Omit to leave DMs unchanged.',
+        },
+      },
+    },
+  },
+  {
     name: 'fetch_history',
     description:
       'Fetch message history from a channel. By default returns the most recent ' +

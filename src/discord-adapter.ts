@@ -424,6 +424,67 @@ export class DiscordAdapter {
     }
   }
 
+  /** Snapshot of the active event filters (for filters_get and diffing).
+   *  `undefined` fields mean unrestricted. */
+  getFilters(): { guildIds?: string[]; guildChannels?: Record<string, string[]>; dmUsers?: string[] } {
+    return {
+      guildIds: this.guildIds ? [...this.guildIds] : undefined,
+      guildChannels: this.guildChannels
+        ? Object.fromEntries([...this.guildChannels].map(([g, s]) => [g, [...s]]))
+        : undefined,
+      dmUsers: this.dmUsers ? [...this.dmUsers] : undefined,
+    };
+  }
+
+  /** Hot-swap the event filters (guild/channel whitelist + DM whitelist) at
+   *  runtime — the fix for "whitelist changes need a full restart". All
+   *  filter checks read the instance fields on every event, so the swap takes
+   *  effect immediately. Returns the guild-level diff relative to the bot's
+   *  actual guild membership so the caller can re-register channels and log.
+   *
+   *  Newly-allowed guilds the bot is already a member of also get their slash
+   *  commands registered here (startup-time registration skipped them while
+   *  they were filtered out). */
+  updateFilters(filters: {
+    guildIds?: string[];
+    guildChannels?: Record<string, string[]>;
+    dmUsers?: string[];
+  }): { addedGuilds: string[]; removedGuilds: string[] } {
+    const before = this.guildIds;
+    this.guildIds = filters.guildIds?.length ? [...filters.guildIds] : undefined;
+    this.guildChannels =
+      filters.guildChannels && Object.keys(filters.guildChannels).length
+        ? new Map(Object.entries(filters.guildChannels).map(([g, chans]) => [g, new Set(chans)]))
+        : undefined;
+    this.dmUsers = filters.dmUsers?.length ? new Set(filters.dmUsers) : undefined;
+
+    const allowed = (ids: string[] | undefined, gid: string): boolean =>
+      !ids?.length || ids.includes(gid);
+    const addedGuilds: string[] = [];
+    const removedGuilds: string[] = [];
+    for (const guild of this.client.guilds.cache.values()) {
+      const was = allowed(before, guild.id);
+      const now = allowed(this.guildIds, guild.id);
+      if (!was && now) addedGuilds.push(guild.id);
+      else if (was && !now) removedGuilds.push(guild.id);
+    }
+
+    if (this.guildCommandDefs) {
+      for (const gid of addedGuilds) {
+        this.client.guilds.cache
+          .get(gid)
+          ?.commands.set(this.guildCommandDefs)
+          .catch((err: Error) => {
+            console.error(
+              `[discord-mcpl] Failed to register commands in newly-allowed guild ${gid}:`,
+              err.message,
+            );
+          });
+      }
+    }
+    return { addedGuilds, removedGuilds };
+  }
+
   onChannelCreate(handler: (guildId: string, channel: DiscordChannelInfo) => void): void {
     this.channelCreateHandler = handler;
   }
