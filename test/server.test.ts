@@ -14,7 +14,7 @@ import {
   McplConnection,
   textContent,
   method,
-} from '@connectome/mcpl-core';
+} from '@animalabs/mcpl-core';
 
 import type {
   McplInitializeParams,
@@ -28,7 +28,7 @@ import type {
   ChannelsListResult,
   ChannelsPublishParams,
   ChannelsPublishResult,
-} from '@connectome/mcpl-core';
+} from '@animalabs/mcpl-core';
 
 import { DiscordMcplServer } from '../src/server.js';
 import { applyMentionCandidates } from '../src/discord-adapter.js';

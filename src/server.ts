@@ -15,7 +15,7 @@ import {
   ERR_UNKNOWN_FEATURE_SET,
   ERR_UNKNOWN_CHANNEL,
   ERR_CHECKPOINT_NOT_FOUND,
-} from '@connectome/mcpl-core';
+} from '@animalabs/mcpl-core';
 
 import type {
   JsonRpcRequest,
@@ -43,7 +43,7 @@ import type {
   ContentBlock,
   ChannelsOutgoingChunkParams,
   ChannelsOutgoingCompleteParams,
-} from '@connectome/mcpl-core';
+} from '@animalabs/mcpl-core';
 
 import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile } from './discord-adapter.js';
 import type { ChatInputCommandInteraction } from 'discord.js';

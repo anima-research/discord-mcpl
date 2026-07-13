@@ -1,5 +1,5 @@
 {
-  "name": "@connectome/discord-mcpl",
+  "name": "@animalabs/discord-mcpl",
   "version": "0.1.2",
   "type": "module",
   "main": "./dist/src/index.js",
@@ -15,7 +15,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@connectome/mcpl-core": "file:../mcpl-core-ts",
+    "@animalabs/mcpl-core": "file:../mcpl-core-ts",
     "discord.js": "^14.16.0",
     "sharp": "^0.33.5"
   },
