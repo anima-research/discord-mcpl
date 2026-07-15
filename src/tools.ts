@@ -107,6 +107,19 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
   {
+    name: 'remove_reaction',
+    description: 'Remove this bot\'s reaction (emoji) from a message',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: CHANNEL_ID_DESC },
+        messageId: { type: 'string', description: 'Message whose reaction should be removed. ' + MESSAGE_ID_KIND },
+        emoji: { type: 'string', description: 'The unicode or custom emoji previously added by this bot.' },
+      },
+      required: ['channelId', 'messageId', 'emoji'],
+    },
+  },
+  {
     name: 'edit_message',
     description: 'Edit a message sent by this bot',
     inputSchema: {

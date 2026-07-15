@@ -55,6 +55,7 @@ class MockDiscordAdapter {
   sentMessages: Array<{ channelId: string; content: string; replyTo?: string }> = [];
   deletedMessages: Array<{ channelId: string; messageId: string }> = [];
   reactions: Array<{ channelId: string; messageId: string; emoji: string }> = [];
+  removedReactions: Array<{ channelId: string; messageId: string; emoji: string }> = [];
   private nextMessageId = 1;
 
   get isConnected(): boolean { return true; }
@@ -105,6 +106,10 @@ class MockDiscordAdapter {
 
   async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     this.reactions.push({ channelId, messageId, emoji });
+  }
+
+  async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    this.removedReactions.push({ channelId, messageId, emoji });
   }
 
   /** Messages the next fetchHistory/fetchAround call should return. Tests set
@@ -325,6 +330,63 @@ describe('DiscordMcplServer', () => {
 
     client.close();
     await serverPromise;
+  });
+
+  it('tools/call remove_reaction removes only this bot reaction through the adapter', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+
+    await mcpHandshake(client);
+
+    const result = (await client.sendRequest('tools/call', {
+      name: 'remove_reaction',
+      arguments: { channelId: 'c1', messageId: 'm1', emoji: '🫥' },
+    })) as { isError?: boolean };
+
+    assert.ok(!result.isError);
+    assert.deepEqual(discord.removedReactions, [
+      { channelId: 'c1', messageId: 'm1', emoji: '🫥' },
+    ]);
+
+    client.close();
+    await serverPromise;
+  });
+
+  it('/undo leaves awareness reactions to the host durable ledger', async () => {
+    const discord = new MockDiscordAdapter();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter) as any;
+    server.conn = {
+      sendRequest: async () => ({
+        ok: true,
+        messagesRemoved: 1,
+        removedRefs: [
+          { serverId: 'discord', channelId: 'discord:g1:c1', messageId: 'm1' },
+        ],
+        lastVisible: null,
+      }),
+    };
+    let reply = '';
+    const interaction = {
+      commandName: 'undo',
+      user: { id: 'admin-1', username: 'Admin' },
+      channelId: 'c1',
+      options: { getInteger: () => 1 },
+      deferReply: async () => {},
+      editReply: async (content: string) => { reply = content; },
+      reply: async () => {},
+    };
+    const previousAdmins = process.env.DISCORD_ADMIN_USERS;
+    process.env.DISCORD_ADMIN_USERS = 'admin-1';
+    try {
+      await server.handleSlashCommand(interaction);
+    } finally {
+      if (previousAdmins === undefined) delete process.env.DISCORD_ADMIN_USERS;
+      else process.env.DISCORD_ADMIN_USERS = previousAdmins;
+    }
+
+    assert.equal(discord.reactions.length, 0);
+    assert.match(reply, /old branch preserved/);
   });
 
   it('tools/call list_guilds works', async () => {
