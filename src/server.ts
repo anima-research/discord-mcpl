@@ -456,6 +456,7 @@ export class DiscordMcplServer {
         ok?: boolean;
         error?: string;
         messagesRemoved?: number;
+        removedRefs?: Array<{ serverId: string; channelId: string; messageId: string }>;
         lastVisible?: { participant?: string; role?: string; preview?: string } | null;
       };
 
@@ -466,8 +467,24 @@ export class DiscordMcplServer {
 
       const lines: string[] = [];
       const removed = result.messagesRemoved ?? 0;
+      // Immediate best effort for the online case. The host also persists
+      // these refs in its branch-independent recovery outbox, so a crash or
+      // Discord outage retries them after reconnection.
+      let reacted = 0;
+      await Promise.all((result.removedRefs ?? []).map(async (ref) => {
+        const parsed = parseMcplChannelId(ref.channelId);
+        const channelId = parsed ? parsed.channelId : ref.channelId;
+        try {
+          await this.discord.addReaction(channelId, ref.messageId, '💤');
+          reacted++;
+        } catch (err) {
+          dbg('slash:undo-react-failed', { messageId: ref.messageId, error: (err as Error).message });
+        }
+      }));
       lines.push(
-        `🗑️ Removed the last **${removed}** context message${removed === 1 ? '' : 's'} (branched; old branch preserved).`,
+        `🗑️ Removed the last **${removed}** context message${removed === 1 ? '' : 's'} (branched; old branch preserved)` +
+          (reacted > 0 ? `, marked ${reacted} with 💤` : '') +
+          '.',
       );
       const lv = result.lastVisible;
       if (lv?.preview) {
