@@ -13,6 +13,7 @@ import {
   TextChannel,
   DMChannel,
   ChannelType,
+  MessageType,
   AttachmentBuilder,
   type Message,
   type MessageReaction,
@@ -1468,9 +1469,16 @@ export class DiscordAdapter {
     // undefined or empty — fall back to raw content so we never lose the
     // message body.
     const rawClean = (message as { cleanContent?: string }).cleanContent;
-    const cleanContent = typeof rawClean === 'string' && rawClean.length > 0
+    let cleanContent = typeof rawClean === 'string' && rawClean.length > 0
       ? rawClean
       : message.content;
+    // Discord SYSTEM messages (member joins, boosts, pins…) carry no content —
+    // the Discord client renders them from the type. Forwarding them raw gave
+    // the agent literally empty messages ("Bob: "). Synthesize the same
+    // affordance the human client shows.
+    if (cleanContent.length === 0 && message.type !== MessageType.Default) {
+      cleanContent = systemMessageText(message.type);
+    }
     const threadName = (message.thread as { name?: string } | null)?.name;
     return {
       id: message.id,
@@ -1495,6 +1503,40 @@ export class DiscordAdapter {
       attachments: mapAttachments(message),
       timestamp: message.createdAt,
     };
+  }
+}
+
+/** Render a content-less Discord system message the way the human client
+ *  does — from its type. The author of a system message is its subject
+ *  (e.g. the joining member authors the UserJoin message), so downstream
+ *  "Author: <text>" rendering reads naturally. Unknown/new types degrade to
+ *  a generic marker with the numeric type rather than an empty string. */
+function systemMessageText(type: MessageType): string {
+  switch (type) {
+    case MessageType.UserJoin:
+      return '[joined the server]';
+    case MessageType.GuildBoost:
+      return '[boosted the server]';
+    case MessageType.GuildBoostTier1:
+    case MessageType.GuildBoostTier2:
+    case MessageType.GuildBoostTier3:
+      return '[boosted the server to a new tier]';
+    case MessageType.ChannelPinnedMessage:
+      return '[pinned a message to this channel]';
+    case MessageType.ChannelFollowAdd:
+      return '[followed a channel into this one]';
+    case MessageType.RecipientAdd:
+      return '[added someone to the group]';
+    case MessageType.RecipientRemove:
+      return '[removed someone from the group]';
+    case MessageType.ChannelNameChange:
+      return '[changed the channel name]';
+    case MessageType.ThreadCreated:
+      return '[started a thread]';
+    case MessageType.AutoModerationAction:
+      return '[automod action]';
+    default:
+      return `[system message: type ${type}]`;
   }
 }
 
