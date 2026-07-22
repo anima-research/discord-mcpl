@@ -16,7 +16,7 @@ import {
   ERR_UNKNOWN_CHANNEL,
   ERR_CHECKPOINT_NOT_FOUND,
 } from '@animalabs/mcpl-core';
-import { formatAgentDateTime, resolveAgentTimeZone } from './timezone.js';
+import { formatAgentDateTime, resolveAgentTimeZone, resolveTimestampStyle } from './timezone.js';
 
 import type {
   JsonRpcRequest,
@@ -91,6 +91,7 @@ function requireContentOrFiles(content: string, files: OutgoingFile[] | undefine
  *  text doesn't slip through. Case-sensitive: a literal `m continue` only. */
 const CHX_NOOP_PREFIX = 'm continue';
 const AGENT_TIME_ZONE = resolveAgentTimeZone();
+const AGENT_TIMESTAMP_STYLE = resolveTimestampStyle();
 
 // ============================================================================
 // Image normalization (downsample-on-ingest)
@@ -1733,7 +1734,7 @@ export class DiscordMcplServer {
       if (!keepAll) attrs.push(`lines="${kept.length}"`);
       attrs.push(`reason="${isDM ? 'dm' : hadMention ? 'mention' : 'backscroll'}"`);
       const lines = kept.map((m) => {
-        const ts = formatAgentDateTime(m.timestamp, AGENT_TIME_ZONE);
+        const ts = formatAgentDateTime(m.timestamp, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
         const att =
           m.attachments && m.attachments.length > 0
             ? ` [attachments: ${m.attachments.map((a) => a.name).join(', ')}]`
@@ -1742,7 +1743,8 @@ export class DiscordMcplServer {
         const mark = m.mentionsBot ? ' (mention)' : '';
         // Lead each line with the message id so the agent can
         // fetch_around(channelId, id) to read the surrounding conversation.
-        return `[${ts} id=${m.id}] ${m.authorName}${mark}: ${m.cleanContent}${att}`;
+        // (ts is empty under AGENT_TIMESTAMP_STYLE=none — the id stays.)
+        return `[${ts ? `${ts} ` : ''}id=${m.id}] ${m.authorName}${mark}: ${m.cleanContent}${att}`;
       });
       const block = [
         `<missed ${attrs.join(' ')}>`,
@@ -2463,11 +2465,11 @@ export class DiscordMcplServer {
         attrs.push(`count="${backscrollMsgs.length}"`);
         const open = `<backscroll ${attrs.join(' ')}>`;
         const lines = backscrollMsgs.map((m) => {
-          const ts = formatAgentDateTime(m.timestamp, AGENT_TIME_ZONE);
+          const ts = formatAgentDateTime(m.timestamp, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
           const att = m.attachments && m.attachments.length > 0
             ? ` [attachments: ${m.attachments.map((a) => a.name).join(', ')}]`
             : '';
-          return `[${ts}] ${m.authorName}: ${m.cleanContent}${att}`;
+          return `${ts ? `[${ts}] ` : ''}${m.authorName}: ${m.cleanContent}${att}`;
         });
         blocks.push([open, ...lines, '</backscroll>'].join('\n'));
       }
