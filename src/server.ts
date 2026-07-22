@@ -51,7 +51,7 @@ import type { ChatInputCommandInteraction } from 'discord.js';
 import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
-import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor } from './channels.js';
+import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
 import { saveFiltersFile, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -2519,7 +2519,20 @@ export class DiscordMcplServer {
     // we forwarded it. Persist it (and the DM channel, if this is one) so the
     // reconnect catch-up sweep has a current anchor after a restart.
     this.forwardedWatermark.set(msg.channelId, msg.id);
-    if (isDM) this.dmChannelIds.add(msg.channelId);
+    if (isDM) {
+      this.dmChannelIds.add(msg.channelId);
+      // Register the DM as a real channel descriptor so channel_open /
+      // isOpen resolve it. The message author IS the recipient (bot's own
+      // outbound doesn't come through here), so their name labels it.
+      this.registerAndNotifyNew([
+        toDmDescriptor(
+          msg.channelId,
+          msg.authorName,
+          false,
+          this.backscrollLimitFor(msg.channelId),
+        ),
+      ]);
+    }
     this.saveWatermark();
     // Update sticky-reply state: this inbound is now the "last
     // communication" for auto-reply routing, and the message we'd

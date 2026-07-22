@@ -996,6 +996,24 @@ export class DiscordAdapter {
     return this.client.guilds.cache.get(guildId)?.name ?? guildId;
   }
 
+  /** Resolve a DM channel's recipient for descriptor labels. Returns null if
+   *  the id isn't a DM channel or the fetch fails (deleted account etc.). */
+  async getDmChannelInfo(
+    channelId: string,
+  ): Promise<{ recipientId: string; recipientName: string } | null> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || channel.type !== ChannelType.DM) return null;
+      const dm = channel as DMChannel;
+      const recipient =
+        dm.recipient ?? (dm.recipientId ? await this.client.users.fetch(dm.recipientId) : null);
+      if (!recipient) return null;
+      return { recipientId: recipient.id, recipientName: recipient.username };
+    } catch {
+      return null;
+    }
+  }
+
   /** Bulk-fetch all members of a guild into the local cache. Idempotent
    *  (safe to call multiple times). Wrapped in a timeout so that
    *  misconfigured intents — portal-disabled but client-requested, for
