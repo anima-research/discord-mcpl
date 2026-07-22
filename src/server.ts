@@ -2166,7 +2166,10 @@ export class DiscordMcplServer {
       if (!this.reactionChannels.has(ev.channelId)) return;
       const verb = ev.action === 'add' ? 'reacted' : 'removed a reaction';
       const target = ev.onOwnMessage ? 'your message' : `message ${ev.messageId}`;
-      const line = `[reaction] @${ev.userName} ${verb} ${ev.emoji} on ${target}`;
+      // Carry a snippet of the reacted-to message when it has text — a bare
+      // message id is meaningless to the agent (it can't look messages up).
+      const quoted = ev.messageSnippet ? ` — "${ev.messageSnippet}"` : '';
+      const line = `[reaction] @${ev.userName} ${verb} ${ev.emoji} on ${target}${quoted}`;
       this.conn.sendRequest(method.PUSH_EVENT, {
         featureSet: 'discord.messaging',
         eventId: `discord_reaction_${ev.action}_${ev.messageId}_${ev.emojiId ?? ev.emoji}_${ev.userId}_${ev.timestamp.getTime()}`,
