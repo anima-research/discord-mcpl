@@ -61,6 +61,7 @@ export function toDmDescriptor(
   recipientName: string,
   initiallyOpen = false,
   maxHistory = 500,
+  recipientId?: string,
 ): DiscordChannelDescriptor {
   return {
     id: mcplChannelId('dm', channelId),
@@ -68,7 +69,10 @@ export function toDmDescriptor(
     label: `DM: ${recipientName}`,
     direction: 'bidirectional',
     address: { guildId: 'dm', channelId },
-    metadata: { channelType: 'dm' },
+    // recipientName/recipientId make DM addressing people-first: the host
+    // resolves `>>@name` and `<@id>` mention tokens against them (explicit
+    // prose routing), instead of forcing agents through raw channel ids.
+    metadata: { channelType: 'dm', recipientName, ...(recipientId ? { recipientId } : {}) },
     initiallyOpen,
     capabilities: {
       history: { maxMessages: maxHistory, supportsBeforeMessage: true },

@@ -2533,6 +2533,7 @@ export class DiscordMcplServer {
           msg.authorName,
           false,
           this.backscrollLimitFor(msg.channelId),
+          msg.authorId,
         ),
       ]);
     }
