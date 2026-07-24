@@ -34,6 +34,10 @@ import { dbg } from './debug-log.js';
 /** Maximum attachments Discord accepts on a single message. */
 const MAX_DISCORD_ATTACHMENTS = 10;
 
+/** Cap on members returned by listChannelMembers — a large guild's #general
+ *  is visible to thousands; the agent gets the first page plus the total. */
+const MEMBER_LIST_CAP = 200;
+
 /** A file the agent wants to upload, read from a local path on the host. */
 export interface OutgoingFile {
   /** Absolute local filesystem path to the file to upload. */
@@ -146,6 +150,30 @@ export interface DiscordChannelInfo {
   name: string;
   type: 'text' | 'voice' | 'category' | 'thread' | 'forum' | 'unknown';
   parentId?: string;
+}
+
+/** One member of a channel, as the agent should see them. */
+export interface DiscordMemberInfo {
+  id: string;
+  /** The stable @handle (Discord username). */
+  username: string;
+  /** Name shown in this channel: server nickname > global display name. */
+  displayName: string;
+  isBot: boolean;
+}
+
+export interface DiscordChannelMembers {
+  channelId: string;
+  channelName: string | null;
+  /** How membership was resolved: everyone who can view a guild channel,
+   *  the joined members of a thread, or the two parties of a DM. */
+  scope: 'guild-channel' | 'thread' | 'dm';
+  /** Full member count before the cap was applied. */
+  total: number;
+  /** Humans first, then bots; alphabetical by display name within each. */
+  members: DiscordMemberInfo[];
+  /** True when `members` was capped (see MEMBER_LIST_CAP). */
+  truncated: boolean;
 }
 
 export interface HistoryMessage {
@@ -1197,6 +1225,84 @@ export class DiscordAdapter {
       }
     });
     return result;
+  }
+
+  /** Who can currently see a channel. Guild channels resolve to everyone
+   *  whose permissions include VIEW_CHANNEL (requires the GuildMembers
+   *  privileged intent, which this client always requests — the permission
+   *  computation reads the full member cache, so we fetch it first).
+   *  Threads resolve to their JOINED members, which is Discord's own
+   *  membership notion for threads and usually much narrower than who could
+   *  see it. DMs resolve to the two parties. */
+  async listChannelMembers(channelId: string): Promise<DiscordChannelMembers> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel) throw new Error(`Channel ${channelId} not found`);
+
+    const toInfo = (m: GuildMember): DiscordMemberInfo => ({
+      id: m.id,
+      username: m.user.username,
+      displayName: m.displayName,
+      isBot: m.user.bot,
+    });
+    const finish = (
+      channelName: string | null,
+      scope: DiscordChannelMembers['scope'],
+      members: DiscordMemberInfo[],
+    ): DiscordChannelMembers => {
+      // Humans first, then bots; alphabetical within each — the agent usually
+      // wants "who's here", not a wall of infrastructure accounts up top.
+      members.sort(
+        (a, b) =>
+          Number(a.isBot) - Number(b.isBot) ||
+          a.displayName.localeCompare(b.displayName, 'en', { sensitivity: 'base' }),
+      );
+      return {
+        channelId,
+        channelName,
+        scope,
+        total: members.length,
+        members: members.slice(0, MEMBER_LIST_CAP),
+        truncated: members.length > MEMBER_LIST_CAP,
+      };
+    };
+
+    if (channel.type === ChannelType.DM) {
+      const dm = channel as DMChannel;
+      const recipient = dm.recipient ?? (dm.recipientId ? await this.client.users.fetch(dm.recipientId) : null);
+      const me = this.client.user;
+      const members: DiscordMemberInfo[] = [];
+      for (const u of [recipient, me]) {
+        if (!u) continue;
+        members.push({ id: u.id, username: u.username, displayName: u.displayName ?? u.username, isBot: u.bot });
+      }
+      return finish(null, 'dm', members);
+    }
+
+    if (channel.isThread()) {
+      const threadMembers = await channel.members.fetch();
+      const guild = channel.guild;
+      const members: DiscordMemberInfo[] = [];
+      for (const tm of threadMembers.values()) {
+        // Resolve through the guild for nickname + bot flag; a member who
+        // left the guild but lingers in the thread list degrades to id-only.
+        const gm = await guild.members.fetch(tm.id).catch(() => null);
+        members.push(
+          gm ? toInfo(gm) : { id: tm.id, username: tm.id, displayName: tm.id, isBot: false },
+        );
+      }
+      return finish(channel.name, 'thread', members);
+    }
+
+    if ('members' in channel && 'guild' in channel) {
+      const guildChannel = channel as GuildBasedChannel & { members: Map<string, GuildMember> };
+      // The members getter computes VIEW_CHANNEL against the member cache;
+      // fetch first so the answer covers everyone, not just recent speakers.
+      await guildChannel.guild.members.fetch();
+      const members = [...guildChannel.members.values()].map(toInfo);
+      return finish(guildChannel.name, 'guild-channel', members);
+    }
+
+    throw new Error(`Channel ${channelId} has no queryable membership (type ${channel.type})`);
   }
 
   /** List the custom (server) emojis the bot can see — the shared palette for

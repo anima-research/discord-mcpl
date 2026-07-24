@@ -164,6 +164,21 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
   {
+    name: 'list_channel_members',
+    description:
+      'List who can currently see a channel. Guild channels return everyone ' +
+      'with view permission; threads return their joined members; DMs return ' +
+      'the two parties. Humans sort before bots. Large channels are capped ' +
+      '(`truncated: true`, with `total` still the full count).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'Discord channel ID' },
+      },
+      required: ['channelId'],
+    },
+  },
+  {
     name: 'list_emojis',
     description:
       'List the custom (server) emojis available to use. Put `token` (e.g. ' +
