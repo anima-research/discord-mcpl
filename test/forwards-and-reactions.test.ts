@@ -6,7 +6,25 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 
-import { buildForwardedContent, buildReactionSnippet } from '../src/discord-adapter.js';
+import {
+  buildForwardedContent,
+  buildReactionSnippet,
+  resolveVisibleContent,
+} from '../src/discord-adapter.js';
+
+/** Minimal stand-in for a discord.js Message with forwarded snapshots. */
+function fakeMessage(opts: {
+  content?: string;
+  cleanContent?: string | null;
+  snapshots?: Array<{ content?: string | null; attachments?: { size: number } }>;
+}) {
+  const snaps = opts.snapshots ?? [];
+  return {
+    content: opts.content ?? '',
+    cleanContent: opts.cleanContent,
+    messageSnapshots: { size: snaps.length, values: () => snaps },
+  };
+}
 
 describe('buildReactionSnippet', () => {
   it('returns null for empty / missing / whitespace-only text', () => {
@@ -100,6 +118,60 @@ describe('buildForwardedContent', () => {
     assert.equal(
       buildForwardedContent('', [{ content: 'one' }, { content: 'two' }]),
       '[forwarded message] one\n[forwarded message] two',
+    );
+  });
+
+  it('renders custom-emoji tokens in the forwarded body down to :name:', () => {
+    assert.equal(
+      buildForwardedContent('', [{ content: 'so true <:blobheart:12345>' }]),
+      '[forwarded message] so true :blobheart:',
+    );
+  });
+});
+
+describe('resolveVisibleContent (shared by live + history paths)', () => {
+  it('renders a bare forward from its snapshot — the history-path regression', () => {
+    // fetchHistory/fetchAround build HistoryMessages through this helper; a
+    // bare forward must not come back as an empty message on backscroll or
+    // the reconnect catch-up sweep.
+    const m = fakeMessage({ content: '', cleanContent: '', snapshots: [{ content: 'origin text' }] });
+    assert.equal(resolveVisibleContent(m), '[forwarded message] origin text');
+  });
+
+  it('prefers cleanContent, falling back to raw content when empty', () => {
+    assert.equal(
+      resolveVisibleContent(fakeMessage({ content: '<@1> hi', cleanContent: '@ra hi' })),
+      '@ra hi',
+    );
+    assert.equal(
+      resolveVisibleContent(fakeMessage({ content: 'dm text', cleanContent: undefined })),
+      'dm text',
+    );
+  });
+
+  it('passes non-forward messages through untouched', () => {
+    assert.equal(
+      resolveVisibleContent(fakeMessage({ content: 'plain', cleanContent: 'plain' })),
+      'plain',
+    );
+  });
+
+  it('appends the forward below outer commentary', () => {
+    const m = fakeMessage({
+      content: 'check this',
+      cleanContent: 'check this',
+      snapshots: [{ content: 'forwarded body', attachments: { size: 1 } }],
+    });
+    assert.equal(
+      resolveVisibleContent(m),
+      'check this\n[forwarded message] forwarded body [1 attachment]',
+    );
+  });
+
+  it('tolerates a missing messageSnapshots collection (older gateway shapes)', () => {
+    assert.equal(
+      resolveVisibleContent({ content: 'hi', cleanContent: 'hi' }),
+      'hi',
     );
   });
 });

@@ -246,23 +246,28 @@ export function buildReactionSnippet(text: string | null | undefined): string | 
     : collapsed;
 }
 
+/** The slice of a discord.js MessageSnapshot that forward rendering reads. */
+interface ForwardSnapshot {
+  content?: string | null;
+  attachments?: { size: number } | null;
+  embeds?: { length: number } | null;
+}
+
 /** Render a forwarded message's snapshots into visible text. Discord forwards
  *  carry their body in `messageSnapshots` (discord.js ≥14.16), not `content`,
  *  so without this a bare forward reaches the agent as an empty message.
- *  Attachment/embed-only snapshots get a bracketed note instead of silence. */
+ *  Attachment/embed-only snapshots get a bracketed note instead of silence.
+ *  Snapshots have no `cleanContent`, so mention ids stay raw, but custom-emoji
+ *  tokens are rendered down to ':name:' like everywhere else. */
 export function buildForwardedContent(
   baseContent: string,
-  snapshots: Iterable<{
-    content?: string | null;
-    attachments?: { size: number } | null;
-    embeds?: { length: number } | null;
-  }>,
+  snapshots: Iterable<ForwardSnapshot>,
 ): string {
   const parts: string[] = [];
   for (const snap of snapshots) {
     const text =
       typeof snap.content === 'string' && snap.content.trim().length > 0
-        ? snap.content
+        ? renderCustomEmojis(snap.content)
         : null;
     const attachmentCount = snap.attachments?.size ?? 0;
     const notes: string[] = [];
@@ -276,6 +281,26 @@ export function buildForwardedContent(
   if (parts.length === 0) return baseContent;
   const forwarded = parts.join('\n');
   return baseContent.trim().length > 0 ? `${baseContent}\n${forwarded}` : forwarded;
+}
+
+/** Resolve a message's visible body: `cleanContent` when populated (raw
+ *  content otherwise — DMs and partial channels can leave it empty), with any
+ *  forwarded snapshots rendered in. Shared by the live convertMessage path and
+ *  both history paths (fetchHistory / fetchAround), so forwards can't regress
+ *  to empty on backscroll or the reconnect catch-up sweep — history replays
+ *  missed messages through fetchHistory, not the live path. */
+export function resolveVisibleContent(m: {
+  content: string;
+  cleanContent?: string | null;
+  messageSnapshots?: { size: number; values(): Iterable<ForwardSnapshot> } | null;
+}): string {
+  const base =
+    typeof m.cleanContent === 'string' && m.cleanContent.length > 0
+      ? m.cleanContent
+      : m.content;
+  return m.messageSnapshots && m.messageSnapshots.size > 0
+    ? buildForwardedContent(base, m.messageSnapshots.values())
+    : base;
 }
 
 /** Summarise the reactions on a discord.js message. Custom emoji become ':name:'
@@ -927,10 +952,7 @@ export class DiscordAdapter {
           hitWatermark = true;
           break;
         }
-        const rawClean = (m as { cleanContent?: string }).cleanContent;
-        const rawResolved =
-          typeof rawClean === 'string' && rawClean.length > 0 ? rawClean : m.content;
-        const cleanContent = renderCustomEmojis(rawResolved);
+        const cleanContent = renderCustomEmojis(resolveVisibleContent(m));
         collected.push({
           id: m.id,
           authorId: m.author.id,
@@ -980,10 +1002,7 @@ export class DiscordAdapter {
       limit: pageLimit,
     });
     const collected: HistoryMessage[] = [...page.values()].map((m) => {
-      const rawClean = (m as { cleanContent?: string }).cleanContent;
-      const rawResolved =
-        typeof rawClean === 'string' && rawClean.length > 0 ? rawClean : m.content;
-      const cleanContent = renderCustomEmojis(rawResolved);
+      const cleanContent = renderCustomEmojis(resolveVisibleContent(m));
       return {
         id: m.id,
         authorId: m.author.id,
@@ -1522,21 +1541,12 @@ export class DiscordAdapter {
       ? channel.name
       : null;
     const guildName = message.guild?.name ?? null;
-    // `cleanContent` resolves <@id>, <@&roleId>, <#channelId> to
-    // @username / @role / #channel. For DMs and partial channels it can be
-    // undefined or empty — fall back to raw content so we never lose the
-    // message body.
-    const rawClean = (message as { cleanContent?: string }).cleanContent;
-    const cleanContent = typeof rawClean === 'string' && rawClean.length > 0
-      ? rawClean
-      : message.content;
     const threadName = (message.thread as { name?: string } | null)?.name;
-    // Forwarded messages carry their body in messageSnapshots, not content —
-    // without this a bare forward arrives as an empty message.
-    const content =
-      message.messageSnapshots && message.messageSnapshots.size > 0
-        ? buildForwardedContent(cleanContent, message.messageSnapshots.values())
-        : cleanContent;
+    // `cleanContent` resolves <@id>, <@&roleId>, <#channelId> to
+    // @username / @role / #channel (with raw-content fallback), and forwarded
+    // messages carry their body in messageSnapshots, not content — both
+    // handled in resolveVisibleContent, shared with the history paths.
+    const content = resolveVisibleContent(message);
     // A forward's reference points at its ORIGIN message (reference.type =
     // Forward); only a real reply (type Default = 0) should read as reply-to,
     // else a forwarded bot message looks like a reply to the bot.
