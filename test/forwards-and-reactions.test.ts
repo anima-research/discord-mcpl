@@ -9,8 +9,28 @@ import * as assert from 'node:assert/strict';
 import {
   buildForwardedContent,
   buildReactionSnippet,
+  mapAllAttachments,
   resolveVisibleContent,
 } from '../src/discord-adapter.js';
+
+/** Fake discord.js attachment Collection over raw attachment records. */
+function attachmentColl(
+  atts: Array<{ id: string; name?: string | null; url?: string; contentType?: string | null; size?: number }>,
+) {
+  return {
+    size: atts.length,
+    values: () =>
+      atts
+        .map((a) => ({
+          id: a.id,
+          name: a.name ?? null,
+          url: a.url ?? `https://cdn.discordapp.example/${a.id}`,
+          contentType: a.contentType ?? null,
+          size: a.size ?? 0,
+        }))
+        .values(),
+  };
+}
 
 /** Minimal stand-in for a discord.js Message with forwarded snapshots. */
 function fakeMessage(opts: {
@@ -173,5 +193,69 @@ describe('resolveVisibleContent (shared by live + history paths)', () => {
       resolveVisibleContent({ content: 'hi', cleanContent: 'hi' }),
       'hi',
     );
+  });
+});
+
+describe('mapAllAttachments (forwarded media rides the normal delivery path)', () => {
+  it('maps a forwarded snapshot\'s attachments — previously only a count note', () => {
+    const m = {
+      attachments: attachmentColl([]),
+      messageSnapshots: {
+        size: 1,
+        values: () => [
+          {
+            content: 'look at this cat',
+            attachments: attachmentColl([
+              { id: '111', name: 'cat.png', contentType: 'image/png', size: 12345 },
+            ]),
+          },
+        ],
+      },
+    };
+    const mapped = mapAllAttachments(m);
+    assert.equal(mapped.length, 1);
+    assert.equal(mapped[0].name, 'cat.png');
+    assert.equal(mapped[0].contentType, 'image/png');
+    assert.equal(mapped[0].size, 12345);
+  });
+
+  it('merges outer + snapshot attachments, outer first', () => {
+    const m = {
+      attachments: attachmentColl([{ id: '1', name: 'outer.txt', size: 10 }]),
+      messageSnapshots: {
+        size: 2,
+        values: () => [
+          { attachments: attachmentColl([{ id: '2', name: 'snap-a.png', size: 20 }]) },
+          { attachments: attachmentColl([{ id: '3', name: 'snap-b.md', size: 30 }]) },
+        ],
+      },
+    };
+    assert.deepEqual(
+      mapAllAttachments(m).map((a) => a.name),
+      ['outer.txt', 'snap-a.png', 'snap-b.md'],
+    );
+  });
+
+  it('handles snapshots without a real collection (bare size, null, absent)', () => {
+    const m = {
+      attachments: attachmentColl([{ id: '1', name: 'outer.txt', size: 10 }]),
+      messageSnapshots: {
+        size: 3,
+        values: () => [
+          { content: 'count-only shape', attachments: { size: 2 } },
+          { content: 'null attachments', attachments: null },
+          { content: 'no attachments field' },
+        ],
+      },
+    };
+    assert.deepEqual(mapAllAttachments(m).map((a) => a.name), ['outer.txt']);
+  });
+
+  it('is mapAttachments-compatible for non-forward messages', () => {
+    const m = { attachments: attachmentColl([{ id: '9', size: 5 }]) };
+    const mapped = mapAllAttachments(m);
+    assert.equal(mapped.length, 1);
+    assert.equal(mapped[0].name, '9'); // name falls back to id
+    assert.equal(mapAllAttachments({ content: 'no attachments at all' } as never).length, 0);
   });
 });
