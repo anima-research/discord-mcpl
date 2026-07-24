@@ -485,6 +485,22 @@ describe('DiscordMcplServer', () => {
       timestamp: new Date(),
     } as unknown as DiscordMessageData);
 
+    // The first inbound DM registers the channel as a real descriptor and
+    // announces it via channels/changed BEFORE the push/event — that's what
+    // lets channel_open/isOpen resolve DM ids so open state sticks
+    // (the Mythos reopen-every-message complaint, 2026-07-18/24).
+    const changed = await client.nextMessage();
+    assert.equal(changed.type, 'notification');
+    if (changed.type === 'notification') {
+      assert.equal(changed.notification.method, method.CHANNELS_CHANGED);
+      const p = changed.notification.params as { added?: Array<{ id: string; label?: string }> };
+      assert.ok(p.added?.some((d) => d.id === 'discord:dm:dmchan1'), 'DM channel should be announced');
+      assert.ok(
+        p.added?.some((d) => d.id === 'discord:dm:dmchan1' && d.label === 'DM: Alice'),
+        'DM descriptor should be labeled with the sender',
+      );
+    }
+
     const pushMsg = await client.nextMessage();
     assert.equal(pushMsg.type, 'request');
     if (pushMsg.type === 'request') {

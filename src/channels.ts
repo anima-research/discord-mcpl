@@ -48,6 +48,35 @@ export function toDescriptor(
   };
 }
 
+/** Convert a DM channel to an MCPL ChannelDescriptor.
+ *
+ * DMs have no guild — the id uses the `dm` pseudo-guild segment
+ * (`discord:dm:<channelId>`), matching the id handleDiscordMessage forwards
+ * events under. Without this descriptor DMs were never registered at all
+ * (registration only ran off guild events), so `channel_open` on a DM id
+ * could never resolve and DM open/subscription state never stuck
+ * (observed on Mythos, 2026-07-18). */
+export function toDmDescriptor(
+  channelId: string,
+  recipientName: string,
+  initiallyOpen = false,
+  maxHistory = 500,
+): DiscordChannelDescriptor {
+  return {
+    id: mcplChannelId('dm', channelId),
+    type: 'discord',
+    label: `DM: ${recipientName}`,
+    direction: 'bidirectional',
+    address: { guildId: 'dm', channelId },
+    metadata: { channelType: 'dm' },
+    initiallyOpen,
+    capabilities: {
+      history: { maxMessages: maxHistory, supportsBeforeMessage: true },
+      acknowledgment: { kind: 'reaction', supportsValue: true },
+    },
+  };
+}
+
 /**
  * Tracks which channels are registered (known to host) and which are open
  * (host has explicitly opened them for bidirectional message flow).

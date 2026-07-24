@@ -13,6 +13,7 @@ import {
   TextChannel,
   DMChannel,
   ChannelType,
+  MessageType,
   AttachmentBuilder,
   type Message,
   type MessageReaction,
@@ -285,19 +286,27 @@ export function buildForwardedContent(
 
 /** Resolve a message's visible body: `cleanContent` when populated (raw
  *  content otherwise — DMs and partial channels can leave it empty), with any
- *  forwarded snapshots rendered in. Shared by the live convertMessage path and
- *  both history paths (fetchHistory / fetchAround), so forwards can't regress
- *  to empty on backscroll or the reconnect catch-up sweep — history replays
- *  missed messages through fetchHistory, not the live path. */
+ *  forwarded snapshots rendered in, and Discord SYSTEM messages (member
+ *  joins, boosts, pins…) synthesized from `message.type` the way the human
+ *  client renders them — they carry no content, so forwarding them raw gave
+ *  the agent literally empty messages ("Bob: "). Shared by the live
+ *  convertMessage path and both history paths (fetchHistory / fetchAround),
+ *  so neither forwards nor system messages can regress to empty on
+ *  backscroll or the reconnect catch-up sweep — history replays missed
+ *  messages through fetchHistory, not the live path. */
 export function resolveVisibleContent(m: {
   content: string;
   cleanContent?: string | null;
   messageSnapshots?: { size: number; values(): Iterable<ForwardSnapshot> } | null;
+  type?: MessageType;
 }): string {
-  const base =
+  let base =
     typeof m.cleanContent === 'string' && m.cleanContent.length > 0
       ? m.cleanContent
       : m.content;
+  if (base.length === 0 && m.type !== undefined && m.type !== MessageType.Default) {
+    base = systemMessageText(m.type);
+  }
   return m.messageSnapshots && m.messageSnapshots.size > 0
     ? buildForwardedContent(base, m.messageSnapshots.values())
     : base;
@@ -1073,6 +1082,24 @@ export class DiscordAdapter {
     return this.client.guilds.cache.get(guildId)?.name ?? guildId;
   }
 
+  /** Resolve a DM channel's recipient for descriptor labels. Returns null if
+   *  the id isn't a DM channel or the fetch fails (deleted account etc.). */
+  async getDmChannelInfo(
+    channelId: string,
+  ): Promise<{ recipientId: string; recipientName: string } | null> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || channel.type !== ChannelType.DM) return null;
+      const dm = channel as DMChannel;
+      const recipient =
+        dm.recipient ?? (dm.recipientId ? await this.client.users.fetch(dm.recipientId) : null);
+      if (!recipient) return null;
+      return { recipientId: recipient.id, recipientName: recipient.username };
+    } catch {
+      return null;
+    }
+  }
+
   /** Bulk-fetch all members of a guild into the local cache. Idempotent
    *  (safe to call multiple times). Wrapped in a timeout so that
    *  misconfigured intents — portal-disabled but client-requested, for
@@ -1543,9 +1570,10 @@ export class DiscordAdapter {
     const guildName = message.guild?.name ?? null;
     const threadName = (message.thread as { name?: string } | null)?.name;
     // `cleanContent` resolves <@id>, <@&roleId>, <#channelId> to
-    // @username / @role / #channel (with raw-content fallback), and forwarded
-    // messages carry their body in messageSnapshots, not content — both
-    // handled in resolveVisibleContent, shared with the history paths.
+    // @username / @role / #channel (with raw-content fallback), forwarded
+    // messages carry their body in messageSnapshots, not content, and Discord
+    // SYSTEM messages synthesize their client affordance from message.type —
+    // all handled in resolveVisibleContent, shared with the history paths.
     const content = resolveVisibleContent(message);
     // A forward's reference points at its ORIGIN message (reference.type =
     // Forward); only a real reply (type Default = 0) should read as reply-to,
@@ -1574,6 +1602,40 @@ export class DiscordAdapter {
       attachments: mapAttachments(message),
       timestamp: message.createdAt,
     };
+  }
+}
+
+/** Render a content-less Discord system message the way the human client
+ *  does — from its type. The author of a system message is its subject
+ *  (e.g. the joining member authors the UserJoin message), so downstream
+ *  "Author: <text>" rendering reads naturally. Unknown/new types degrade to
+ *  a generic marker with the numeric type rather than an empty string. */
+function systemMessageText(type: MessageType): string {
+  switch (type) {
+    case MessageType.UserJoin:
+      return '[joined the server]';
+    case MessageType.GuildBoost:
+      return '[boosted the server]';
+    case MessageType.GuildBoostTier1:
+    case MessageType.GuildBoostTier2:
+    case MessageType.GuildBoostTier3:
+      return '[boosted the server to a new tier]';
+    case MessageType.ChannelPinnedMessage:
+      return '[pinned a message to this channel]';
+    case MessageType.ChannelFollowAdd:
+      return '[followed a channel into this one]';
+    case MessageType.RecipientAdd:
+      return '[added someone to the group]';
+    case MessageType.RecipientRemove:
+      return '[removed someone from the group]';
+    case MessageType.ChannelNameChange:
+      return '[changed the channel name]';
+    case MessageType.ThreadCreated:
+      return '[started a thread]';
+    case MessageType.AutoModerationAction:
+      return '[automod action]';
+    default:
+      return `[system message: type ${type}]`;
   }
 }
 
