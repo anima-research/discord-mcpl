@@ -450,6 +450,7 @@ export class DiscordVoiceSink implements PcmSink {
   private playing = false;
   private eventFns: Array<(ev: SinkEvent) => void> = [];
   private levelFns: Array<(userId: string, db: number) => void> = [];
+  private speakerAudioFns: Array<(speaker: SpeakerInfo, pcm: Buffer) => void> = [];
   private selfId = '';
   private current: {
     id: string;
@@ -470,6 +471,12 @@ export class DiscordVoiceSink implements PcmSink {
 
   /** Per-frame speaker levels (dBFS) — live threshold calibration. */
   onLevel(fn: (userId: string, db: number) => void): void { this.levelFns.push(fn); }
+
+  /** Decoded per-speaker audio (48k stereo PCM16), as it flows. This is the
+   *  tap for STT consumers (voice-chat harness, a future channel listener):
+   *  the sink already decodes for the energy VAD, so hearing-as-listening
+   *  costs nothing extra here. Only fires in VAD mode. */
+  onSpeakerAudio(fn: (speaker: SpeakerInfo, pcm: Buffer) => void): void { this.speakerAudioFns.push(fn); }
 
   async connect(client: unknown, guildId: string, channelId: string): Promise<void> {
     const { joinVoiceChannel, createAudioPlayer, entersState, NoSubscriberBehavior, VoiceConnectionStatus, EndBehaviorType } =
@@ -566,7 +573,10 @@ export class DiscordVoiceSink implements PcmSink {
         console.error(`[discord-mcpl voice] opus decode error (${info.username ?? info.userId}): ${e.message}`);
         cleanup();
       });
-      opus.pipe(decoder).on('data', (pcm: Buffer) => vad.feed(pcm));
+      opus.pipe(decoder).on('data', (pcm: Buffer) => {
+        vad.feed(pcm);
+        for (const fn of this.speakerAudioFns) { try { fn(info, pcm); } catch { /* consumer's */ } }
+      });
       this.pipelines.set(info.userId, cleanup);
     } catch (err) {
       // Pipeline construction failed → be conservative for THIS speaker:
