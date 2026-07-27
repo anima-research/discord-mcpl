@@ -336,9 +336,62 @@ export class DiscordMcplServer {
   private channelManager = new ChannelManager();
   private stateTracker = new StateTracker();
   /** Buffers for channels/outgoing/chunk streams, keyed by inferenceId */
-  private outgoingBuffers = new Map<string, { channelId: string; chunks: string[] }>();
+  constructor(
+    private discord: DiscordAdapter,
+    /** Voice output (Spec 14.3 consumer). Null = voice not configured; the
+     *  handshake then declares no channels.streaming and the host streams
+     *  nothing here. */
+    private voice: import('./voice.js').VoiceOutput | null = null,
+  ) {
+    // Physics accounting → the model. An utterance that was cut off (human
+    // barge-in, bot collision yield) or truncated (TTS died mid-stream) left
+    // the model believing it said things the room never heard. Push the
+    // voiced/unvoiced split so its beliefs match the channel's reality.
+    // Fully-voiced utterances are silence — no news is good news.
+    this.voice?.onReport((r) => this.handleVoiceReport(r));
+  }
 
-  constructor(private discord: DiscordAdapter) {}
+  private handleVoiceReport(r: import('./voice.js').UtteranceReport): void {
+    if (!this.conn || !this.mcplEnabled) return;
+    if (r.status === 'spoken' && r.unvoicedText.length === 0) return;
+    const interrupted = r.status === 'interrupted';
+    const secs = (r.playedMs / 1000).toFixed(1);
+    const who = r.interruptedBy
+      ? `@${r.interruptedBy.username ?? r.interruptedBy.userId}${r.interruptedBy.bot ? ' (bot)' : ''}`
+      : null;
+    // The model has its full text; what it needs is the BOUNDARY. Short
+    // voiced tail for orientation, capped unvoiced head for the loss.
+    const tail = r.voicedText.length > 120 ? `…${r.voicedText.slice(-120)}` : r.voicedText;
+    const head = r.unvoicedText.length > 400 ? `${r.unvoicedText.slice(0, 400)}…` : r.unvoicedText;
+    const approx = r.estimated ? ' (boundary approximate)' : '';
+    const line = interrupted
+      ? `[voice] Your spoken message was interrupted by ${who} after ${secs}s${approx}.\n` +
+        `Heard up to: "${tail}"\nNOT heard: "${head}"`
+      : `[voice] Your spoken message was cut short by a synthesis error after ${secs}s${approx}.\n` +
+        `Heard up to: "${tail}"\nNOT heard: "${head}"\n(The text was still delivered in the text channel as usual.)`;
+    this.conn.sendRequest(method.PUSH_EVENT, {
+      featureSet: 'discord.messaging',
+      eventId: `discord_voice_${r.status}_${r.inferenceId}`,
+      timestamp: new Date().toISOString(),
+      origin: {
+        source: 'discord',
+        mcplChannelId: r.channelId,
+        inferenceId: r.inferenceId,
+        playedMs: r.playedMs,
+        estimated: r.estimated,
+        ...(r.interruptedBy ? {
+          interruptedById: r.interruptedBy.userId,
+          interruptedByName: r.interruptedBy.username,
+          interruptedByBot: r.interruptedBy.bot,
+        } : {}),
+      } as Record<string, unknown>,
+      // RFC-001 tags: hosts route/gate on these. Interruption by a human is
+      // usually wake-worthy (they grabbed the floor mid-sentence — what they
+      // say next relates to what was/wasn't heard); truncation is context.
+      tags: [interrupted ? 'voice:interrupted' : 'voice:truncated'],
+      payload: { content: [textContent(line)] },
+    } satisfies PushEventParams).catch(() => {});
+  }
 
   /**
    * Register slash commands with Discord and wire the interaction handler.
@@ -720,7 +773,13 @@ export class DiscordMcplServer {
     const serverCaps: McplCapabilities = {
       version: '0.4',
       pushEvents: true,
-      channels: true,
+      // Object form (MCPL spec McplChannelCapabilities) when voice is enabled:
+      // `streaming: true` opts this server into the host's routed outgoing
+      // deltas (channels/outgoing/chunk, Spec 14.3) — the input to voice
+      // synthesis. Without voice we keep the legacy boolean: the host then
+      // streams nothing here, which is exactly right. (mcpl-core's type lags
+      // the spec's object form, hence the cast.)
+      channels: (this.voice ? { register: true, publish: true, streaming: true } : true) as unknown as boolean,
       rollback: true,
       featureSets,
       // NOTE: we intentionally no longer declare `contextHooks.afterInference`.
@@ -896,37 +955,22 @@ export class DiscordMcplServer {
         break;
       }
 
+      // Spec 14.3: outgoing streaming is ADVISORY — the authoritative delivery
+      // is channels/publish. The previous handler here posted complete's text
+      // to Discord; that was a never-exercised alternative delivery path
+      // (no host emitted these until agent-framework wired Spec 14.3,
+      // 2026-07-26) and would double-post against the host's publish the
+      // moment streaming turned on. Now: chunks feed voice synthesis, and
+      // complete finalizes the utterance. Nothing here ever sends text.
       case method.CHANNELS_OUTGOING_CHUNK: {
         const p = notif.params as ChannelsOutgoingChunkParams;
-        const buf = this.outgoingBuffers.get(p.inferenceId);
-        if (buf) {
-          buf.chunks[p.index] = p.delta;
-        } else {
-          const chunks: string[] = [];
-          chunks[p.index] = p.delta;
-          this.outgoingBuffers.set(p.inferenceId, { channelId: p.channelId, chunks });
-        }
+        this.voice?.handleChunk(p.inferenceId, p.channelId, p.delta);
         break;
       }
 
       case method.CHANNELS_OUTGOING_COMPLETE: {
         const p = notif.params as ChannelsOutgoingCompleteParams;
-        this.outgoingBuffers.delete(p.inferenceId);
-
-        // Extract text and send to Discord
-        const text = p.content
-          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-          .map((b) => b.text)
-          .join('\n');
-
-        if (text) {
-          const parsed = parseMcplChannelId(p.channelId);
-          if (parsed) {
-            this.discord.sendMessage(parsed.channelId, text).catch((err) => {
-              console.error('[discord-mcpl] outgoing/complete send failed:', (err as Error).message);
-            });
-          }
-        }
+        this.voice?.handleComplete(p.inferenceId);
         break;
       }
 

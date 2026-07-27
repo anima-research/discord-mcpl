@@ -92,7 +92,21 @@ async function main(): Promise<void> {
   await discord.connect();
   await discordReady;
 
-  const server = new DiscordMcplServer(discord);
+  // Voice output (optional): DISCORD_VOICE_CHANNEL_ID gates the whole leg.
+  // Built BEFORE the server so the initialize handshake can declare
+  // channels.streaming. Failures degrade to text-only, never fatal.
+  const { voiceEnv, createVoiceOutput } = await import('./voice.js');
+  let voice = null as import('./voice.js').VoiceOutput | null;
+  const vEnv = voiceEnv();
+  if (vEnv) {
+    try {
+      voice = await createVoiceOutput(vEnv, discord.rawClient);
+    } catch (err) {
+      console.error('[discord-mcpl] voice setup failed:', (err as Error).message, '— continuing text-only');
+    }
+  }
+
+  const server = new DiscordMcplServer(discord, voice);
 
   // Hot-reload: poll the filters file mtime and apply changes live. Covers
   // edits from any source (human, ops tooling, the filters_update tool —
