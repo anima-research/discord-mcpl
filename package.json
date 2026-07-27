@@ -25,6 +25,7 @@
     "sharp": "^0.33.5"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
     "@types/node": "^20.0.0",
     "tsx": "^4.7.0",
     "typescript": "^5.5.0"
