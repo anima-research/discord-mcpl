@@ -96,6 +96,11 @@ export interface DiscordAttachment {
   contentType: string | null;
   /** Size in bytes. */
   size: number;
+  /** Set when the attachment rode in on a forwarded snapshot rather than on
+   *  the message itself: 1-based index of the carrying snapshot. Lets
+   *  delivery markers name the source forward explicitly instead of relying
+   *  on array-order inference when a message carries several forwards. */
+  forwardedSnapshotIndex?: number;
 }
 
 export interface DiscordMessageData {
@@ -1673,8 +1678,18 @@ export function mapAllAttachments(m: {
 }): DiscordAttachment[] {
   const out = mapAttachments(m);
   if (m.messageSnapshots && m.messageSnapshots.size > 0) {
+    // Dedup by attachment id: a re-forwarded forward can surface the same
+    // attachment in more than one snapshot (or in both the outer message and
+    // a snapshot). First occurrence wins — outer-most is least surprising.
+    const seen = new Set(out.map((a) => a.id));
+    let snapshotIndex = 0;
     for (const snap of m.messageSnapshots.values()) {
-      out.push(...mapAttachments({ attachments: snap.attachments ?? undefined }));
+      snapshotIndex++;
+      for (const att of mapAttachments({ attachments: snap.attachments ?? undefined })) {
+        if (seen.has(att.id)) continue;
+        seen.add(att.id);
+        out.push({ ...att, forwardedSnapshotIndex: snapshotIndex });
+      }
     }
   }
   return out;

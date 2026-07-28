@@ -258,4 +258,61 @@ describe('mapAllAttachments (forwarded media rides the normal delivery path)', (
     assert.equal(mapped[0].name, '9'); // name falls back to id
     assert.equal(mapAllAttachments({ content: 'no attachments at all' } as never).length, 0);
   });
+
+  it('dedups attachment ids across outer message and snapshots — first wins', () => {
+    const m = {
+      attachments: attachmentColl([{ id: 'dup', name: 'outer-copy.png', size: 10 }]),
+      messageSnapshots: {
+        size: 2,
+        values: () => [
+          // A re-forwarded forward can repeat the same attachment.
+          { attachments: attachmentColl([{ id: 'dup', name: 'snap-copy.png', size: 10 }]) },
+          { attachments: attachmentColl([
+            { id: 'dup', name: 'snap-copy-again.png', size: 10 },
+            { id: 'fresh', name: 'unique.md', size: 20 },
+          ]) },
+        ],
+      },
+    };
+    const mapped = mapAllAttachments(m);
+    assert.deepEqual(mapped.map((a) => a.name), ['outer-copy.png', 'unique.md']);
+  });
+
+  it('tags snapshot-sourced attachments with a 1-based snapshot index; outer stays untagged', () => {
+    const m = {
+      attachments: attachmentColl([{ id: '1', name: 'outer.txt', size: 10 }]),
+      messageSnapshots: {
+        size: 2,
+        values: () => [
+          { attachments: attachmentColl([{ id: '2', name: 'snap-a.png', size: 20 }]) },
+          { attachments: attachmentColl([{ id: '3', name: 'snap-b.md', size: 30 }]) },
+        ],
+      },
+    };
+    const mapped = mapAllAttachments(m);
+    assert.equal(mapped[0].forwardedSnapshotIndex, undefined);
+    assert.equal(mapped[1].forwardedSnapshotIndex, 1);
+    assert.equal(mapped[2].forwardedSnapshotIndex, 2);
+  });
+
+  it('works against a real discord.js Collection snapshot shape', async () => {
+    const { Collection } = await import('discord.js');
+    const atts = new Collection<string, unknown>();
+    atts.set('c1', {
+      id: 'c1', name: 'real.png',
+      url: 'https://cdn.discordapp.example/real.png',
+      contentType: 'image/png', size: 4321,
+    });
+    const snapshots = new Collection<string, unknown>();
+    snapshots.set('s1', { content: 'forwarded body', attachments: atts });
+    const m = {
+      attachments: new Collection<string, unknown>() as never,
+      messageSnapshots: snapshots as never,
+    };
+    const mapped = mapAllAttachments(m as never);
+    assert.equal(mapped.length, 1);
+    assert.equal(mapped[0].name, 'real.png');
+    assert.equal(mapped[0].contentType, 'image/png');
+    assert.equal(mapped[0].forwardedSnapshotIndex, 1);
+  });
 });
