@@ -165,15 +165,20 @@ export interface DiscordMemberInfo {
 export interface DiscordChannelMembers {
   channelId: string;
   channelName: string | null;
-  /** How membership was resolved: everyone who can view a guild channel,
-   *  the joined members of a thread, or the two parties of a DM. */
-  scope: 'guild-channel' | 'thread' | 'dm';
+  /** How membership was resolved: everyone who can view a guild channel
+   *  (computed permissions over a fully warmed member cache), the JOINED
+   *  members of a thread (Discord's own thread-membership notion — a public
+   *  thread may be readable by non-joined users with parent access), or the
+   *  two parties of a DM. */
+  scope: 'guild-channel' | 'thread-joined' | 'dm';
   /** Full member count before the cap was applied. */
   total: number;
   /** Humans first, then bots; alphabetical by display name within each. */
   members: DiscordMemberInfo[];
   /** True when `members` was capped (see MEMBER_LIST_CAP). */
   truncated: boolean;
+  /** Scope caveat the agent should see (set for threads). */
+  note?: string;
 }
 
 export interface HistoryMessage {
@@ -1128,13 +1133,19 @@ export class DiscordAdapter {
     }
   }
 
+  /** Timeout for the bulk guild-member fetch. Instance-scoped so tests can
+   *  shrink it; 30s in production. */
+  private memberFetchTimeoutMs = 30_000;
+
   /** Bulk-fetch all members of a guild into the local cache. Idempotent
    *  (safe to call multiple times). Wrapped in a timeout so that
    *  misconfigured intents — portal-disabled but client-requested, for
    *  instance — fail fast with a clear error instead of hanging the
-   *  whole client. */
-  private async warmGuildMemberCache(guild: Guild): Promise<void> {
-    const TIMEOUT_MS = 30_000;
+   *  whole client. Returns whether the warm-up succeeded; callers whose
+   *  correctness depends on a FULL cache (permission-computed member lists)
+   *  must check it — a partial cache silently narrows their answer. */
+  private async warmGuildMemberCache(guild: Guild): Promise<boolean> {
+    const TIMEOUT_MS = this.memberFetchTimeoutMs;
     const fetchP = guild.members.fetch();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutP = new Promise<never>((_, reject) => {
@@ -1156,10 +1167,12 @@ export class DiscordAdapter {
       console.error(
         `[discord-mcpl] member cache warmed for "${guild.name}" (${guild.members.cache.size} members)`,
       );
+      return true;
     } catch (err) {
       console.error(
         `[discord-mcpl] member cache warm-up failed for "${guild.name}": ${(err as Error).message}`,
       );
+      return false;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -1227,13 +1240,18 @@ export class DiscordAdapter {
     return result;
   }
 
-  /** Who can currently see a channel. Guild channels resolve to everyone
-   *  whose permissions include VIEW_CHANNEL (requires the GuildMembers
-   *  privileged intent, which this client always requests — the permission
-   *  computation reads the full member cache, so we fetch it first).
-   *  Threads resolve to their JOINED members, which is Discord's own
-   *  membership notion for threads and usually much narrower than who could
-   *  see it. DMs resolve to the two parties. */
+  /** Channel membership, by scope. Guild channels resolve to everyone whose
+   *  computed permissions include VIEW_CHANNEL — which is only true over a
+   *  FULL member cache, so the guarded warm-up must succeed or this throws
+   *  rather than return a silently narrowed list. Threads resolve to their
+   *  JOINED members (Discord's own thread-membership notion; a public thread
+   *  may be readable by non-joined users with parent access — the result
+   *  carries that caveat in `note`). DMs resolve to the two parties.
+   *
+   *  Configured channel filters bound what a residence may INSPECT, not just
+   *  what gets delivered: a channel outside them throws, matching
+   *  listChannels' enforcement. Threads count as their parent channel, same
+   *  as event routing. */
   async listChannelMembers(channelId: string): Promise<DiscordChannelMembers> {
     const channel = await this.client.channels.fetch(channelId);
     if (!channel) throw new Error(`Channel ${channelId} not found`);
@@ -1248,6 +1266,7 @@ export class DiscordAdapter {
       channelName: string | null,
       scope: DiscordChannelMembers['scope'],
       members: DiscordMemberInfo[],
+      note?: string,
     ): DiscordChannelMembers => {
       // Humans first, then bots; alphabetical within each — the agent usually
       // wants "who's here", not a wall of infrastructure accounts up top.
@@ -1263,8 +1282,14 @@ export class DiscordAdapter {
         total: members.length,
         members: members.slice(0, MEMBER_LIST_CAP),
         truncated: members.length > MEMBER_LIST_CAP,
+        ...(note ? { note } : {}),
       };
     };
+    const filterDenied = () =>
+      new Error(
+        `Channel ${channelId} is outside this residence's configured channel filters — ` +
+        'filters bound inspection as well as delivery.',
+      );
 
     if (channel.type === ChannelType.DM) {
       const dm = channel as DMChannel;
@@ -1279,25 +1304,46 @@ export class DiscordAdapter {
     }
 
     if (channel.isThread()) {
-      const threadMembers = await channel.members.fetch();
       const guild = channel.guild;
-      const members: DiscordMemberInfo[] = [];
-      for (const tm of threadMembers.values()) {
-        // Resolve through the guild for nickname + bot flag; a member who
-        // left the guild but lingers in the thread list degrades to id-only.
-        const gm = await guild.members.fetch(tm.id).catch(() => null);
-        members.push(
-          gm ? toInfo(gm) : { id: tm.id, username: tm.id, displayName: tm.id, isBot: false },
-        );
+      if (!this.channelAllowed(guild?.id ?? channel.guildId, channelId, channel.parentId)) {
+        throw filterDenied();
       }
-      return finish(channel.name, 'thread', members);
+      const threadMembers = await channel.members.fetch();
+      // Bulk resolution: one guarded cache warm, then cache reads — never a
+      // serial per-member REST fetch. Warm failure only degrades DISPLAY here
+      // (the membership list itself comes from the thread, not the guild
+      // cache), so unknown members fall back to id-only rather than aborting.
+      await this.warmGuildMemberCache(guild);
+      const members = [...threadMembers.values()].map((tm) => {
+        const gm = guild.members.cache.get(tm.id);
+        return gm ? toInfo(gm) : { id: tm.id, username: tm.id, displayName: tm.id, isBot: false };
+      });
+      return finish(
+        channel.name,
+        'thread-joined',
+        members,
+        'Joined members only. Users with access to the parent channel may be able to read a public thread without joining it.',
+      );
     }
 
     if ('members' in channel && 'guild' in channel) {
       const guildChannel = channel as GuildBasedChannel & { members: Map<string, GuildMember> };
+      const parentId = (guildChannel as { parentId?: string | null }).parentId;
+      if (!this.channelAllowed(guildChannel.guild.id, channelId, parentId)) {
+        throw filterDenied();
+      }
       // The members getter computes VIEW_CHANNEL against the member cache;
-      // fetch first so the answer covers everyone, not just recent speakers.
-      await guildChannel.guild.members.fetch();
+      // warm it first (timeout-guarded) so the answer covers everyone, not
+      // just recent speakers. A failed warm-up must throw: a list computed
+      // over a partial cache would be silently incomplete.
+      const warmed = await this.warmGuildMemberCache(guildChannel.guild);
+      if (!warmed) {
+        throw new Error(
+          'Guild member cache warm-up failed or timed out — a member list computed now ' +
+          'would be silently incomplete. Check the GuildMembers privileged intent ' +
+          '(Developer Portal → Bot → Privileged Gateway Intents).',
+        );
+      }
       const members = [...guildChannel.members.values()].map(toInfo);
       return finish(guildChannel.name, 'guild-channel', members);
     }

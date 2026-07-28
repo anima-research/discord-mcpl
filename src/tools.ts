@@ -166,10 +166,14 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: 'list_channel_members',
     description:
-      'List who can currently see a channel. Guild channels return everyone ' +
-      'with view permission; threads return their joined members; DMs return ' +
-      'the two parties. Humans sort before bots. Large channels are capped ' +
-      '(`truncated: true`, with `total` still the full count).',
+      'List channel membership. Guild channels return everyone with view ' +
+      'permission; threads return their JOINED members only (a public thread ' +
+      'may be readable by non-joined users with parent access — see `scope` ' +
+      "and `note` in the result); DMs return the two parties. Channels " +
+      "outside this residence's configured channel filters cannot be " +
+      'inspected — filters bound inspection, not just delivery. Humans sort ' +
+      'before bots. Large channels are capped (`truncated: true`, with ' +
+      '`total` still the full count).',
     inputSchema: {
       type: 'object',
       properties: {
