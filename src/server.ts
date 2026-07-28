@@ -1175,7 +1175,10 @@ export class DiscordMcplServer {
         const missed = [...this.missedTally.entries()]
           .filter(([, t]) => t.messages > 0)
           .map(([channelId, t]) => ({
-            channelId,
+            // Raw ID first (load-bearing for fetch_* and the tally key),
+            // then resolved labels + composite MCPL id from local caches —
+            // no REST per row (issue #28).
+            ...this.resolveChannelMeta(channelId),
             missedMessages: t.messages,
             missedCharacters: t.characters,
           }))
@@ -1200,7 +1203,7 @@ export class DiscordMcplServer {
         }
         if (this.subscribedChannels.has(channelId)) {
           return {
-            channelId,
+            ...this.resolveChannelMeta(channelId),
             subscribed: true,
             missedMessages: 0,
             missedCharacters: 0,
@@ -1210,14 +1213,14 @@ export class DiscordMcplServer {
         const tally = this.missedTally.get(channelId);
         if (!tally) {
           return {
-            channelId,
+            ...this.resolveChannelMeta(channelId),
             subscribed: false,
             tracked: false,
             note: 'Not tracking this channel. A missed-ambient tally starts only after you unsubscribe from a channel you were subscribed to.',
           };
         }
         return {
-          channelId,
+          ...this.resolveChannelMeta(channelId),
           subscribed: false,
           tracked: true,
           missedMessages: tally.messages,
@@ -1633,6 +1636,71 @@ export class DiscordMcplServer {
 
   // ── Reconnect catch-up sweep ──
 
+  /** Channel display metadata for tool results, resolved WITHOUT a REST
+   *  round-trip: gateway cache first, then the registered MCPL descriptor.
+   *  Raw IDs stay load-bearing (fetch_around/fetch_history take them);
+   *  labels are best-effort with an explicit `metadataResolved` flag so a
+   *  failed lookup is distinguishable from an unnamed field (issue #28). */
+  private resolveChannelMeta(channelId: string): {
+    channelId: string;
+    mcplChannelId: string | null;
+    channelName: string | null;
+    guildId: string | null;
+    guildName: string | null;
+    metadataResolved: boolean;
+  } {
+    if (this.dmChannelIds.has(channelId)) {
+      const desc = this.channelManager.get(mcplChannelId('dm', channelId));
+      const recipient =
+        (desc?.metadata as { recipientName?: string } | undefined)?.recipientName ?? null;
+      return {
+        channelId,
+        mcplChannelId: mcplChannelId('dm', channelId),
+        channelName: recipient,
+        guildId: null,
+        guildName: null,
+        metadataResolved: recipient !== null,
+      };
+    }
+    const cached = this.discord.getCachedChannelMeta(channelId);
+    if (cached?.guildId) {
+      return {
+        channelId,
+        mcplChannelId: mcplChannelId(cached.guildId, channelId),
+        channelName: cached.name,
+        guildId: cached.guildId,
+        guildName: cached.guildName,
+        metadataResolved: cached.name !== null,
+      };
+    }
+    // Descriptor fallback: registration keeps address + label even when the
+    // gateway cache doesn't hold the channel (evicted, or a filtered late
+    // join). Label format is toDescriptor's `#name (Guild)`.
+    for (const desc of this.channelManager.getAll()) {
+      const addr = desc.address as { guildId?: string; channelId?: string } | undefined;
+      if (addr?.channelId === channelId && addr.guildId && addr.guildId !== 'dm') {
+        const m = /^#(.+) \((.+)\)$/.exec(desc.label ?? '');
+        return {
+          channelId,
+          mcplChannelId: desc.id,
+          channelName: m ? m[1] : (desc.label ?? null),
+          guildId: addr.guildId,
+          guildName: m ? m[2] : null,
+          metadataResolved: true,
+        };
+      }
+    }
+    dbg('channel-meta:unresolved', { channelId });
+    return {
+      channelId,
+      mcplChannelId: null,
+      channelName: null,
+      guildId: null,
+      guildName: null,
+      metadataResolved: false,
+    };
+  }
+
   /** On (re)connect, deliver what arrived while the bot was offline:
    *  mentions + DMs from any known channel, plus the full missed backscroll
    *  for subscribed channels (which already receive ambient delivery). Each
@@ -1720,7 +1788,15 @@ export class DiscordMcplServer {
       }
       const hadMention = isDM || mentionCount > 0;
 
-      const meta = await this.discord.getChannelMeta(channelId).catch(() => null);
+      // Cache-first, REST only as fallback; a failed lookup leaves a trace
+      // instead of silently shipping a name-less block (issue #28).
+      let meta = this.discord.getCachedChannelMeta(channelId);
+      if (!meta) {
+        meta = await this.discord.getChannelMeta(channelId).catch((err) => {
+          dbg('sweep:channel-meta-failed', { channelId, error: (err as Error).message });
+          return null;
+        });
+      }
       const attrs: string[] = [];
       if (meta?.name) attrs.push(`channel="#${meta.name}"`);
       // channelId is load-bearing: it's what fetch_around/fetch_history need to

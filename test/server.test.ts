@@ -132,6 +132,14 @@ class MockDiscordAdapter {
     return this.channelMeta;
   }
 
+  /** Gateway-cache metadata by raw channel id. Empty by default so tests of
+   *  the REST fallback keep exercising getChannelMeta. */
+  cachedChannelMeta: Record<string, MockDiscordAdapter['channelMeta']> = {};
+
+  getCachedChannelMeta(channelId: string): MockDiscordAdapter['channelMeta'] | null {
+    return this.cachedChannelMeta[channelId] ?? null;
+  }
+
   async listGuilds(): Promise<Array<{ id: string; name: string; memberCount: number }>> {
     return [{ id: 'g1', name: 'Test Guild', memberCount: 10 }];
   }
@@ -852,6 +860,13 @@ describe('DiscordMcplServer', () => {
     assert.equal(missed.tracked, true);
     assert.equal(missed.missedMessages, 1);
     assert.equal(missed.missedCharacters, 'hello world'.length);
+    // Issue #28: raw id stays load-bearing, labels + composite id resolved
+    // from local metadata (registered descriptor here — no REST).
+    assert.equal(missed.channelId, 'c1');
+    assert.equal(missed.mcplChannelId, 'discord:g1:c1');
+    assert.equal(missed.channelName, 'general');
+    assert.equal(missed.guildName, 'Test Guild');
+    assert.equal(missed.metadataResolved, true);
 
     // Reopening clears the tally.
     await client.sendRequest('channels/open', {
@@ -860,6 +875,67 @@ describe('DiscordMcplServer', () => {
     const after = await call('channel_missed', { channelId: 'c1' });
     assert.equal(after.subscribed, true);
     assert.equal(after.missedMessages, 0);
+
+    client.close();
+    await serverPromise;
+  });
+
+  it('labels list_subscriptions backlog rows and flags unresolvable lookups (issue #28)', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r = (await client.sendRequest('tools/call', { name, arguments: args })) as {
+        content: Array<{ type: string; text?: string }>;
+      };
+      return JSON.parse(r.content[0]?.text ?? '{}');
+    };
+
+    // Anchor a tally on c1, then let an ambient message accrue.
+    await client.sendRequest('channels/open', {
+      channelId: 'discord:g1:c1', type: 'discord', address: { guildId: 'g1', channelId: 'c1' },
+    });
+    await client.sendRequest('channels/close', { channelId: 'discord:g1:c1' });
+    discord.simulateMessage({
+      id: 'm200', content: 'ambient', cleanContent: 'ambient',
+      authorId: 'u1', authorName: 'Alice', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+      mentions: [], attachments: [], timestamp: new Date(),
+    } as DiscordMessageData);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const subs = await call('list_subscriptions', {});
+    assert.equal(subs.unsubscribedWithBacklog.length, 1);
+    const row = subs.unsubscribedWithBacklog[0];
+    assert.equal(row.channelId, 'c1');
+    assert.equal(row.mcplChannelId, 'discord:g1:c1');
+    assert.equal(row.channelName, 'general');
+    assert.equal(row.guildId, 'g1');
+    assert.equal(row.guildName, 'Test Guild');
+    assert.equal(row.metadataResolved, true);
+    assert.equal(row.missedMessages, 1);
+
+    // The gateway cache wins over the descriptor when present (fresher name).
+    discord.cachedChannelMeta['c1'] = {
+      name: 'general-renamed', guildId: 'g1', guildName: 'Test Guild', isDM: false,
+    };
+    const renamed = await call('channel_missed', { channelId: 'c1' });
+    assert.equal(renamed.channelName, 'general-renamed');
+    assert.equal(renamed.metadataResolved, true);
+
+    // Unknown channel: failure is explicit, not an indistinguishable omission,
+    // and the raw id survives.
+    const unknown = await call('channel_missed', { channelId: 'c_ghost' });
+    assert.equal(unknown.tracked, false);
+    assert.equal(unknown.channelId, 'c_ghost');
+    assert.equal(unknown.mcplChannelId, null);
+    assert.equal(unknown.channelName, null);
+    assert.equal(unknown.metadataResolved, false);
 
     client.close();
     await serverPromise;
