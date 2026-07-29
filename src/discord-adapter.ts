@@ -96,6 +96,11 @@ export interface DiscordAttachment {
   contentType: string | null;
   /** Size in bytes. */
   size: number;
+  /** Set when the attachment rode in on a forwarded snapshot rather than on
+   *  the message itself: 1-based index of the carrying snapshot. Lets
+   *  delivery markers name the source forward explicitly instead of relying
+   *  on array-order inference when a message carries several forwards. */
+  forwardedSnapshotIndex?: number;
 }
 
 export interface DiscordMessageData {
@@ -247,10 +252,12 @@ export function buildReactionSnippet(text: string | null | undefined): string | 
     : collapsed;
 }
 
-/** The slice of a discord.js MessageSnapshot that forward rendering reads. */
+/** The slice of a discord.js MessageSnapshot that forward rendering reads.
+ *  `attachments` is a discord.js Collection at runtime; `values()` is optional
+ *  here so tests and older gateway shapes can pass a bare `{ size }`. */
 interface ForwardSnapshot {
   content?: string | null;
-  attachments?: { size: number } | null;
+  attachments?: { size: number; values?(): IterableIterator<unknown> } | null;
   embeds?: { length: number } | null;
 }
 
@@ -969,7 +976,7 @@ export class DiscordAdapter {
           isBot: m.author.bot,
           content: cleanContent,
           cleanContent,
-          attachments: mapAttachments(m),
+          attachments: mapAllAttachments(m),
           reactions: extractReactions(m),
           mentionsBot: this.messageMentionsBot(m),
           timestamp: m.createdAt,
@@ -1019,7 +1026,7 @@ export class DiscordAdapter {
         isBot: m.author.bot,
         content: cleanContent,
         cleanContent,
-        attachments: mapAttachments(m),
+        attachments: mapAllAttachments(m),
         reactions: extractReactions(m),
         mentionsBot: this.messageMentionsBot(m),
         timestamp: m.createdAt,
@@ -1599,7 +1606,7 @@ export class DiscordAdapter {
       // can be treated as direct address regardless of the ping toggle.
       replyToUserId: message.mentions.repliedUser?.id ?? null,
       mentions: message.mentions.users.map((u) => u.id),
-      attachments: mapAttachments(message),
+      attachments: mapAllAttachments(message),
       timestamp: message.createdAt,
     };
   }
@@ -1640,7 +1647,7 @@ function systemMessageText(type: MessageType): string {
 }
 
 /** Map a discord.js message's attachments collection to DiscordAttachment[]. */
-function mapAttachments(message: { attachments?: { values(): IterableIterator<unknown> } }): DiscordAttachment[] {
+function mapAttachments(message: { attachments?: { values?(): IterableIterator<unknown> } }): DiscordAttachment[] {
   const coll = message.attachments;
   if (!coll || typeof coll.values !== 'function') return [];
   const out: DiscordAttachment[] = [];
@@ -1654,6 +1661,36 @@ function mapAttachments(message: { attachments?: { values(): IterableIterator<un
       contentType: a.contentType ?? null,
       size: typeof a.size === 'number' ? a.size : 0,
     });
+  }
+  return out;
+}
+
+/** A message's own attachments plus any carried by forwarded snapshots.
+ *  Snapshot attachments keep their original CDN URLs (signed like any other),
+ *  so merging them here sends a forward's media through the same delivery
+ *  path as a native upload — images inlined as blocks, text files inlined,
+ *  everything else a name+URL note — on the live path AND both history
+ *  paths. The forwarded line's "[N attachments]" count note stays: it tells
+ *  the agent which message the media rode in on. */
+export function mapAllAttachments(m: {
+  attachments?: { values?(): IterableIterator<unknown> };
+  messageSnapshots?: { size: number; values(): Iterable<ForwardSnapshot> } | null;
+}): DiscordAttachment[] {
+  const out = mapAttachments(m);
+  if (m.messageSnapshots && m.messageSnapshots.size > 0) {
+    // Dedup by attachment id: a re-forwarded forward can surface the same
+    // attachment in more than one snapshot (or in both the outer message and
+    // a snapshot). First occurrence wins — outer-most is least surprising.
+    const seen = new Set(out.map((a) => a.id));
+    let snapshotIndex = 0;
+    for (const snap of m.messageSnapshots.values()) {
+      snapshotIndex++;
+      for (const att of mapAttachments({ attachments: snap.attachments ?? undefined })) {
+        if (seen.has(att.id)) continue;
+        seen.add(att.id);
+        out.push({ ...att, forwardedSnapshotIndex: snapshotIndex });
+      }
+    }
   }
   return out;
 }

@@ -2271,6 +2271,22 @@ export class DiscordMcplServer {
       }
     };
 
+    // Aggregate budget across the whole batch: the per-item ceilings bound
+    // each attachment, but a multi-snapshot forward can carry many of them —
+    // without a total cap one message could balloon the context payload.
+    // Skipped items degrade to a name+URL note, same as other non-inlined.
+    const AGGREGATE_FETCH_BUDGET = 40 * 1024 * 1024;
+    let fetchBudgetLeft = AGGREGATE_FETCH_BUDGET;
+
+    // Provenance marker: name the carrying forward. Numbered only when the
+    // batch spans several snapshots — the common single-forward case stays
+    // as a plain "(forwarded)".
+    const multiSnapshot = attachments.some((a) => (a.forwardedSnapshotIndex ?? 0) > 1);
+    const fwd = (att: DiscordAttachment) =>
+      att.forwardedSnapshotIndex === undefined
+        ? ''
+        : multiSnapshot ? ` (forwarded #${att.forwardedSnapshotIndex})` : ' (forwarded)';
+
     const blocks: ContentBlock[] = [];
     for (const att of attachments) {
       const ct = (att.contentType || '').toLowerCase();
@@ -2280,10 +2296,16 @@ export class DiscordMcplServer {
         TEXT_EXT.test(att.name) ||
         (att.contentType === null && att.size > 0 && att.size <= MAX_TEXT_BYTES);
       try {
-        if (isImage) {
+        if ((isImage || isText) && att.size > fetchBudgetLeft) {
+          blocks.push(textContent(
+            `[attachment: ${att.name}${fwd(att)} (${fmt(att.size)}) not inlined — message attachment budget exhausted: ${att.url}]`,
+          ));
+          dbg('attachment:budget-exhausted', { name: att.name, size: att.size, budgetLeft: fetchBudgetLeft });
+        } else if (isImage) {
           if (att.size > IMAGE_FETCH_CEILING) {
-            blocks.push(textContent(`[image attachment "${att.name}" (${fmt(att.size)}) too large to fetch — ${att.url}]`));
+            blocks.push(textContent(`[image attachment "${att.name}"${fwd(att)} (${fmt(att.size)}) too large to fetch — ${att.url}]`));
           } else {
+            fetchBudgetLeft -= att.size;
             const res = await fetchWithTimeout(att.url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const raw = Buffer.from(await res.arrayBuffer());
@@ -2293,12 +2315,13 @@ export class DiscordMcplServer {
             const norm = await normalizeImageForInference(raw, att.contentType);
             if (norm) {
               blocks.push({ type: 'image', data: norm.data, mimeType: norm.mimeType } as ContentBlock);
-              blocks.push(textContent(`[image attachment: ${att.name}]`));
+              blocks.push(textContent(`[image attachment: ${att.name}${fwd(att)}]`));
             } else {
-              blocks.push(textContent(`[image attachment "${att.name}" (${fmt(att.size)}) could not be inlined — ${att.url}]`));
+              blocks.push(textContent(`[image attachment "${att.name}"${fwd(att)} (${fmt(att.size)}) could not be inlined — ${att.url}]`));
             }
           }
         } else if (isText) {
+          fetchBudgetLeft -= att.size;
           const res = await fetchWithTimeout(att.url);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           let txt = await res.text();
@@ -2308,10 +2331,10 @@ export class DiscordMcplServer {
             truncated = true;
           }
           blocks.push(
-            textContent(`[attachment: ${att.name} (${fmt(att.size)})]\n${txt}${truncated ? '\n…[truncated]' : ''}`),
+            textContent(`[attachment: ${att.name}${fwd(att)} (${fmt(att.size)})]\n${txt}${truncated ? '\n…[truncated]' : ''}`),
           );
         } else {
-          blocks.push(textContent(`[attachment: ${att.name} (${ct || 'unknown type'}, ${fmt(att.size)}) — not inlined: ${att.url}]`));
+          blocks.push(textContent(`[attachment: ${att.name}${fwd(att)} (${ct || 'unknown type'}, ${fmt(att.size)}) — not inlined: ${att.url}]`));
         }
         dbg('attachment', {
           name: att.name,
