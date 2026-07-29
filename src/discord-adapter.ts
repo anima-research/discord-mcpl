@@ -136,6 +136,11 @@ export interface DiscordMessageData {
    *  the bot isn't explicitly @-mentioned. */
   replyToUserId?: string | null;
   mentions: string[];
+  /** True when the message mentions the bot's own managed role (@BotName the
+   *  ROLE — Discord renders it identically to a user ping and most humans
+   *  can't tell which they picked from autocomplete). Found live 2026-07-29:
+   *  a role-ping at a resident fell through as ambient and never woke her. */
+  mentionsBotRole?: boolean;
   /** Files attached to the message (images, text files, etc.). Empty when none. */
   attachments: DiscordAttachment[];
   /** Emoji reactions on this message at serialization time. Usually empty for a
@@ -1131,7 +1136,11 @@ export class DiscordAdapter {
   private messageMentionsBot(m: Message): boolean {
     const botId = this.client.user?.id;
     if (!botId) return false;
-    return m.mentions.users.has(botId) || m.mentions.repliedUser?.id === botId;
+    return (
+      m.mentions.users.has(botId) ||
+      m.mentions.repliedUser?.id === botId ||
+      m.mentions.roles.some((r) => (r as { tags?: { botId?: string } }).tags?.botId === botId)
+    );
   }
 
   async sendTyping(channelId: string): Promise<void> {
@@ -1781,6 +1790,9 @@ export class DiscordAdapter {
       // can be treated as direct address regardless of the ping toggle.
       replyToUserId: message.mentions.repliedUser?.id ?? null,
       mentions: message.mentions.users.map((u) => u.id),
+      mentionsBotRole: message.mentions.roles.some(
+        (r) => (r as { tags?: { botId?: string } }).tags?.botId === this.client.user?.id,
+      ),
       attachments: mapAllAttachments(message),
       timestamp: message.createdAt,
     };

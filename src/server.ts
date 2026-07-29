@@ -2485,7 +2485,8 @@ export class DiscordMcplServer {
     // never by a mere reply. That breaks auto-reply loops between two bots
     // (a reply is structural; an @mention is deliberate) while humans keep
     // waking the bot via reply or mention as before.
-    const isExplicitMention = botId !== null && msg.mentions.includes(botId);
+    const isExplicitMention =
+      (botId !== null && msg.mentions.includes(botId)) || msg.mentionsBotRole === true;
     // Discord's "ping replied user" toggle controls only whether the bot
     // appears in msg.mentions; the reply itself is addressed to the bot
     // either way.
