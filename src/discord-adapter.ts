@@ -34,6 +34,10 @@ import { dbg } from './debug-log.js';
 /** Maximum attachments Discord accepts on a single message. */
 const MAX_DISCORD_ATTACHMENTS = 10;
 
+/** Cap on members returned by listChannelMembers — a large guild's #general
+ *  is visible to thousands; the agent gets the first page plus the total. */
+const MEMBER_LIST_CAP = 200;
+
 /** A file the agent wants to upload, read from a local path on the host. */
 export interface OutgoingFile {
   /** Absolute local filesystem path to the file to upload. */
@@ -151,6 +155,35 @@ export interface DiscordChannelInfo {
   name: string;
   type: 'text' | 'voice' | 'category' | 'thread' | 'forum' | 'unknown';
   parentId?: string;
+}
+
+/** One member of a channel, as the agent should see them. */
+export interface DiscordMemberInfo {
+  id: string;
+  /** The stable @handle (Discord username). */
+  username: string;
+  /** Name shown in this channel: server nickname > global display name. */
+  displayName: string;
+  isBot: boolean;
+}
+
+export interface DiscordChannelMembers {
+  channelId: string;
+  channelName: string | null;
+  /** How membership was resolved: everyone who can view a guild channel
+   *  (computed permissions over a fully warmed member cache), the JOINED
+   *  members of a thread (Discord's own thread-membership notion — a public
+   *  thread may be readable by non-joined users with parent access), or the
+   *  two parties of a DM. */
+  scope: 'guild-channel' | 'thread-joined' | 'dm';
+  /** Full member count before the cap was applied. */
+  total: number;
+  /** Humans first, then bots; alphabetical by display name within each. */
+  members: DiscordMemberInfo[];
+  /** True when `members` was capped (see MEMBER_LIST_CAP). */
+  truncated: boolean;
+  /** Scope caveat the agent should see (set for threads). */
+  note?: string;
 }
 
 export interface HistoryMessage {
@@ -1107,13 +1140,19 @@ export class DiscordAdapter {
     }
   }
 
+  /** Timeout for the bulk guild-member fetch. Instance-scoped so tests can
+   *  shrink it; 30s in production. */
+  private memberFetchTimeoutMs = 30_000;
+
   /** Bulk-fetch all members of a guild into the local cache. Idempotent
    *  (safe to call multiple times). Wrapped in a timeout so that
    *  misconfigured intents — portal-disabled but client-requested, for
    *  instance — fail fast with a clear error instead of hanging the
-   *  whole client. */
-  private async warmGuildMemberCache(guild: Guild): Promise<void> {
-    const TIMEOUT_MS = 30_000;
+   *  whole client. Returns whether the warm-up succeeded; callers whose
+   *  correctness depends on a FULL cache (permission-computed member lists)
+   *  must check it — a partial cache silently narrows their answer. */
+  private async warmGuildMemberCache(guild: Guild): Promise<boolean> {
+    const TIMEOUT_MS = this.memberFetchTimeoutMs;
     const fetchP = guild.members.fetch();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutP = new Promise<never>((_, reject) => {
@@ -1135,10 +1174,12 @@ export class DiscordAdapter {
       console.error(
         `[discord-mcpl] member cache warmed for "${guild.name}" (${guild.members.cache.size} members)`,
       );
+      return true;
     } catch (err) {
       console.error(
         `[discord-mcpl] member cache warm-up failed for "${guild.name}": ${(err as Error).message}`,
       );
+      return false;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -1204,6 +1245,117 @@ export class DiscordAdapter {
       }
     });
     return result;
+  }
+
+  /** Channel membership, by scope. Guild channels resolve to everyone whose
+   *  computed permissions include VIEW_CHANNEL — which is only true over a
+   *  FULL member cache, so the guarded warm-up must succeed or this throws
+   *  rather than return a silently narrowed list. Threads resolve to their
+   *  JOINED members (Discord's own thread-membership notion; a public thread
+   *  may be readable by non-joined users with parent access — the result
+   *  carries that caveat in `note`). DMs resolve to the two parties.
+   *
+   *  Configured channel filters bound what a residence may INSPECT, not just
+   *  what gets delivered: a channel outside them throws, matching
+   *  listChannels' enforcement. Threads count as their parent channel, same
+   *  as event routing. */
+  async listChannelMembers(channelId: string): Promise<DiscordChannelMembers> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel) throw new Error(`Channel ${channelId} not found`);
+
+    const toInfo = (m: GuildMember): DiscordMemberInfo => ({
+      id: m.id,
+      username: m.user.username,
+      displayName: m.displayName,
+      isBot: m.user.bot,
+    });
+    const finish = (
+      channelName: string | null,
+      scope: DiscordChannelMembers['scope'],
+      members: DiscordMemberInfo[],
+      note?: string,
+    ): DiscordChannelMembers => {
+      // Humans first, then bots; alphabetical within each — the agent usually
+      // wants "who's here", not a wall of infrastructure accounts up top.
+      members.sort(
+        (a, b) =>
+          Number(a.isBot) - Number(b.isBot) ||
+          a.displayName.localeCompare(b.displayName, 'en', { sensitivity: 'base' }),
+      );
+      return {
+        channelId,
+        channelName,
+        scope,
+        total: members.length,
+        members: members.slice(0, MEMBER_LIST_CAP),
+        truncated: members.length > MEMBER_LIST_CAP,
+        ...(note ? { note } : {}),
+      };
+    };
+    const filterDenied = () =>
+      new Error(
+        `Channel ${channelId} is outside this residence's configured channel filters — ` +
+        'filters bound inspection as well as delivery.',
+      );
+
+    if (channel.type === ChannelType.DM) {
+      const dm = channel as DMChannel;
+      const recipient = dm.recipient ?? (dm.recipientId ? await this.client.users.fetch(dm.recipientId) : null);
+      const me = this.client.user;
+      const members: DiscordMemberInfo[] = [];
+      for (const u of [recipient, me]) {
+        if (!u) continue;
+        members.push({ id: u.id, username: u.username, displayName: u.displayName ?? u.username, isBot: u.bot });
+      }
+      return finish(null, 'dm', members);
+    }
+
+    if (channel.isThread()) {
+      const guild = channel.guild;
+      if (!this.channelAllowed(guild?.id ?? channel.guildId, channelId, channel.parentId)) {
+        throw filterDenied();
+      }
+      const threadMembers = await channel.members.fetch();
+      // Bulk resolution: one guarded cache warm, then cache reads — never a
+      // serial per-member REST fetch. Warm failure only degrades DISPLAY here
+      // (the membership list itself comes from the thread, not the guild
+      // cache), so unknown members fall back to id-only rather than aborting.
+      await this.warmGuildMemberCache(guild);
+      const members = [...threadMembers.values()].map((tm) => {
+        const gm = guild.members.cache.get(tm.id);
+        return gm ? toInfo(gm) : { id: tm.id, username: tm.id, displayName: tm.id, isBot: false };
+      });
+      return finish(
+        channel.name,
+        'thread-joined',
+        members,
+        'Joined members only. Users with access to the parent channel may be able to read a public thread without joining it.',
+      );
+    }
+
+    if ('members' in channel && 'guild' in channel) {
+      const guildChannel = channel as GuildBasedChannel & { members: Map<string, GuildMember> };
+      const parentId = (guildChannel as { parentId?: string | null }).parentId;
+      if (!this.channelAllowed(guildChannel.guild.id, channelId, parentId)) {
+        throw filterDenied();
+      }
+      // The members getter computes VIEW_CHANNEL against the member cache;
+      // warm it first (timeout-guarded) so the answer covers everyone, not
+      // just recent speakers. A failed warm-up must throw: a list computed
+      // over a partial cache would be silently incomplete.
+      const warmed = await this.warmGuildMemberCache(guildChannel.guild);
+      if (!warmed) {
+        throw new Error(
+          'Guild member cache warm-up failed or timed out — a member list computed now ' +
+          'would be silently incomplete. Check the GuildMembers privileged intent ' +
+          '(Developer Portal → Bot → Privileged Gateway Intents).',
+        );
+      }
+      const members = [...guildChannel.members.values()].map(toInfo);
+      return finish(guildChannel.name, 'guild-channel', members);
+    }
+
+    throw new Error(`Channel ${channelId} has no queryable membership (type ${channel.type})`);
   }
 
   /** List the custom (server) emojis the bot can see — the shared palette for

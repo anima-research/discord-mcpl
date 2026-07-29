@@ -143,6 +143,24 @@ class MockDiscordAdapter {
     ];
   }
 
+  /** Channel-members fixture; tests may reassign. */
+  channelMembersToReturn = {
+    channelId: 'c1',
+    channelName: 'general',
+    scope: 'guild-channel' as const,
+    total: 3,
+    members: [
+      { id: 'u1', username: 'ra', displayName: 'Ra', isBot: false },
+      { id: 'u2', username: 'tessera', displayName: 'Tessera', isBot: false },
+      { id: 'b1', username: 'connectome', displayName: 'Connectome', isBot: true },
+    ],
+    truncated: false,
+  };
+
+  async listChannelMembers(channelId: string): Promise<MockDiscordAdapter['channelMembersToReturn']> {
+    return { ...this.channelMembersToReturn, channelId };
+  }
+
   async createTextChannel(): Promise<DiscordChannelInfo> {
     return { id: 'c_new', name: 'new-channel', type: 'text' };
   }
@@ -306,6 +324,31 @@ describe('DiscordMcplServer', () => {
     assert.ok(names.includes('send_message'));
     assert.ok(names.includes('list_channels'));
     assert.ok(names.includes('fetch_history'));
+
+    client.close();
+    await serverPromise;
+  });
+
+  it('tools/call list_channel_members returns the membership snapshot', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+
+    await mcpHandshake(client);
+
+    const result = (await client.sendRequest('tools/call', {
+      name: 'list_channel_members',
+      arguments: { channelId: 'c1' },
+    })) as { content: Array<{ type: string; text?: string }>; isError?: boolean };
+
+    assert.ok(!result.isError);
+    const payload = JSON.parse(result.content[0]?.text ?? 'null');
+    assert.equal(payload.channelId, 'c1');
+    assert.equal(payload.scope, 'guild-channel');
+    assert.equal(payload.total, 3);
+    assert.equal(payload.members.length, 3);
+    assert.equal(payload.members[0].username, 'ra');
+    assert.equal(payload.truncated, false);
 
     client.close();
     await serverPromise;

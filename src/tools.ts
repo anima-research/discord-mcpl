@@ -164,6 +164,25 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
   {
+    name: 'list_channel_members',
+    description:
+      'List channel membership. Guild channels return everyone with view ' +
+      'permission; threads return their JOINED members only (a public thread ' +
+      'may be readable by non-joined users with parent access — see `scope` ' +
+      "and `note` in the result); DMs return the two parties. Channels " +
+      "outside this residence's configured channel filters cannot be " +
+      'inspected — filters bound inspection, not just delivery. Humans sort ' +
+      'before bots. Large channels are capped (`truncated: true`, with ' +
+      '`total` still the full count).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'Discord channel ID' },
+      },
+      required: ['channelId'],
+    },
+  },
+  {
     name: 'list_emojis',
     description:
       'List the custom (server) emojis available to use. Put `token` (e.g. ' +
