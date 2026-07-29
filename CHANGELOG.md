@@ -5,6 +5,21 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Added
+
+- **Reserved-reaction projection policy** (`DISCORD_RESERVED_REACTIONS_FILE`,
+  issue #21): reaction emojis reserved for classifier signaling are filtered
+  out of every model-visible surface — live reaction events (including their
+  event ids), `fetch_history` / `fetch_around` results, and channel-open
+  backscroll metadata — before any text or token is produced. Policy is a
+  versioned JSON file (custom-emoji ids, exact unicode after NFC/presentation
+  normalization, and families covering skin-tone variants); unset means no
+  protection and startup says so; a configured-but-broken file fails closed
+  (all reactions suppressed, `reactionsUnavailable: true` marks history
+  messages) until repaired; the file hot-reloads with last-known-good on bad
+  rewrites. Raw Discord state is untouched — this is projection, not
+  deletion. A production glyph set must be supplied at deploy time.
+
 ### Changed
 
 - **Text attachments now inline into context only up to

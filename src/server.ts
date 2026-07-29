@@ -46,7 +46,8 @@ import type {
   ChannelsOutgoingCompleteParams,
 } from '@animalabs/mcpl-core';
 
-import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile } from './discord-adapter.js';
+import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile, ReactionSummary } from './discord-adapter.js';
+import { ReservedReactionsPolicy } from './reserved-reactions.js';
 import type { ChatInputCommandInteraction } from 'discord.js';
 import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
@@ -226,6 +227,12 @@ export class DiscordMcplServer {
    *  will land inside the granted window. Gates the reconnect sweep. */
   private policyAnswered: Promise<void>;
   private resolvePolicyAnswered!: () => void;
+
+  /** Reserved-reaction projection policy (issue #21): which reactions may be
+   *  shown to the model at all, across every surface — live events and
+   *  history snapshots alike. Path is read once at construction; the file
+   *  itself hot-reloads (see ReservedReactionsPolicy). */
+  private reservedReactions = new ReservedReactionsPolicy(process.env.DISCORD_RESERVED_REACTIONS_FILE);
 
   /** Channels the agent has explicitly MUTED: no ambient, no mention/reply wake,
    *  and no auto-subscribe-on-mention. Dropped at the top of
@@ -716,6 +723,14 @@ export class DiscordMcplServer {
    */
   async serve(conn: McplConnection): Promise<void> {
     this.conn = conn;
+
+    // Reserved-reaction protection is opt-in; say plainly when it isn't on
+    // rather than letting an unset env read as safety.
+    if (this.reservedReactions.status().state === 'unset') {
+      console.error(
+        '[discord-mcpl] reserved-reactions: policy unset (DISCORD_RESERVED_REACTIONS_FILE) — reserved-reaction protection NOT active',
+      );
+    }
 
     // Set up Discord event forwarding
     this.setupDiscordForwarding();
@@ -1219,7 +1234,7 @@ export class DiscordMcplServer {
         return this.refreshChannels();
 
       case 'fetch_history':
-        return await this.discord.fetchHistory(
+        return this.projectHistoryReactions(await this.discord.fetchHistory(
           args.channelId as string,
           {
             // Per-channel backscroll cap (DISCORD_BACKSCROLL_CHANNELS) also
@@ -1228,14 +1243,14 @@ export class DiscordMcplServer {
             ...(args.before ? { before: args.before as string } : {}),
             ...(args.after ? { after: args.after as string } : {}),
           },
-        );
+        ));
 
       case 'fetch_around':
-        return await this.discord.fetchAround(
+        return this.projectHistoryReactions(await this.discord.fetchAround(
           args.channelId as string,
           args.messageId as string,
           this.capHistoryLimit(args.channelId as string, (args.limit as number) ?? 50),
-        );
+        ));
 
       case 'create_text_channel':
         return await this.discord.createTextChannel(
@@ -1823,6 +1838,25 @@ export class DiscordMcplServer {
     };
   }
 
+  /** Project reserved reactions out of history messages before they become
+   *  model-visible (fetch_history / fetch_around tool results, channel-open
+   *  backscroll metadata). When suppression is due to a failed-closed policy
+   *  the message carries `reactionsUnavailable: true` — an empty list that
+   *  actually means "couldn't project" must not read as "none" (Sol's #31
+   *  ruling, truthfulness on partial state). */
+  private projectHistoryReactions<T extends { reactions?: ReactionSummary[] }>(
+    msgs: T[],
+  ): Array<T & { reactionsUnavailable?: true }> {
+    return msgs.map((m) => {
+      const proj = this.reservedReactions.project(m.reactions);
+      return {
+        ...m,
+        reactions: proj.reactions,
+        ...(proj.unavailable ? { reactionsUnavailable: true as const } : {}),
+      };
+    });
+  }
+
   /** On (re)connect, deliver what arrived while the bot was offline:
    *  mentions + DMs from any known channel, plus the full missed backscroll
    *  for subscribed channels (which already receive ambient delivery). Each
@@ -2164,7 +2198,7 @@ export class DiscordMcplServer {
           : {}),
       });
       messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-      result.history = messages.map((message) => ({
+      result.history = this.projectHistoryReactions(messages).map((message) => ({
         channelId: desc!.id,
         messageId: message.id,
         author: { id: message.authorId, name: message.authorName },
@@ -2175,6 +2209,7 @@ export class DiscordMcplServer {
           attachments: message.attachments,
           reactions: filterSuppressedReactions(message.reactions, this.suppressedReactionEmojis),
           backscroll: true,
+          ...(message.reactionsUnavailable ? { reactionsUnavailable: true } : {}),
         },
       }));
       result.historyTruncated = requested > limit;
@@ -2369,14 +2404,22 @@ export class DiscordMcplServer {
       // match on. Issue #14.
       this.ensureReactionChannelsLoaded();
       if (!this.reactionChannels.has(ev.channelId)) return;
-      // Suppressed emojis (e.g. host refusal markers) never reach the agent —
-      // see suppressedReactionEmojis. Dropped silently but visible in dbg.
-      if (isSuppressedReactionEmoji(ev.emoji, this.suppressedReactionEmojis)) {
-        dbg('reaction:suppressed', {
-          emoji: ev.emoji,
+      // Reserved-reaction projection (issue #21): decided before ANY
+      // model-visible text or the event id exists, so a reserved reaction
+      // leaves no glyph, name, or token anywhere — the eventId below embeds
+      // the emoji, which is exactly why this guard sits above it. The dbg
+      // line deliberately carries no emoji either. A failed-closed policy
+      // suppresses every reaction event until the file is repaired.
+      // (Subsumes the DISCORD_SUPPRESS_REACTION_EMOJIS emergency guard —
+      // that env var now feeds this same policy as a legacy source.)
+      if (
+        this.reservedReactions.suppressAll() ||
+        this.reservedReactions.isReserved({ emojiId: ev.emojiId ?? null, emoji: ev.emoji })
+      ) {
+        dbg('reaction:reserved-suppressed', {
           channelId: ev.channelId,
+          messageId: ev.messageId,
           action: ev.action,
-          reactor: ev.userId,
         });
         return;
       }
