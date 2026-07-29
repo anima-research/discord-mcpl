@@ -110,6 +110,14 @@ const IMAGE_OUTPUT_RAW_CAP = 3.5 * 1024 * 1024;
  *  pixel limit guards the decoded bitmap against decompression bombs. */
 const IMAGE_FETCH_CEILING = 25 * 1024 * 1024;
 
+/** Absolute ceiling on inlined text-attachment bytes. The configurable
+ *  inline cap (DISCORD_ATTACHMENT_INLINE_MAX_BYTES) clamps to this — however
+ *  high the knob is set, a text attachment can never put more than 256KiB
+ *  into context. */
+const MAX_TEXT_BYTES = 256 * 1024;
+/** Default inline cap for text attachments (issue #30): 5KiB. */
+const DEFAULT_ATTACHMENT_INLINE_MAX_BYTES = 5120;
+
 interface NormalizedImage {
   data: string; // base64
   mimeType: string;
@@ -269,6 +277,36 @@ export class DiscordMcplServer {
     if (!raw) return 80;
     const n = parseInt(raw, 10);
     return Number.isFinite(n) && n > 0 && n <= 10000 ? n : 80;
+  }
+
+  /** Inline cap for text attachments on live delivery, in bytes. A text
+   *  attachment over this size is not inlined into context — the agent gets
+   *  a name+size+URL note instead of a surprise multi-KB paste (issue #30).
+   *  The bound is enforced on ACTUAL bytes, not just Discord's declared
+   *  attachment.size (metadata can be absent or wrong — see
+   *  buildAttachmentBlocks). Tunable via DISCORD_ATTACHMENT_INLINE_MAX_BYTES:
+   *  0 explicitly disables text auto-inlining; any value clamps to the
+   *  MAX_TEXT_BYTES (256KiB) absolute ceiling; malformed or negative values
+   *  are rejected loudly and fall back to the default. Images are governed
+   *  by their own path (native image blocks), not this cap. Read per call so
+   *  env edits + restart apply. Default 5KiB. */
+  private inlineCapWarnedFor?: string;
+  private get attachmentInlineMaxBytes(): number {
+    const raw = process.env.DISCORD_ATTACHMENT_INLINE_MAX_BYTES;
+    if (!raw) return DEFAULT_ATTACHMENT_INLINE_MAX_BYTES;
+    // Number(), not parseInt(): "5kb" should be a loud misconfiguration,
+    // not a silent 5-byte cap.
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 0) {
+      if (this.inlineCapWarnedFor !== raw) {
+        this.inlineCapWarnedFor = raw;
+        console.error(
+          `[discord-mcpl] DISCORD_ATTACHMENT_INLINE_MAX_BYTES=${JSON.stringify(raw)} is not a non-negative integer — using default ${DEFAULT_ATTACHMENT_INLINE_MAX_BYTES}`,
+        );
+      }
+      return DEFAULT_ATTACHMENT_INLINE_MAX_BYTES;
+    }
+    return Math.min(n, MAX_TEXT_BYTES);
   }
 
   /** Per-channel backscroll limits: DISCORD_BACKSCROLL_CHANNELS=
@@ -2331,11 +2369,16 @@ export class DiscordMcplServer {
 
   /** Fetch + convert a message's attachments into MCPL content blocks so the
    *  agent actually sees them. Images are downloaded and inlined as base64
-   *  image blocks (robust against Discord's expiring CDN URLs); text files are
-   *  inlined as text; anything else degrades to a short note with name + URL.
-   *  Best-effort: a failed fetch becomes a note rather than dropping the message. */
+   *  image blocks (robust against Discord's expiring CDN URLs) — the text
+   *  inline cap below deliberately does NOT apply to them; an image block is
+   *  the model-native representation, not a text paste. Text files inline
+   *  only up to attachmentInlineMaxBytes (issue #30), enforced on actual
+   *  bytes: a declared-over-cap file skips the fetch entirely, and a
+   *  misdeclared one is streamed to at most cap+1 bytes before degrading to
+   *  a name+size+URL note. Anything else degrades to a short note with
+   *  name + URL. Best-effort: a failed fetch becomes a note rather than
+   *  dropping the message. */
   private async buildAttachmentBlocks(attachments: DiscordAttachment[]): Promise<ContentBlock[]> {
-    const MAX_TEXT_BYTES = 256 * 1024; // inline cap for text files
     const TEXT_EXT =
       /\.(txt|md|markdown|json|jsonl|csv|tsv|log|ya?ml|xml|html?|css|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cpp|hpp|sh|bash|zsh|toml|ini|cfg|conf|sql|diff|patch|env)$/i;
     const fmt = (n: number) =>
@@ -2345,6 +2388,41 @@ export class DiscordMcplServer {
       const timer = setTimeout(() => ctrl.abort(), ms);
       try {
         return await fetch(url, { signal: ctrl.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    /** Fetch a text body reading at most maxBytes+1 bytes off the wire —
+     *  Discord's declared size is advisory, so the inline decision has to
+     *  come from what actually arrives, without buffering an arbitrarily
+     *  large lie. overflow=true means the body exceeded maxBytes; its text
+     *  is then unused (over-cap bytes must never become a text block). */
+    const fetchTextCapped = async (
+      url: string,
+      maxBytes: number,
+      ms = 15000,
+    ): Promise<{ text: string; overflow: boolean }> => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ms);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.body) {
+          const buf = Buffer.from(await res.arrayBuffer());
+          return { text: buf.toString('utf8'), overflow: buf.length > maxBytes };
+        }
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        while (total <= maxBytes) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          total += value.length;
+        }
+        const overflow = total > maxBytes;
+        if (overflow) void reader.cancel().catch(() => {});
+        return { text: overflow ? '' : Buffer.concat(chunks).toString('utf8'), overflow };
       } finally {
         clearTimeout(timer);
       }
@@ -2366,6 +2444,7 @@ export class DiscordMcplServer {
         ? ''
         : multiSnapshot ? ` (forwarded #${att.forwardedSnapshotIndex})` : ' (forwarded)';
 
+    const inlineCap = this.attachmentInlineMaxBytes;
     const blocks: ContentBlock[] = [];
     for (const att of attachments) {
       const ct = (att.contentType || '').toLowerCase();
@@ -2375,7 +2454,14 @@ export class DiscordMcplServer {
         TEXT_EXT.test(att.name) ||
         (att.contentType === null && att.size > 0 && att.size <= MAX_TEXT_BYTES);
       try {
-        if ((isImage || isText) && att.size > fetchBudgetLeft) {
+        if (!isImage && isText && att.size > inlineCap) {
+          // Declared size is already over the cap — no fetch at all. (A
+          // misdeclared small size still gets caught below on actual bytes.)
+          blocks.push(textContent(
+            `[attachment: ${att.name}${fwd(att)} (${fmt(att.size)}) over the ${fmt(inlineCap)} inline cap — not inlined: ${att.url}]`,
+          ));
+          dbg('attachment:over-inline-cap', { name: att.name, declaredSize: att.size, cap: inlineCap });
+        } else if ((isImage || isText) && att.size > fetchBudgetLeft) {
           blocks.push(textContent(
             `[attachment: ${att.name}${fwd(att)} (${fmt(att.size)}) not inlined — message attachment budget exhausted: ${att.url}]`,
           ));
@@ -2401,17 +2487,22 @@ export class DiscordMcplServer {
           }
         } else if (isText) {
           fetchBudgetLeft -= att.size;
-          const res = await fetchWithTimeout(att.url);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          let txt = await res.text();
-          let truncated = false;
-          if (txt.length > MAX_TEXT_BYTES) {
-            txt = txt.slice(0, MAX_TEXT_BYTES);
-            truncated = true;
+          const { text, overflow } = await fetchTextCapped(att.url, inlineCap);
+          if (overflow) {
+            // Declared size said it fit; the wire said otherwise. The cap is
+            // a bound on actual bytes, so this degrades to a note too.
+            blocks.push(textContent(
+              `[attachment: ${att.name}${fwd(att)} (over the ${fmt(inlineCap)} inline cap; declared ${fmt(att.size)}) — not inlined: ${att.url}]`,
+            ));
+            dbg('attachment:over-inline-cap', {
+              name: att.name,
+              declaredSize: att.size,
+              cap: inlineCap,
+              misdeclared: true,
+            });
+          } else {
+            blocks.push(textContent(`[attachment: ${att.name}${fwd(att)} (${fmt(att.size)})]\n${text}`));
           }
-          blocks.push(
-            textContent(`[attachment: ${att.name}${fwd(att)} (${fmt(att.size)})]\n${txt}${truncated ? '\n…[truncated]' : ''}`),
-          );
         } else {
           blocks.push(textContent(`[attachment: ${att.name}${fwd(att)} (${ct || 'unknown type'}, ${fmt(att.size)}) — not inlined: ${att.url}]`));
         }
