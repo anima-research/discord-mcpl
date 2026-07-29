@@ -1080,6 +1080,29 @@ export class DiscordAdapter {
     isDM: boolean;
   }> {
     const channel = await this.client.channels.fetch(channelId);
+    return this.extractChannelMeta(channel);
+  }
+
+  /** Cache-only variant of getChannelMeta: gateway-cache lookup, no REST,
+   *  synchronous. Null when the channel isn't cached (as opposed to cached
+   *  but metadata-sparse) — callers decide whether to fall back to REST. */
+  getCachedChannelMeta(channelId: string): {
+    name: string | null;
+    guildId: string | null;
+    guildName: string | null;
+    isDM: boolean;
+  } | null {
+    const channel = this.client.channels.cache.get(channelId);
+    if (!channel) return null;
+    return this.extractChannelMeta(channel);
+  }
+
+  private extractChannelMeta(channel: unknown): {
+    name: string | null;
+    guildId: string | null;
+    guildName: string | null;
+    isDM: boolean;
+  } {
     if (!channel) return { name: null, guildId: null, guildName: null, isDM: true };
     const c = channel as {
       name?: string;
