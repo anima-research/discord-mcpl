@@ -2392,37 +2392,53 @@ export class DiscordMcplServer {
         clearTimeout(timer);
       }
     };
-    /** Fetch a text body reading at most maxBytes+1 bytes off the wire —
-     *  Discord's declared size is advisory, so the inline decision has to
-     *  come from what actually arrives, without buffering an arbitrarily
-     *  large lie. overflow=true means the body exceeded maxBytes; its text
-     *  is then unused (over-cap bytes must never become a text block). */
+    /** Fetch a text body retaining at most maxBytes+1 bytes — Discord's
+     *  declared size is advisory, so the inline decision has to come from
+     *  what actually arrives, without buffering an arbitrarily large lie.
+     *  A chunk larger than the remaining allowance is sliced to it before
+     *  retention and the read cancelled immediately, so the bound is
+     *  literal even for a single giant chunk. A bodyless response fails
+     *  closed (treated as overflow) rather than full-buffering unknown
+     *  data. overflow=true means the body exceeded maxBytes; its text is
+     *  then unused (over-cap bytes must never become a text block).
+     *  bytesRead reports actual bytes consumed off the wire, for budget
+     *  accounting. */
     const fetchTextCapped = async (
       url: string,
       maxBytes: number,
       ms = 15000,
-    ): Promise<{ text: string; overflow: boolean }> => {
+    ): Promise<{ text: string; overflow: boolean; bytesRead: number }> => {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), ms);
       try {
         const res = await fetch(url, { signal: ctrl.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         if (!res.body) {
-          const buf = Buffer.from(await res.arrayBuffer());
-          return { text: buf.toString('utf8'), overflow: buf.length > maxBytes };
+          return { text: '', overflow: true, bytesRead: 0 };
         }
         const reader = res.body.getReader();
         const chunks: Uint8Array[] = [];
-        let total = 0;
-        while (total <= maxBytes) {
+        let retained = 0; // bytes held in chunks — never exceeds maxBytes + 1
+        let bytesRead = 0; // bytes actually received, for budget accounting
+        let overflow = false;
+        while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          chunks.push(value);
-          total += value.length;
+          bytesRead += value.length;
+          const room = maxBytes + 1 - retained;
+          const take = value.length > room ? value.subarray(0, room) : value;
+          chunks.push(take);
+          retained += take.length;
+          if (retained > maxBytes) {
+            overflow = true;
+            break;
+          }
         }
-        const overflow = total > maxBytes;
-        if (overflow) void reader.cancel().catch(() => {});
-        return { text: overflow ? '' : Buffer.concat(chunks).toString('utf8'), overflow };
+        if (overflow) {
+          void reader.cancel().catch(() => {});
+          return { text: '', overflow: true, bytesRead };
+        }
+        return { text: Buffer.concat(chunks).toString('utf8'), overflow: false, bytesRead };
       } finally {
         clearTimeout(timer);
       }
@@ -2486,8 +2502,11 @@ export class DiscordMcplServer {
             }
           }
         } else if (isText) {
-          fetchBudgetLeft -= att.size;
-          const { text, overflow } = await fetchTextCapped(att.url, inlineCap);
+          // Budget is charged from bytes actually consumed, not Discord's
+          // advisory size — the capped read bounds the overdraft past the
+          // pre-check above to at most cap+1.
+          const { text, overflow, bytesRead } = await fetchTextCapped(att.url, inlineCap);
+          fetchBudgetLeft -= bytesRead;
           if (overflow) {
             // Declared size said it fit; the wire said otherwise. The cap is
             // a bound on actual bytes, so this degrades to a note too.

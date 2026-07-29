@@ -144,6 +144,68 @@ describe('attachment inline cap (issue #30)', () => {
     assert.ok(allText(blocks).includes('not inlined'));
   });
 
+  it('retains at most cap+1 bytes from one giant stream chunk and cancels immediately', async () => {
+    // A reader may deliver far more than the remaining allowance in a single
+    // chunk. The helper must slice retention to cap+1 and cancel — not hold
+    // the whole chunk before noticing overflow.
+    let pulls = 0;
+    let cancelled = false;
+    const giant = new Uint8Array(10 * 1024 * 1024).fill(0x79); // 10MB of 'y'
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulls++;
+          controller.enqueue(giant);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      // highWaterMark 0: no internal prefetch, so each pull corresponds to
+      // an actual reader.read() — making "one read, then cancel" assertable.
+      { highWaterMark: 0 },
+    );
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      fetchCalls.push(String(url));
+      return new Response(stream);
+    }) as typeof fetch;
+
+    const blocks = await buildBlocks([makeAttachment({ size: 100 })]); // declared small
+    const text = allText(blocks);
+    assert.ok(!text.includes('yyyy'), 'giant chunk must not become a text block');
+    assert.ok(text.includes('inline cap'), text);
+    assert.equal(pulls, 1, 'overflow must be decided on the first giant chunk');
+    assert.ok(cancelled, 'reader must be cancelled immediately on overflow');
+  });
+
+  it('fails closed on a bodyless response instead of buffering unknown data', async () => {
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      fetchCalls.push(String(url));
+      return new Response(null);
+    }) as typeof fetch;
+    const blocks = await buildBlocks([makeAttachment({ size: 100 })]);
+    const text = allText(blocks);
+    assert.ok(text.includes('not inlined'), text);
+  });
+
+  it('images are unaffected by the cap: a zero cap still yields an image block', async () => {
+    process.env[ENV_KEY] = '0';
+    // 1x1 transparent PNG — real bytes so the sharp normalization path runs.
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    stubFetch(png);
+    const blocks = await buildBlocks([
+      makeAttachment({ name: 'pixel.png', contentType: 'image/png', size: png.length }),
+    ]);
+    assert.equal(fetchCalls.length, 1, 'image is fetched despite cap 0');
+    assert.ok(
+      blocks.some((b) => b.type === 'image'),
+      `expected a native image block, got: ${JSON.stringify(blocks.map((b) => b.type))}`,
+    );
+  });
+
   it('leaves non-text attachments on their existing note path', async () => {
     stubFetch('unused');
     const blocks = await buildBlocks([
