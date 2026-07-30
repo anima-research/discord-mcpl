@@ -725,10 +725,17 @@ export class DiscordMcplServer {
     this.conn = conn;
 
     // Reserved-reaction protection is opt-in; say plainly when it isn't on
-    // rather than letting an unset env read as safety.
-    if (this.reservedReactions.status().state === 'unset') {
+    // rather than letting an unset env read as safety. "Configured but
+    // empty" gets the same plain-speaking: the mechanism loading is not the
+    // same thing as a reaction being reserved.
+    const rrState = this.reservedReactions.status().state;
+    if (rrState === 'unset') {
       console.error(
         '[discord-mcpl] reserved-reactions: policy unset (DISCORD_RESERVED_REACTIONS_FILE) — reserved-reaction protection NOT active',
+      );
+    } else if (rrState === 'configured-empty') {
+      console.error(
+        '[discord-mcpl] reserved-reactions: policy file is valid but has zero entries — protection mechanism loaded, NO reactions reserved',
       );
     }
 
@@ -1843,7 +1850,14 @@ export class DiscordMcplServer {
    *  backscroll metadata). When suppression is due to a failed-closed policy
    *  the message carries `reactionsUnavailable: true` — an empty list that
    *  actually means "couldn't project" must not read as "none" (Sol's #31
-   *  ruling, truthfulness on partial state). */
+   *  ruling, truthfulness on partial state).
+   *
+   *  Seam note for #31: the reconnect `<missed>` and first-DM transcript
+   *  renderers don't serialize reaction state today, which is the only
+   *  reason they can't leak a reserved glyph. When #31 adds current-reaction
+   *  snapshots to those renderers, route them through this method (or
+   *  `reservedReactions.project` directly) rather than re-deriving the
+   *  filtering there. */
   private projectHistoryReactions<T extends { reactions?: ReactionSummary[] }>(
     msgs: T[],
   ): Array<T & { reactionsUnavailable?: true }> {

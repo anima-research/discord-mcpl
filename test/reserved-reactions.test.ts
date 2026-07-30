@@ -10,7 +10,7 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { writeFileSync, mkdtempSync, rmSync, unlinkSync, utimesSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, statSync, unlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -148,6 +148,92 @@ describe('ReservedReactionsPolicy', () => {
     unlinkSync(policyPath);
     assert.equal(policy.suppressAll(), false);
     assert.equal(policy.isReserved({ emoji: RESERVED_UNICODE }), true);
+  });
+
+  // Strict-schema and reload-caching behavior per Sol's PR #13 review: a
+  // typo'd policy file must be a load error, never "active with zero
+  // effect", and the reload machine must neither reparse unchanged broken
+  // bytes nor trust a preserved mtime across a vanish/reappear.
+
+  it('rejects unknown top-level keys (a typo must not become zero protection)', () => {
+    writePolicy({ version: 1, customEmojiID: [RESERVED_CUSTOM_ID] });
+    const policy = new ReservedReactionsPolicy(policyPath);
+    assert.equal(policy.suppressAll(), true);
+    const status = policy.status();
+    assert.equal(status.state, 'failed-closed');
+    assert.ok('error' in status && status.error.includes('customEmojiID'), 'names the offending key');
+  });
+
+  it('rejects custom ids that are not Discord snowflakes', () => {
+    for (const bad of ['', '123', 'not-a-number', '<:name:111222333444555666>']) {
+      writePolicy({ version: 1, customEmojiIds: [bad] });
+      const policy = new ReservedReactionsPolicy(policyPath);
+      assert.equal(policy.suppressAll(), true, `accepted ${JSON.stringify(bad)}`);
+      const status = policy.status();
+      assert.ok('error' in status && !status.error.includes(bad || '""'), 'error is value-redacted');
+    }
+  });
+
+  it('rejects unicode entries that normalize to nothing', () => {
+    // Bare VS16 normalizes to empty; a bare skin-tone modifier family-keys
+    // to empty. Either would be an entry that can never match a reaction.
+    writePolicy({ version: 1, unicodeExact: ['\uFE0F'] });
+    assert.equal(new ReservedReactionsPolicy(policyPath).suppressAll(), true);
+    writePolicy({ version: 1, unicodeExact: [''] });
+    assert.equal(new ReservedReactionsPolicy(policyPath).suppressAll(), true);
+    writePolicy({ version: 1, unicodeFamilies: ['\u{1F3FD}'] });
+    assert.equal(new ReservedReactionsPolicy(policyPath).suppressAll(), true);
+    // But a tone modifier is legal *inside* a family entry — it strips to a
+    // nonempty base.
+    writePolicy({ version: 1, unicodeFamilies: [`${RESERVED_FAMILY_BASE}\u{1F3FD}`] });
+    assert.equal(new ReservedReactionsPolicy(policyPath).suppressAll(), false);
+  });
+
+  it('a valid but empty file is configured-empty, never active', () => {
+    writePolicy({ version: 1 });
+    const policy = new ReservedReactionsPolicy(policyPath);
+    // Not a failure: nothing suppressed, nothing reserved.
+    assert.equal(policy.suppressAll(), false);
+    assert.equal(policy.isReserved({ emoji: RESERVED_UNICODE }), false);
+    const status = policy.status();
+    assert.equal(status.state, 'configured-empty');
+    // Explicit empty arrays are the same thing as absent ones.
+    writePolicy({ version: 1, customEmojiIds: [], unicodeExact: [], unicodeFamilies: [] });
+    assert.equal(new ReservedReactionsPolicy(policyPath).status().state, 'configured-empty');
+  });
+
+  it('reads and parses an unchanged malformed file exactly once', () => {
+    writePolicy('{broken');
+    const policy = new ReservedReactionsPolicy(policyPath);
+    for (let i = 0; i < 5; i++) {
+      assert.equal(policy.suppressAll(), true);
+      policy.status();
+    }
+    const attempts = (policy as unknown as { loadAttempts: number }).loadAttempts;
+    assert.equal(attempts, 1, `expected one read+parse of the broken file, got ${attempts}`);
+    // Repairing the file (new signature) triggers exactly one more.
+    goodPolicy();
+    assert.equal(policy.suppressAll(), false);
+    assert.equal((policy as unknown as { loadAttempts: number }).loadAttempts, 2);
+  });
+
+  it('reloads when a vanished file reappears, even with preserved mtime', () => {
+    goodPolicy();
+    const policy = new ReservedReactionsPolicy(policyPath);
+    assert.equal(policy.isReserved({ emoji: RESERVED_UNICODE }), true);
+    const mtime = statSync(policyPath).mtime;
+
+    unlinkSync(policyPath);
+    assert.equal(policy.suppressAll(), false, 'last-known-good while missing');
+    assert.ok((policy.status() as { staleSince?: string }).staleSince, 'stale while missing');
+
+    // Restore-from-backup shape: different content, identical mtime.
+    writeFileSync(policyPath, JSON.stringify({ version: 1, unicodeExact: [RESERVED_UNICODE] }));
+    utimesSync(policyPath, mtime, mtime);
+
+    assert.equal(policy.isReserved({ emoji: RESERVED_UNICODE }), true, 'new content in effect');
+    assert.equal(policy.isReserved({ emoji: `${RESERVED_FAMILY_BASE}\u{1F3FD}` }), false, 'old family entry gone — proof we reloaded');
+    assert.equal((policy.status() as { staleSince?: string }).staleSince, undefined, 'stale cleared on reappearance');
   });
 
   it('status never contains a configured glyph', () => {
