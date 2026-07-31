@@ -42,7 +42,12 @@
  *   file is repaired. A configured policy silently becoming empty is the
  *   one outcome this must never produce;
  * - reload failure after a good load: keep last-known-good atomically,
- *   report degraded. Stale correct policy beats no policy.
+ *   report degraded. Stale correct policy beats no policy — but only when
+ *   last-known-good actually reserves something. An EMPTY last-known-good
+ *   (configured-empty) reserves nothing, so a failed rewrite of it fails
+ *   closed instead: shipping the mechanism empty and adding real values
+ *   later is the expected deployment sequence, which makes "typo in the
+ *   first real policy" the exact failure that must not slip through open.
  *
  * Reloads key off a file signature (mtime + size + ctime + inode), and a
  * failed attempt is cached against that signature too, so an unchanged
@@ -104,6 +109,12 @@ interface CompiledPolicy {
   unicodeFamilies: Set<string>;
 }
 
+/** Effective entries across all categories. Zero means the policy reserves
+ *  nothing — which disqualifies it as a last-known-good fallback. */
+function entryCount(p: CompiledPolicy): number {
+  return p.customEmojiIds.size + p.unicodeExact.size + p.unicodeFamilies.size;
+}
+
 const KNOWN_KEYS = ['version', 'customEmojiIds', 'unicodeExact', 'unicodeFamilies'];
 
 /** Discord snowflakes are 64-bit decimal ids; every real one is 17–20
@@ -127,12 +138,16 @@ function compile(raw: string): CompiledPolicy {
   for (const key of Object.keys(obj)) {
     // An unrecognized key is likely a typo of a recognized one, and a typo
     // here means a policy that loads "active" and reserves nothing.
+    // The key value itself stays out of the message: errors flow into
+    // status/logs, and a reserved glyph pasted as a key would otherwise
+    // ride the diagnostic straight into model-visible text.
     if (!KNOWN_KEYS.includes(key)) {
-      throw new Error(`unknown key ${JSON.stringify(key)} (known keys: ${KNOWN_KEYS.join(', ')})`);
+      throw new Error(`unknown top-level key (allowed keys: ${KNOWN_KEYS.join(', ')})`);
     }
   }
   if (obj.version !== 1) {
-    throw new Error(`unsupported version: ${JSON.stringify(obj.version)} (expected 1)`);
+    // Same redaction rule: report the mismatch, not the raw value.
+    throw new Error('unsupported version (expected 1)');
   }
   const strings = (field: string): string[] => {
     const v = obj[field];
@@ -221,10 +236,20 @@ export class ReservedReactionsPolicy {
         this.failedClosed = `cannot stat ${this.filePath}: ${(err as Error).message}`;
         this.logOnce(`failed closed (${this.failedClosed}) — ALL model-visible reactions suppressed until repaired`);
         this.loadedOnce = true;
-      } else if (this.policy && !this.staleSince) {
+      } else if (this.policy && entryCount(this.policy) > 0) {
         // File vanished after a good load: keep last-known-good, report stale.
-        this.staleSince = new Date().toISOString();
-        this.logOnce(`reload failed (cannot stat): keeping last-known-good policy ${this.policy.contentHash}`);
+        if (!this.staleSince) {
+          this.staleSince = new Date().toISOString();
+          this.logOnce(`reload failed (cannot stat): keeping last-known-good policy ${this.policy.contentHash}`);
+        }
+      } else if (this.failedClosed === null) {
+        // Vanished with only a configured-empty (or no) policy behind it:
+        // same rule as the parse path — an empty last-known-good is not a
+        // fallback, it's zero protection wearing a stale badge.
+        this.policy = null;
+        this.staleSince = null;
+        this.failedClosed = `cannot stat ${this.filePath}: ${(err as Error).message}`;
+        this.logOnce(`failed closed (${this.failedClosed}) — ALL model-visible reactions suppressed until repaired`);
       }
       return;
     }
@@ -256,13 +281,20 @@ export class ReservedReactionsPolicy {
     } catch (err) {
       // lastAttemptSig already records this file state, so the broken bytes
       // are read and parsed once, not once per reaction.
-      if (this.policy) {
+      if (this.policy && entryCount(this.policy) > 0) {
         // Bad rewrite of a previously good file: last-known-good, atomically.
         if (!this.staleSince) {
           this.staleSince = new Date().toISOString();
           this.logOnce(`reload failed (${(err as Error).message}): keeping last-known-good policy ${this.policy.contentHash}`);
         }
       } else {
+        // No prior policy — or a configured-empty one, which reserves
+        // nothing and therefore can't serve as a fallback. Keeping an empty
+        // last-known-good here would fail OPEN on exactly the expected
+        // deployment transition: ship the mechanism empty, then typo the
+        // first file that adds real values.
+        this.policy = null;
+        this.staleSince = null;
         this.failedClosed = `${(err as Error).message}`;
         this.logOnce(`failed closed (${this.failedClosed}) — ALL model-visible reactions suppressed until repaired`);
       }

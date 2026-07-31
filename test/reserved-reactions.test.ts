@@ -161,7 +161,11 @@ describe('ReservedReactionsPolicy', () => {
     assert.equal(policy.suppressAll(), true);
     const status = policy.status();
     assert.equal(status.state, 'failed-closed');
-    assert.ok('error' in status && status.error.includes('customEmojiID'), 'names the offending key');
+    // Second review tightened this: the diagnostic must point at the
+    // problem WITHOUT echoing the key value (a glyph could be sitting
+    // there), so it lists the allowed keys instead of the offending one.
+    assert.ok('error' in status && status.error.includes('unknown top-level key'), 'flags the unknown key');
+    assert.ok('error' in status && !status.error.includes('customEmojiID'), 'does not echo the key value');
   });
 
   it('rejects custom ids that are not Discord snowflakes', () => {
@@ -243,6 +247,81 @@ describe('ReservedReactionsPolicy', () => {
     assert.ok(!s.includes(RESERVED_UNICODE), s);
     assert.ok(!s.includes(RESERVED_FAMILY_BASE), s);
     assert.ok(!s.includes(RESERVED_CUSTOM_ID), s);
+  });
+
+  // Second Sol review: an empty last-known-good is not a fallback, and
+  // schema diagnostics must stay glyph-free even when the glyph arrives in
+  // a position the schema rejects.
+
+  it('malformed rewrite of a configured-empty policy fails closed, not open', () => {
+    writePolicy({ version: 1 });
+    const policy = new ReservedReactionsPolicy(policyPath);
+    assert.equal(policy.status().state, 'configured-empty');
+    assert.equal(policy.suppressAll(), false);
+
+    // The expected deployment transition, typo'd: first real values, broken.
+    writePolicy('{broken');
+    assert.equal(policy.suppressAll(), true, 'empty LKG must not ride through a bad rewrite');
+    assert.equal(policy.status().state, 'failed-closed');
+    const proj = policy.project([summary(HARMLESS)]);
+    assert.deepEqual(proj.reactions, []);
+    assert.equal(proj.unavailable, true);
+
+    // Repair with real values: active, filtering normally.
+    goodPolicy();
+    assert.equal(policy.suppressAll(), false);
+    assert.equal(policy.status().state, 'active');
+    assert.equal(policy.isReserved({ emoji: RESERVED_UNICODE }), true);
+  });
+
+  it('vanish of a configured-empty policy fails closed, not stale-empty', () => {
+    writePolicy({ version: 1 });
+    const policy = new ReservedReactionsPolicy(policyPath);
+    assert.equal(policy.status().state, 'configured-empty');
+
+    unlinkSync(policyPath);
+    assert.equal(policy.suppressAll(), true, 'no entries behind the missing file — nothing to fall back to');
+    assert.equal(policy.status().state, 'failed-closed');
+
+    goodPolicy();
+    assert.equal(policy.suppressAll(), false);
+    assert.equal(policy.status().state, 'active');
+  });
+
+  it('a nonempty last-known-good still rides through a bad rewrite (unchanged)', () => {
+    goodPolicy();
+    const policy = new ReservedReactionsPolicy(policyPath);
+    assert.equal(policy.status().state, 'active');
+    writePolicy('{broken');
+    assert.equal(policy.suppressAll(), false, 'nonempty LKG is a real fallback');
+    assert.equal(policy.isReserved({ emoji: RESERVED_UNICODE }), true);
+    assert.ok((policy.status() as { staleSince?: string }).staleSince);
+  });
+
+  it('schema errors never reproduce a glyph placed in a rejected position', () => {
+    const logged: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    try {
+      // Glyph as an unknown top-level key.
+      writePolicy(`{"version":1,${JSON.stringify(RESERVED_UNICODE)}:[]}`);
+      const p1 = new ReservedReactionsPolicy(policyPath);
+      assert.equal(p1.suppressAll(), true);
+      const s1 = JSON.stringify(p1.status());
+      assert.ok(!s1.includes(RESERVED_UNICODE), `glyph in status via unknown key: ${s1}`);
+
+      // Glyph as the version value.
+      writePolicy({ version: RESERVED_UNICODE });
+      const p2 = new ReservedReactionsPolicy(policyPath);
+      assert.equal(p2.suppressAll(), true);
+      const s2 = JSON.stringify(p2.status());
+      assert.ok(!s2.includes(RESERVED_UNICODE), `glyph in status via version: ${s2}`);
+    } finally {
+      console.error = origError;
+    }
+    const all = logged.join('\n');
+    assert.ok(!all.includes(RESERVED_UNICODE), `glyph in captured logs: ${all}`);
+    assert.ok(logged.length > 0, 'failure paths did log (capture worked)');
   });
 });
 
@@ -359,5 +438,66 @@ describe('server integration', () => {
       emoji: HARMLESS, emojiId: null, token: HARMLESS,
     });
     assert.equal(sent.length, 0, 'fail closed means no reaction events at all');
+  });
+
+  it('empty→malformed→repaired: live and history suppress during the malformed window', () => {
+    // Second Sol review's regression: the configured-empty policy is the
+    // planned first deployment state, and the malformed rewrite is the
+    // planned second step going wrong. The window between must fail closed
+    // in BOTH model-visible surfaces, then recover.
+    writePolicy({ version: 1 });
+    const server = makeServer();
+    const s = server as unknown as Record<string, unknown>;
+    let reactionHandler: ((ev: Record<string, unknown>) => void) | undefined;
+    const noop = () => {};
+    s.discord = {
+      onMessage: noop, onMessageEdit: noop, onMessageDelete: noop,
+      onChannelCreate: noop, onChannelDelete: noop, onGuildCreate: noop,
+      onChannelAvailable: noop,
+      onReaction: (h: (ev: Record<string, unknown>) => void) => { reactionHandler = h; },
+    };
+    const sent: unknown[] = [];
+    s.conn = { sendRequest: (m: string, p: unknown) => { sent.push({ m, p }); return Promise.resolve({}); } };
+    s.mcplEnabled = true;
+    (s.enabledFeatureSets as Set<string>).add('discord.messaging');
+    (s.reactionChannels as Set<string>).add('chan1');
+    s.reactionChannelsLoaded = true;
+    (s.setupDiscordForwarding as () => void).call(server);
+    const project = (s.projectHistoryReactions as (
+      msgs: Array<{ id: string; reactions?: ReactionSummary[] }>,
+    ) => Array<{ reactions?: ReactionSummary[]; reactionsUnavailable?: true }>).bind(server);
+    const live = (emoji: string) =>
+      reactionHandler!({
+        channelId: 'chan1', messageId: 'msg1', guildId: 'g1',
+        userId: 'u1', userName: 'alice', action: 'add',
+        onOwnMessage: false, messageSnippet: 'hi', timestamp: new Date(1700000000000),
+        emoji, emojiId: null, token: emoji,
+      });
+
+    // Phase 1 — configured-empty: nothing reserved, everything flows.
+    live(HARMLESS);
+    assert.equal(sent.length, 1, 'configured-empty passes live reactions');
+    const h1 = project([{ id: 'm1', reactions: [summary(HARMLESS)] }]);
+    assert.equal(h1[0].reactions?.length, 1);
+    assert.equal(h1[0].reactionsUnavailable, undefined);
+
+    // Phase 2 — malformed rewrite: both surfaces fail closed.
+    writePolicy('{broken');
+    live(HARMLESS);
+    assert.equal(sent.length, 1, 'malformed window drops live reactions — empty LKG is no fallback');
+    const h2 = project([{ id: 'm1', reactions: [summary(HARMLESS)] }]);
+    assert.deepEqual(h2[0].reactions, []);
+    assert.equal(h2[0].reactionsUnavailable, true, 'history flags unavailable, not "none"');
+
+    // Phase 3 — repaired with real values: filtering, not suppression.
+    goodPolicy();
+    live(RESERVED_UNICODE);
+    assert.equal(sent.length, 1, 'repaired policy drops the now-reserved glyph');
+    live(HARMLESS);
+    assert.equal(sent.length, 2, 'repaired policy passes harmless reactions');
+    const h3 = project([{ id: 'm1', reactions: [summary(RESERVED_UNICODE), summary(HARMLESS)] }]);
+    assert.deepEqual(h3[0].reactions?.map((r) => r.emoji), [HARMLESS]);
+    assert.equal(h3[0].reactionsUnavailable, undefined);
+    assert.ok(!JSON.stringify(sent).includes(RESERVED_UNICODE), 'no reserved glyph on the wire in any phase');
   });
 });
