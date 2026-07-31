@@ -7,6 +7,18 @@ in the git log and PR descriptions.
 
 ### Added
 
+- **Current reaction state on line-formatted transcripts** (issue #31): the
+  reconnect `<missed>` sweep and the first-interaction backscroll now append
+  a compact suffix — `[reactions: 😀 x2 (incl. me)]` — showing each
+  message's current NET reaction aggregate, after the suppression
+  projection, independent of the live `set_reaction_visibility` toggle
+  (that opt-in governs ambient add/remove events; historical rendering is a
+  current-state snapshot). No suffix means no visible reactions; state the
+  adapter doesn't actually have (no resolver data, or a withhold-everything
+  filters posture) renders an explicit `[reactions: unavailable]` marker
+  rather than a false "none". Structured surfaces (`fetch_history` /
+  `fetch_around` / backscroll metadata) are unchanged.
+
 - **Reaction suppression on the filters plane** (issue #21):
   `suppressedReactionEmojis` in `DISCORD_FILTERS_FILE` names reaction
   markers that are filtered out of every model-visible surface — live
