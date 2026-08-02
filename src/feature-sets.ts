@@ -20,6 +20,16 @@ export const featureSets: FeatureSetDeclaration[] = [
       'channels.incoming',
       'channels.register',
       'channels.lifecycle',
+      // Review (Sol, PR #15): the server also HANDLES the streaming
+      // terminators (outgoing/chunk + outgoing/complete — finalize-only
+      // since this PR), channels/acknowledge (server.ts), and
+      // channels/typing. `channels: true` advertises all seven leaves, and
+      // §6.4 requires `uses` to describe the capabilities the feature
+      // actually exercises — an incomplete list ships a manifest that does
+      // not describe handlers already present.
+      'channels.streaming',
+      'channels.acknowledge',
+      'channels.typing',
     ],
     rollback: true,
     hostState: false,
