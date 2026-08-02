@@ -8,7 +8,19 @@ export const featureSets: FeatureSetDeclaration[] = [
   {
     name: 'discord.messaging',
     description: 'Send, read, react to messages in Discord channels',
-    uses: ['tools', 'channels.publish'],
+    // SPEC §6.4 derives feature-set availability from `uses` FAIL-CLOSED, so
+    // an incomplete list disables the set the moment a host enforces it. This
+    // set does not merely call tools and publish: it pushes events (reactions,
+    // wake-worthy messages), receives inbound channel traffic, registers the
+    // channel descriptors, and is subject to host open/close. Issue #14.
+    uses: [
+      'tools',
+      'channels.publish',
+      'pushEvents',
+      'channels.incoming',
+      'channels.register',
+      'channels.lifecycle',
+    ],
     rollback: true,
     hostState: false,
     // MCPL RFC-001 — tags carried on Discord message events (emits umbrellas
@@ -17,13 +29,22 @@ export const featureSets: FeatureSetDeclaration[] = [
       coreTags: [
         'chat:addressed', 'chat:mention', 'chat:reply', 'chat:dm', 'chat:ambient',
         'chat:private', 'chat:from-human', 'chat:from-bot', 'chat:thread',
-        'chat:reaction',
+        'chat:reaction', 'chat:reaction-remove',
         'chat:has-image', 'chat:has-audio', 'chat:has-file',
       ],
-      defaultTreatment: [
-        { tagsAny: ['chat:addressed'], behavior: 'immediate' },
-        { tagsAny: ['chat:ambient', 'chat:from-bot'], behavior: { throttle: { perMs: 120000 } } },
-      ],
+      // RFC-001 rev 2: `suggestedTreatment` (formerly `defaultTreatment`) — a
+      // producer HINT requiring explicit host acceptance (SPEC §16.5), never
+      // auto-applied policy. The pinned @animalabs/mcpl-core still types the
+      // retired name; mcpl-core-ts#6 renames it in the same release train, so
+      // the wire carries the spec name now and the cast comes off when the
+      // library lands. Advisory-only either way: nothing may act on it without
+      // explicit acceptance, so no behaviour rides on which name a host reads.
+      ...({
+        suggestedTreatment: [
+          { tagsAny: ['chat:addressed'], behavior: 'immediate' },
+          { tagsAny: ['chat:ambient', 'chat:from-bot'], behavior: { throttle: { perMs: 120000 } } },
+        ],
+      } as object),
       // Discord-specific extensions (e.g. discord:everyone, discord:slash) may be
       // emitted in future; consumers should tolerate undeclared tags.
       open: true,

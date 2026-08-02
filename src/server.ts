@@ -867,9 +867,12 @@ export class DiscordMcplServer {
         }
 
         case method.CONTEXT_AFTER_INFERENCE: {
-          // Sticky-reply hook: post text-only responses to the last-active
-          // channel as if the agent had called send_message herself. Side
-          // effect; no `modifiedResponse` returned (we don't rewrite her text).
+          // RETIRED no-op (see handleAfterInference). The capability is not
+          // advertised; this case survives only so a stray call from an older
+          // host is answered instead of erroring. It does NOT post anything —
+          // an earlier comment here described the retired sticky-reply as if
+          // live, and misled a reviewer into believing the capability was
+          // still advertised. Issue #14.
           await this.handleAfterInference(params);
           conn.sendResponse(req.id, { featureSet: 'discord.messaging' });
           break;
@@ -948,23 +951,20 @@ export class DiscordMcplServer {
       }
 
       case method.CHANNELS_OUTGOING_COMPLETE: {
+        // SPEC §14.5: delivery is NEVER a side effect of a lifecycle event —
+        // delivery happens only via `channels/publish` (handlePublish, which
+        // also records the send in the state tracker so it is recognized as
+        // self-authored). This terminator only finalizes the chunk stream:
+        // release the buffer, nothing else. The previous body called
+        // discord.sendMessage() here, which would double-post against
+        // handlePublish the moment a host grants `channels.streaming` — the
+        // same bug class as the retired afterInference sticky-reply (see the
+        // NOTE at the capability declaration), reintroduced on a different
+        // signal. It was dormant only because the 0.4 boolean `channels`
+        // capability made `channels.streaming` undeclarable. Issue #14.
         const p = notif.params as ChannelsOutgoingCompleteParams;
         this.outgoingBuffers.delete(p.inferenceId);
-
-        // Extract text and send to Discord
-        const text = p.content
-          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-          .map((b) => b.text)
-          .join('\n');
-
-        if (text) {
-          const parsed = parseMcplChannelId(p.channelId);
-          if (parsed) {
-            this.discord.sendMessage(parsed.channelId, text).catch((err) => {
-              console.error('[discord-mcpl] outgoing/complete send failed:', (err as Error).message);
-            });
-          }
-        }
+        dbg('outgoing/complete:finalized', { inferenceId: p.inferenceId, channelId: p.channelId });
         break;
       }
 
@@ -2279,8 +2279,13 @@ export class DiscordMcplServer {
       if (!this.conn || !this.mcplEnabled) return;
       if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
       // Reaction visibility is a per-channel opt-in (default off). Reactions
-      // NEVER wake the agent — the `chat:reaction` tag matches no wake policy —
-      // they just land in context so the agent sees them when next active.
+      // NEVER wake the agent — the reaction tags match no wake policy — they
+      // just land in context so the agent sees them when next active.
+      // SPEC §16.2 defines `chat:reaction` and `chat:reaction-remove` as
+      // distinct tags: collapsing both onto `chat:reaction` made any consumer
+      // rule for "reactions to my messages" fire on un-reactions too, with the
+      // distinction surviving only in origin.action, which gate policy cannot
+      // match on. Issue #14.
       this.ensureReactionChannelsLoaded();
       if (!this.reactionChannels.has(ev.channelId)) return;
       const verb = ev.action === 'add' ? 'reacted' : 'removed a reaction';
@@ -2305,7 +2310,7 @@ export class DiscordMcplServer {
           onOwnMessage: ev.onOwnMessage,
           action: ev.action,
         } as Record<string, unknown>,
-        tags: ['chat:reaction'],
+        tags: [ev.action === 'add' ? 'chat:reaction' : 'chat:reaction-remove'],
         payload: { content: [textContent(line)] },
       } satisfies PushEventParams).catch(() => {});
     });
