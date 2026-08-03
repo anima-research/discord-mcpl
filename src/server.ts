@@ -52,7 +52,13 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
-import { saveFiltersFile, type DiscordFilters } from './filters.js';
+import {
+  saveFiltersFile,
+  parseSuppressedReactionEmojis,
+  isSuppressedReactionEmoji,
+  filterSuppressedReactions,
+  type DiscordFilters,
+} from './filters.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -277,6 +283,18 @@ export class DiscordMcplServer {
     if (!raw) return 80;
     const n = parseInt(raw, 10);
     return Number.isFinite(n) && n > 0 && n <= 10000 ? n : 80;
+  }
+
+  /** Reaction emojis suppressed from agent context entirely: the live
+   *  `[reaction]` push event is dropped (add AND remove, any reactor) and the
+   *  emoji is stripped from fetched-history reaction summaries. Configure via
+   *  DISCORD_SUPPRESS_REACTION_EMOJIS as a comma-separated list of unicode
+   *  emoji or custom-emoji names (with or without colons); VS-16 differences
+   *  are ignored. Unset = nothing suppressed (backward-compatible default).
+   *  Rationale in filters.ts — refusal-marker reacts re-entering context form
+   *  a classifier feedback loop. Read per call so tests/env edits apply. */
+  private get suppressedReactionEmojis(): Set<string> | null {
+    return parseSuppressedReactionEmojis(process.env.DISCORD_SUPPRESS_REACTION_EMOJIS);
   }
 
   /** Inline cap for text attachments on live delivery, in bytes. A text
@@ -2092,7 +2110,7 @@ export class DiscordMcplServer {
         metadata: {
           isBot: message.isBot,
           attachments: message.attachments,
-          reactions: message.reactions ?? [],
+          reactions: filterSuppressedReactions(message.reactions, this.suppressedReactionEmojis),
           backscroll: true,
         },
       }));
@@ -2288,6 +2306,17 @@ export class DiscordMcplServer {
       // match on. Issue #14.
       this.ensureReactionChannelsLoaded();
       if (!this.reactionChannels.has(ev.channelId)) return;
+      // Suppressed emojis (e.g. host refusal markers) never reach the agent —
+      // see suppressedReactionEmojis. Dropped silently but visible in dbg.
+      if (isSuppressedReactionEmoji(ev.emoji, this.suppressedReactionEmojis)) {
+        dbg('reaction:suppressed', {
+          emoji: ev.emoji,
+          channelId: ev.channelId,
+          action: ev.action,
+          reactor: ev.userId,
+        });
+        return;
+      }
       const verb = ev.action === 'add' ? 'reacted' : 'removed a reaction';
       const target = ev.onOwnMessage ? 'your message' : `message ${ev.messageId}`;
       // Carry a snippet of the reacted-to message when it has text — a bare

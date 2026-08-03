@@ -108,3 +108,47 @@ export function filtersFileMtime(path: string): number | null {
     return null;
   }
 }
+
+/* ------------------------------------------------------------------------- *
+ * Reaction-emoji suppression (DISCORD_SUPPRESS_REACTION_EMOJIS)
+ *
+ * Hosts mark inference refusals by reacting to the triggering message with a
+ * category emoji (☣️ 🧪 ☢️ 💻 🧠 🛑). Letting those reactions re-enter agent
+ * context as "[reaction] @X reacted 💻 …" lines — or ride along on fetched
+ * backscroll — feeds classifier-meta back into the very windows that are
+ * refusing: a self-amplifying loop, observed cross-agent (Mythos 2026-08-03,
+ * amplified by a sibling agent's refusal reacts). Suppression applies to add
+ * AND remove events, any reactor, and history reaction summaries.
+ * ------------------------------------------------------------------------- */
+
+/** Normalize a reaction emoji for suppression matching: strip VS-16
+ *  (U+FE0F) so "☣️" and "☣" compare equal, and strip surrounding colons so a
+ *  custom emoji matches whether configured as ":sigil:" or "sigil". */
+export function normalizeReactionEmoji(emoji: string): string {
+  return emoji.replace(/\uFE0F/g, '').trim().replace(/^:|:$/g, '');
+}
+
+/** Parse the comma-separated DISCORD_SUPPRESS_REACTION_EMOJIS value.
+ *  Unset/empty → null = feature off (backward-compatible default). */
+export function parseSuppressedReactionEmojis(raw: string | undefined): Set<string> | null {
+  const list = raw?.split(',').map(normalizeReactionEmoji).filter(Boolean) ?? [];
+  return list.length ? new Set(list) : null;
+}
+
+/** True when this emoji's reaction events must not reach the agent. */
+export function isSuppressedReactionEmoji(
+  emoji: string,
+  suppressed: Set<string> | null,
+): boolean {
+  return suppressed !== null && suppressed.has(normalizeReactionEmoji(emoji));
+}
+
+/** Strip suppressed emojis from a fetched message's reaction summaries. */
+export function filterSuppressedReactions<T extends { emoji: string }>(
+  reactions: T[] | undefined,
+  suppressed: Set<string> | null,
+): T[] {
+  const list = reactions ?? [];
+  if (!suppressed || list.length === 0) return list;
+  return list.filter((r) => !suppressed.has(normalizeReactionEmoji(r.emoji)));
+}
