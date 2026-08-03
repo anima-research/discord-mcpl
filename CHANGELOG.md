@@ -19,6 +19,15 @@ in the git log and PR descriptions.
   messages) until repaired; the file hot-reloads with last-known-good on bad
   rewrites. Raw Discord state is untouched — this is projection, not
   deletion. A production glyph set must be supplied at deploy time.
+  The `DISCORD_SUPPRESS_REACTION_EMOJIS` emergency containment (2026-08-03)
+  is now a **deprecated compatibility source** feeding this same policy:
+  with the file unset it keeps working exactly as shipped (same matching,
+  custom emoji by name, numeric snowflakes also matched as ids); with the
+  file set it is ignored outright — never merged — with a glyph-free
+  warning, so the reviewed file stays the sole authority. Status reports
+  `source` (`file` / `legacy-env` / `unset`), `protectionActive`, and the
+  deprecation state. Migration: provision the file, unset the env, verify
+  `source=file`; the alias is removed in the next config-cleanup release.
 
 ### Changed
 

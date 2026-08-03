@@ -58,10 +58,35 @@
  *
  * Status/diagnostics expose version, content hash, per-category counts and
  * load state — never the configured glyphs.
+ *
+ * LEGACY ENV SOURCE (deprecated, one-release compatibility). The 2026-08-03
+ * Mythos incident was contained with DISCORD_SUPPRESS_REACTION_EMOJIS —
+ * glyphs comma-separated directly in env. That variable now feeds THIS
+ * policy instead of a parallel filter, under strict precedence:
+ *
+ * - file set (DISCORD_RESERVED_REACTIONS_FILE): the file is the sole
+ *   authority. A concurrently-set legacy env is IGNORED entirely — never
+ *   unioned — with a glyph-free deprecation warning. Unioning would let
+ *   stale hidden config silently broaden suppression and make the reviewed
+ *   file non-authoritative.
+ * - file unset, env set: an in-memory policy is synthesized with
+ *   source 'legacy-env', preserving the emergency filter's exact matching
+ *   semantics (VS-16 stripped, colons stripped, custom emoji matched by
+ *   NAME — deliberately not NFC/family-widened, and name tokens are never
+ *   reinterpreted as ids). Numeric snowflake tokens additionally match by
+ *   emoji id. It drives the same live/history projector as a file policy.
+ *   The env re-reads on every decision, mirroring the emergency filter.
+ * - neither set: honest unset/off.
+ *
+ * Migration: provision the reviewed file, unset the env, verify
+ * status.source === 'file'. The env alias goes away in the next
+ * breaking/config-cleanup release.
  */
 
 import { readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+
+import { normalizeReactionEmoji } from './filters.js';
 
 export interface ReservedReactionsFileV1 {
   version: 1;
@@ -70,25 +95,51 @@ export interface ReservedReactionsFileV1 {
   unicodeFamilies?: string[];
 }
 
+/** Where the effective policy came from. 'legacy-env' is the deprecated
+ *  DISCORD_SUPPRESS_REACTION_EMOJIS compatibility source. */
+export type ReservedReactionsSource = 'file' | 'legacy-env' | 'unset';
+
 export type ReservedReactionsStatus =
-  | { state: 'unset' }
+  | { state: 'unset'; source: 'unset'; protectionActive: false }
   | {
       state: 'active';
+      source: 'file';
+      /** True whenever reactions are actually being withheld from the model
+       *  ('active' and 'failed-closed'); false when the mechanism exists but
+       *  reserves nothing ('unset', 'configured-empty'). */
+      protectionActive: true;
       version: number;
       contentHash: string;
       counts: { customEmojiIds: number; unicodeExact: number; unicodeFamilies: number };
       /** Set when the most recent reload failed and last-known-good is in effect. */
       staleSince?: string;
+      /** The deprecated legacy env is ALSO set and being ignored — the file
+       *  is the sole authority. Unset it after verifying source === 'file'. */
+      legacyEnvIgnored?: true;
     }
   | {
       /** File loaded and valid but holds zero entries: the mechanism is
        *  present, the protection is not. Deliberately not 'active'. */
       state: 'configured-empty';
+      source: 'file';
+      protectionActive: false;
       version: number;
       contentHash: string;
       staleSince?: string;
+      legacyEnvIgnored?: true;
     }
-  | { state: 'failed-closed'; error: string };
+  | { state: 'failed-closed'; source: 'file'; protectionActive: true; error: string; legacyEnvIgnored?: true }
+  | {
+      /** Synthesized from DISCORD_SUPPRESS_REACTION_EMOJIS. Deprecated:
+       *  migrate to the policy file; the alias is removed next
+       *  breaking/config-cleanup release. */
+      state: 'active';
+      source: 'legacy-env';
+      protectionActive: true;
+      deprecated: true;
+      contentHash: string;
+      counts: { customEmojiIds: number; legacyTokens: number };
+    };
 
 /** Strip presentation selectors (VS15 text / VS16 emoji) after NFC. */
 function normalizeExact(s: string): string {
@@ -186,6 +237,36 @@ function compile(raw: string): CompiledPolicy {
   };
 }
 
+/* ── Legacy env adapter (DISCORD_SUPPRESS_REACTION_EMOJIS, deprecated) ── */
+
+/** Compiled form of the legacy env list. Kept structurally separate from
+ *  CompiledPolicy: this source matches by the emergency filter's rules
+ *  (normalizeReactionEmoji — VS-16/colon strip, custom emoji by NAME) and
+ *  must keep doing so for its one compatibility release. Name tokens are
+ *  never promoted to id policy; numeric snowflake tokens gain id matching
+ *  WITHOUT losing their literal string match (a 17-digit emoji *name* that
+ *  matched this morning still matches). */
+interface LegacyEnvPolicy {
+  contentHash: string;
+  customEmojiIds: Set<string>;
+  legacyExact: Set<string>;
+}
+
+/** Tokens that parse to nothing (env unset, empty, or all-separators) mean
+ *  OFF — exactly the emergency filter's backward-compatible default. */
+function compileLegacyEnv(raw: string): LegacyEnvPolicy | null {
+  const tokens = raw
+    .split(',')
+    .map(normalizeReactionEmoji)
+    .filter(Boolean);
+  if (tokens.length === 0) return null;
+  return {
+    contentHash: createHash('sha256').update(raw).digest('hex').slice(0, 16),
+    customEmojiIds: new Set(tokens.filter((t) => SNOWFLAKE.test(t))),
+    legacyExact: new Set(tokens),
+  };
+}
+
 /** Identity of the file content we last attempted to load. mtime alone is
  *  not enough: coarse timestamps and restore-from-backup can hand back
  *  different bytes under an identical mtime. */
@@ -216,13 +297,44 @@ export class ReservedReactionsPolicy {
    *  prove the caching behavior (one attempt per distinct file state). */
   private loadAttempts = 0;
 
-  constructor(filePath?: string) {
+  /** Reader for the deprecated DISCORD_SUPPRESS_REACTION_EMOJIS source.
+   *  A function (not a snapshot) so env edits apply without a restart,
+   *  matching the emergency filter's read-per-decision behavior. */
+  private readonly legacyEnvReader: () => string | undefined;
+  private legacy: LegacyEnvPolicy | null = null;
+  /** Raw env value last compiled — recompile only when it changes. */
+  private legacyRaw: string | undefined | null = null;
+  private legacyEnvIgnoredFlag = false;
+
+  constructor(filePath?: string, legacyEnvReader?: () => string | undefined) {
     this.filePath = filePath || undefined;
+    this.legacyEnvReader = legacyEnvReader ?? (() => undefined);
+  }
+
+  /** Re-read the legacy env (cheap: string-compare cached raw). When the
+   *  file source is configured the result is only used to warn; otherwise
+   *  it becomes the effective policy. */
+  private ensureLegacyLoaded(): void {
+    const raw = this.legacyEnvReader();
+    if (raw === this.legacyRaw) return;
+    this.legacyRaw = raw;
+    this.legacy = raw ? compileLegacyEnv(raw) : null;
+    const nowIgnored = this.filePath !== undefined && this.legacy !== null;
+    if (nowIgnored && !this.legacyEnvIgnoredFlag) {
+      // File wins outright. Saying so glyph-free: token count only.
+      console.error(
+        `[discord-mcpl] reserved-reactions: DISCORD_SUPPRESS_REACTION_EMOJIS is set (${this.legacy!.legacyExact.size} tokens) ` +
+          'but DISCORD_RESERVED_REACTIONS_FILE is authoritative — the legacy env is IGNORED, not merged. ' +
+          'Fold its entries into the policy file and unset the env (alias removed next config-cleanup release).',
+      );
+    }
+    this.legacyEnvIgnoredFlag = nowIgnored;
   }
 
   /** Load or signature-revalidate. Called lazily from every decision so an
    *  operator can repair the file without a restart. */
   private ensureLoaded(): void {
+    this.ensureLegacyLoaded();
     if (!this.filePath) return;
 
     let sig: FileSig;
@@ -316,15 +428,23 @@ export class ReservedReactionsPolicy {
     return this.failedClosed !== null;
   }
 
-  /** Is this reaction reserved? Custom emoji by id; unicode by exact
-   *  normalized form, then by family. */
+  /** Is this reaction reserved? File policy: custom emoji by id; unicode by
+   *  exact normalized form, then by family. Legacy-env policy (file unset
+   *  only): the emergency filter's semantics — the emoji string matched
+   *  after VS-16/colon strip regardless of custom-vs-unicode, plus id
+   *  matching for numeric snowflake tokens. */
   isReserved(reaction: { emojiId?: string | null; emoji: string }): boolean {
     this.ensureLoaded();
-    if (!this.policy) return false;
-    if (reaction.emojiId) return this.policy.customEmojiIds.has(reaction.emojiId);
-    const exact = normalizeExact(reaction.emoji);
-    if (this.policy.unicodeExact.has(exact)) return true;
-    return this.policy.unicodeFamilies.has(familyKey(reaction.emoji));
+    if (this.filePath) {
+      if (!this.policy) return false;
+      if (reaction.emojiId) return this.policy.customEmojiIds.has(reaction.emojiId);
+      const exact = normalizeExact(reaction.emoji);
+      if (this.policy.unicodeExact.has(exact)) return true;
+      return this.policy.unicodeFamilies.has(familyKey(reaction.emoji));
+    }
+    if (!this.legacy) return false;
+    if (reaction.emojiId && this.legacy.customEmojiIds.has(reaction.emojiId)) return true;
+    return this.legacy.legacyExact.has(normalizeReactionEmoji(reaction.emoji));
   }
 
   /** Project a reaction list for model-visible output. `unavailable` is set
@@ -341,8 +461,26 @@ export class ReservedReactionsPolicy {
 
   status(): ReservedReactionsStatus {
     this.ensureLoaded();
-    if (!this.filePath) return { state: 'unset' };
-    if (this.failedClosed !== null) return { state: 'failed-closed', error: this.failedClosed };
+    if (!this.filePath) {
+      if (this.legacy) {
+        return {
+          state: 'active',
+          source: 'legacy-env',
+          protectionActive: true,
+          deprecated: true,
+          contentHash: this.legacy.contentHash,
+          counts: {
+            customEmojiIds: this.legacy.customEmojiIds.size,
+            legacyTokens: this.legacy.legacyExact.size,
+          },
+        };
+      }
+      return { state: 'unset', source: 'unset', protectionActive: false };
+    }
+    const ignored = this.legacyEnvIgnoredFlag ? { legacyEnvIgnored: true as const } : {};
+    if (this.failedClosed !== null) {
+      return { state: 'failed-closed', source: 'file', protectionActive: true, error: this.failedClosed, ...ignored };
+    }
     if (this.policy) {
       const counts = {
         customEmojiIds: this.policy.customEmojiIds.size,
@@ -353,21 +491,27 @@ export class ReservedReactionsPolicy {
       if (counts.customEmojiIds + counts.unicodeExact + counts.unicodeFamilies === 0) {
         return {
           state: 'configured-empty',
+          source: 'file',
+          protectionActive: false,
           version: this.policy.version,
           contentHash: this.policy.contentHash,
           ...stale,
+          ...ignored,
         };
       }
       return {
         state: 'active',
+        source: 'file',
+        protectionActive: true,
         version: this.policy.version,
         contentHash: this.policy.contentHash,
         counts,
         ...stale,
+        ...ignored,
       };
     }
     // Configured, never touched yet (ensureLoaded always resolves one of the
     // above; this is unreachable in practice but type-honest).
-    return { state: 'failed-closed', error: 'policy not loaded' };
+    return { state: 'failed-closed', source: 'file', protectionActive: true, error: 'policy not loaded', ...ignored };
   }
 }

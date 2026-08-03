@@ -53,13 +53,7 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
-import {
-  saveFiltersFile,
-  parseSuppressedReactionEmojis,
-  isSuppressedReactionEmoji,
-  filterSuppressedReactions,
-  type DiscordFilters,
-} from './filters.js';
+import { saveFiltersFile, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -231,8 +225,14 @@ export class DiscordMcplServer {
   /** Reserved-reaction projection policy (issue #21): which reactions may be
    *  shown to the model at all, across every surface — live events and
    *  history snapshots alike. Path is read once at construction; the file
-   *  itself hot-reloads (see ReservedReactionsPolicy). */
-  private reservedReactions = new ReservedReactionsPolicy(process.env.DISCORD_RESERVED_REACTIONS_FILE);
+   *  itself hot-reloads (see ReservedReactionsPolicy). The deprecated
+   *  DISCORD_SUPPRESS_REACTION_EMOJIS emergency env feeds this same policy
+   *  as a one-release legacy source (file unset only; re-read per decision,
+   *  matching the emergency filter, so env edits apply without restart). */
+  private reservedReactions = new ReservedReactionsPolicy(
+    process.env.DISCORD_RESERVED_REACTIONS_FILE,
+    () => process.env.DISCORD_SUPPRESS_REACTION_EMOJIS,
+  );
 
   /** Channels the agent has explicitly MUTED: no ambient, no mention/reply wake,
    *  and no auto-subscribe-on-mention. Dropped at the top of
@@ -296,18 +296,6 @@ export class DiscordMcplServer {
     if (!raw) return 80;
     const n = parseInt(raw, 10);
     return Number.isFinite(n) && n > 0 && n <= 10000 ? n : 80;
-  }
-
-  /** Reaction emojis suppressed from agent context entirely: the live
-   *  `[reaction]` push event is dropped (add AND remove, any reactor) and the
-   *  emoji is stripped from fetched-history reaction summaries. Configure via
-   *  DISCORD_SUPPRESS_REACTION_EMOJIS as a comma-separated list of unicode
-   *  emoji or custom-emoji names (with or without colons); VS-16 differences
-   *  are ignored. Unset = nothing suppressed (backward-compatible default).
-   *  Rationale in filters.ts — refusal-marker reacts re-entering context form
-   *  a classifier feedback loop. Read per call so tests/env edits apply. */
-  private get suppressedReactionEmojis(): Set<string> | null {
-    return parseSuppressedReactionEmojis(process.env.DISCORD_SUPPRESS_REACTION_EMOJIS);
   }
 
   /** Inline cap for text attachments on live delivery, in bytes. A text
@@ -727,15 +715,22 @@ export class DiscordMcplServer {
     // Reserved-reaction protection is opt-in; say plainly when it isn't on
     // rather than letting an unset env read as safety. "Configured but
     // empty" gets the same plain-speaking: the mechanism loading is not the
-    // same thing as a reaction being reserved.
-    const rrState = this.reservedReactions.status().state;
-    if (rrState === 'unset') {
+    // same thing as a reaction being reserved. A legacy-env policy works
+    // but is deprecated — one line, token count only, never glyphs.
+    const rrStatus = this.reservedReactions.status();
+    if (rrStatus.state === 'unset') {
       console.error(
         '[discord-mcpl] reserved-reactions: policy unset (DISCORD_RESERVED_REACTIONS_FILE) — reserved-reaction protection NOT active',
       );
-    } else if (rrState === 'configured-empty') {
+    } else if (rrStatus.state === 'configured-empty') {
       console.error(
         '[discord-mcpl] reserved-reactions: policy file is valid but has zero entries — protection mechanism loaded, NO reactions reserved',
+      );
+    } else if (rrStatus.source === 'legacy-env') {
+      console.error(
+        `[discord-mcpl] reserved-reactions: running on DEPRECATED DISCORD_SUPPRESS_REACTION_EMOJIS (${rrStatus.counts.legacyTokens} tokens, ` +
+          `${rrStatus.counts.customEmojiIds} usable as emoji ids) — migrate to DISCORD_RESERVED_REACTIONS_FILE and unset the env; ` +
+          'the alias is removed in the next config-cleanup release',
       );
     }
 
@@ -2221,7 +2216,7 @@ export class DiscordMcplServer {
         metadata: {
           isBot: message.isBot,
           attachments: message.attachments,
-          reactions: filterSuppressedReactions(message.reactions, this.suppressedReactionEmojis),
+          reactions: message.reactions ?? [],
           backscroll: true,
           ...(message.reactionsUnavailable ? { reactionsUnavailable: true } : {}),
         },

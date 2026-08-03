@@ -56,12 +56,13 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   delete process.env.DISCORD_RESERVED_REACTIONS_FILE;
+  delete process.env.DISCORD_SUPPRESS_REACTION_EMOJIS;
 });
 
 describe('ReservedReactionsPolicy', () => {
   it('unset path: empty policy, honest status, nothing suppressed', () => {
     const policy = new ReservedReactionsPolicy(undefined);
-    assert.deepEqual(policy.status(), { state: 'unset' });
+    assert.deepEqual(policy.status(), { state: 'unset', source: 'unset', protectionActive: false });
     assert.equal(policy.suppressAll(), false);
     assert.equal(policy.isReserved({ emoji: RESERVED_UNICODE }), false);
     const proj = policy.project([summary(RESERVED_UNICODE)]);
@@ -499,5 +500,194 @@ describe('server integration', () => {
     assert.deepEqual(h3[0].reactions?.map((r) => r.emoji), [HARMLESS]);
     assert.equal(h3[0].reactionsUnavailable, undefined);
     assert.ok(!JSON.stringify(sent).includes(RESERVED_UNICODE), 'no reserved glyph on the wire in any phase');
+  });
+});
+
+describe('legacy env source (DISCORD_SUPPRESS_REACTION_EMOJIS, deprecated)', () => {
+  // The 2026-08-03 emergency filter's semantics, now driven through the
+  // central projector. "This morning's behavior" is the contract: VS-16
+  // and colon differences ignored, custom emoji matched by NAME, no
+  // NFC/family widening, unset/empty = off.
+  const envPolicy = (env: string | undefined, file?: string) =>
+    new ReservedReactionsPolicy(file, () => env);
+
+  it('env-only preserves the emergency filter behavior', () => {
+    const policy = envPolicy('☣️, \u{1F4BB} ,:sigil:');
+    // VS-16 in either direction.
+    assert.equal(policy.isReserved({ emoji: '☣' }), true);
+    assert.equal(policy.isReserved({ emoji: '☣️' }), true);
+    assert.equal(policy.isReserved({ emoji: '\u{1F4BB}' }), true);
+    // Custom emoji matched by NAME (with or without colons), never as id.
+    assert.equal(policy.isReserved({ emoji: 'sigil', emojiId: '999888777666555444' }), true);
+    assert.equal(policy.isReserved({ emoji: ':sigil:' }), true);
+    // Unlisted passes.
+    assert.equal(policy.isReserved({ emoji: HARMLESS }), false);
+    // No family widening: a listed base does not cover tone variants.
+    const thumbs = envPolicy(RESERVED_FAMILY_BASE);
+    assert.equal(thumbs.isReserved({ emoji: RESERVED_FAMILY_BASE }), true);
+    assert.equal(thumbs.isReserved({ emoji: `${RESERVED_FAMILY_BASE}\u{1F3FD}` }), false);
+  });
+
+  it('unset/empty/separator-only env stays honestly off', () => {
+    for (const raw of [undefined, '', ' , ,']) {
+      const policy = envPolicy(raw);
+      assert.equal(policy.isReserved({ emoji: '\u{1F4BB}' }), false);
+      assert.deepEqual(policy.status(), { state: 'unset', source: 'unset', protectionActive: false });
+    }
+  });
+
+  it('numeric snowflake tokens gain id matching without losing literal match', () => {
+    const policy = envPolicy(RESERVED_CUSTOM_ID);
+    // By id — regardless of the emoji's display name.
+    assert.equal(policy.isReserved({ emoji: 'whatever', emojiId: RESERVED_CUSTOM_ID }), true);
+    // A different id passes.
+    assert.equal(policy.isReserved({ emoji: 'whatever', emojiId: '999888777666555444' }), false);
+    // The literal-string match survives (a 17-digit emoji NAME still matches,
+    // as it did in the emergency filter — names are not reinterpreted as ids).
+    assert.equal(policy.isReserved({ emoji: RESERVED_CUSTOM_ID }), true);
+    const status = policy.status();
+    assert.equal(status.state, 'active');
+    assert.equal(status.source, 'legacy-env');
+    assert.deepEqual((status as { counts: unknown }).counts, { customEmojiIds: 1, legacyTokens: 1 });
+  });
+
+  it('legacy-env status is active/deprecated and glyph-free', () => {
+    const policy = envPolicy('\u{1F4BB},:sigil:');
+    const status = policy.status();
+    assert.equal(status.state, 'active');
+    assert.equal(status.source, 'legacy-env');
+    assert.equal(status.protectionActive, true);
+    assert.equal((status as { deprecated?: true }).deprecated, true);
+    const wire = JSON.stringify(status);
+    assert.ok(!wire.includes('\u{1F4BB}'), 'no glyph in status');
+    assert.ok(!wire.includes('sigil'), 'no token name in status');
+  });
+
+  it('legacy env never fails closed (matching the emergency filter)', () => {
+    const policy = envPolicy('\u{1F4BB}');
+    assert.equal(policy.suppressAll(), false);
+    const proj = policy.project([summary(HARMLESS)]);
+    assert.equal(proj.unavailable, false);
+    assert.deepEqual(proj.reactions.map((r) => r.emoji), [HARMLESS]);
+  });
+
+  it('file + env: the file is the sole authority, env is ignored not unioned', () => {
+    goodPolicy(); // reserves RESERVED_UNICODE / family / custom id
+    const envOnly = '\u{1F4BB}'; // in env, NOT in the file
+    const policy = envPolicy(envOnly, policyPath);
+    // File entries suppress; env-only entries do NOT (no union).
+    assert.equal(policy.isReserved({ emoji: RESERVED_UNICODE }), true);
+    assert.equal(policy.isReserved({ emoji: envOnly }), false);
+    const status = policy.status();
+    assert.equal(status.state, 'active');
+    assert.equal(status.source, 'file');
+    assert.equal((status as { legacyEnvIgnored?: true }).legacyEnvIgnored, true);
+    assert.ok(!JSON.stringify(status).includes(envOnly), 'no env glyph in status');
+  });
+
+  it('the file-wins deprecation warning is glyph-free and fires once', () => {
+    goodPolicy();
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (msg: unknown) => { logged.push(String(msg)); };
+    try {
+      const policy = envPolicy('\u{1F4BB},:sigil:', policyPath);
+      policy.isReserved({ emoji: HARMLESS });
+      policy.isReserved({ emoji: HARMLESS });
+      policy.status();
+    } finally {
+      console.error = original;
+    }
+    const warnings = logged.filter((l) => l.includes('IGNORED'));
+    assert.equal(warnings.length, 1, 'exactly one deprecation warning');
+    assert.ok(warnings[0].includes('2 tokens'));
+    assert.ok(!warnings[0].includes('\u{1F4BB}'), 'no glyph in warning');
+    assert.ok(!warnings[0].includes('sigil'), 'no token name in warning');
+  });
+
+  it('file + env matching the file: unsetting the env is behavior-identical', () => {
+    goodPolicy();
+    let env: string | undefined = RESERVED_UNICODE; // migrated value also still in env
+    const policy = new ReservedReactionsPolicy(policyPath, () => env);
+    const probe = (p: ReservedReactionsPolicy) => [
+      p.isReserved({ emoji: RESERVED_UNICODE }),
+      p.isReserved({ emoji: `${RESERVED_FAMILY_BASE}\u{1F3FD}` }),
+      p.isReserved({ emoji: ':x:', emojiId: RESERVED_CUSTOM_ID }),
+      p.isReserved({ emoji: HARMLESS }),
+      p.suppressAll(),
+    ];
+    const before = probe(policy);
+    assert.equal((policy.status() as { legacyEnvIgnored?: true }).legacyEnvIgnored, true);
+    env = undefined; // migration's last step: unset the env
+    const after = probe(policy);
+    assert.deepEqual(after, before, 'suppression decisions unchanged by env removal');
+    const status = policy.status();
+    assert.equal(status.source, 'file');
+    assert.equal((status as { legacyEnvIgnored?: true }).legacyEnvIgnored, undefined);
+  });
+
+  it('env edits apply without restart (read per decision)', () => {
+    let env: string | undefined = '\u{1F4BB}';
+    const policy = new ReservedReactionsPolicy(undefined, () => env);
+    assert.equal(policy.isReserved({ emoji: '\u{1F4BB}' }), true);
+    env = '\u{1F9E0}';
+    assert.equal(policy.isReserved({ emoji: '\u{1F4BB}' }), false);
+    assert.equal(policy.isReserved({ emoji: '\u{1F9E0}' }), true);
+    env = undefined;
+    assert.equal(policy.isReserved({ emoji: '\u{1F9E0}' }), false);
+    assert.equal(policy.status().source, 'unset');
+  });
+});
+
+describe('server integration: legacy env drives the same projector', () => {
+  it('env-only suppresses live add AND remove and history summaries through one projector', () => {
+    // No policy file: the server must fall back to the legacy env source
+    // and route BOTH surfaces through reservedReactions, exactly like a
+    // file policy — this is the morning hotfix's behavior, preserved.
+    delete process.env.DISCORD_RESERVED_REACTIONS_FILE;
+    process.env.DISCORD_SUPPRESS_REACTION_EMOJIS = '☣️,\u{1F4BB}';
+    const server = new DiscordMcplServer({} as DiscordAdapter);
+    const s = server as unknown as Record<string, unknown>;
+
+    // History surface.
+    const hist = (s.projectHistoryReactions as (m: unknown[]) => Array<{ reactions?: ReactionSummary[]; reactionsUnavailable?: true }>).call(
+      server,
+      [{ id: 'm1', reactions: [summary('☣'), summary(HARMLESS), summary('\u{1F4BB}')] }],
+    );
+    assert.deepEqual(hist[0].reactions?.map((r) => r.emoji), [HARMLESS]);
+    assert.equal(hist[0].reactionsUnavailable, undefined, 'legacy env is not a failure state');
+
+    // Live surface, add and remove.
+    let reactionHandler: ((ev: Record<string, unknown>) => void) | undefined;
+    const noop = () => {};
+    s.discord = {
+      onMessage: noop, onMessageEdit: noop, onMessageDelete: noop,
+      onChannelCreate: noop, onChannelDelete: noop, onGuildCreate: noop,
+      onChannelAvailable: noop,
+      onReaction: (h: (ev: Record<string, unknown>) => void) => { reactionHandler = h; },
+    };
+    const sent: unknown[] = [];
+    s.conn = { sendRequest: (method: string, params: unknown) => { sent.push({ method, params }); return Promise.resolve({}); } };
+    s.mcplEnabled = true;
+    (s.enabledFeatureSets as Set<string>).add('discord.messaging');
+    (s.reactionChannels as Set<string>).add('chan1');
+    s.reactionChannelsLoaded = true;
+    (s.setupDiscordForwarding as () => void).call(server);
+
+    const baseEvent = {
+      channelId: 'chan1', messageId: 'msg1', guildId: 'g1',
+      userId: 'u1', userName: 'alice', action: 'add',
+      onOwnMessage: false, messageSnippet: 'hello', timestamp: new Date(1700000000000),
+    };
+    reactionHandler!({ ...baseEvent, emoji: '☣', emojiId: null, token: '☣' });
+    reactionHandler!({ ...baseEvent, action: 'remove', emoji: '\u{1F4BB}', emojiId: null, token: '\u{1F4BB}' });
+    assert.equal(sent.length, 0, 'suppressed add and remove alike, any reactor');
+
+    reactionHandler!({ ...baseEvent, emoji: HARMLESS, emojiId: null, token: HARMLESS });
+    assert.equal(sent.length, 1);
+    const wire = JSON.stringify(sent);
+    assert.ok(wire.includes(HARMLESS));
+    assert.ok(!wire.includes('☣'), 'no suppressed glyph on the wire');
+    assert.ok(!wire.includes('\u{1F4BB}'), 'no suppressed glyph on the wire');
   });
 });
