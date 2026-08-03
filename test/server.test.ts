@@ -244,6 +244,14 @@ async function mcplHandshake(client: McplConnection): Promise<McplInitializeResu
 
   const result = (await client.sendRequest('initialize', params)) as McplInitializeResult;
   client.sendNotification('notifications/initialized');
+  // 0.5 host behavior: settle the §5.3 initial policy right after
+  // initialize. This is also what releases the server's policy-gated channel
+  // registration + reconnect sweep (see serve()) — without it every test
+  // sits out the 20s pre-0.5 grace before channels/register arrives.
+  const receipt = (await client.sendRequest('featureSets/update', {
+    enabled: ['discord.messaging', 'discord.channels', 'discord.history', 'discord.subscriptions'],
+  })) as { accepted: boolean };
+  assert.equal(receipt.accepted, true);
   return result;
 }
 

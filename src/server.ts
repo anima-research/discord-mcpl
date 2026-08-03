@@ -723,28 +723,39 @@ export class DiscordMcplServer {
     // Handshake
     await this.handleInitialize();
 
-    // If MCPL is enabled, register all visible Discord channels
-    if (this.mcplEnabled) {
-      await this.registerDiscordChannels();
-    }
-
-    // Deliver anything that arrived while the bot was offline (mentions + DMs
-    // everywhere, full missed backscroll for subscribed channels). Best-effort
-    // and one-shot; failures must not block serving.
-    //
-    // ORDERING (Mythos 0.5-canary find): this used to be awaited BEFORE the
-    // main loop. A 0.5 host sends its §5.3 initial policy as a
-    // featureSets/update REQUEST right after initialize with a 15s timeout —
-    // while the sweep (Discord-rate-limited catch-up) blocked the loop, the
-    // request sat unread, timed out, and the whole MCPL surface landed in
-    // deny-until-policy. The transport is full-duplex, so the sweep now runs
-    // concurrently, gated on the policy being answered (or a 20s grace) so
-    // its pushes land inside the granted window, not the deny window.
+    // ORDERING (Mythos 0.5-canary find, two rounds): NOTHING may run between
+    // initialize and the main loop. A 0.5 host sends its §5.3 initial policy
+    // as a featureSets/update REQUEST right after initialize with a 15s
+    // timeout; until the loop reads, that request sits unanswered. Round 1:
+    // the reconnect sweep blocked the loop → timeout → deny-until-policy.
+    // Round 2: registerDiscordChannels still ran pre-loop, and its own
+    // server→host Request is itself REJECTED by the host until policy is
+    // established (-32002 after ~15s) — a clean cross-request deadlock; the
+    // policy answer landed ~600ms after the host gave up. So channel
+    // registration AND the sweep both run concurrently with the loop, gated
+    // on the policy being answered (20s grace covers pre-0.5 hosts that
+    // never send the Request form), registration strictly before the sweep
+    // so pushes land on registered channels inside the granted window.
     void (async () => {
       await Promise.race([
         this.policyAnswered,
-        new Promise((r) => setTimeout(r, 20_000)),
+        // unref: a pending grace timer must never hold the process open
+        // (it made the test runner appear to hang for 20s per server).
+        new Promise((r) => {
+          const t = setTimeout(r, 20_000);
+          (t as { unref?: () => void }).unref?.();
+        }),
       ]);
+      if (this.mcplEnabled) {
+        try {
+          await this.registerDiscordChannels();
+        } catch (err) {
+          console.error('[discord-mcpl] Channel registration failed:', (err as Error).message);
+        }
+      }
+      // Deliver anything that arrived while the bot was offline (mentions +
+      // DMs everywhere, full missed backscroll for subscribed channels).
+      // Best-effort and one-shot; failures must not block serving.
       try {
         await this.runReconnectSweep();
       } catch (err) {
