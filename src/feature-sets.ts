@@ -16,8 +16,12 @@ export interface NamedFeatureSetDeclaration extends FeatureSetDeclaration {
   name: string;
   /** 0.2.1-era field (state patches opt-in), dropped from the 0.5 core type
    *  (§8 out of scope for 0.5.0). Kept on the wire for digest stability —
-   *  wrong-typed/extra fields hash verbatim per the conformance corpus. */
-  hostState?: boolean;
+   *  wrong-typed/extra fields hash verbatim per the conformance corpus.
+   *  Required (not optional): the installed 0.2.1 core type requires it, so
+   *  an optional override is a TS2430; every declaration supplies it, and
+   *  once the dep moves to an 0.5 core (no hostState on the parent) a
+   *  required extra field here stays legal while keeping the wire stable. */
+  hostState: boolean;
 }
 
 export const featureSets: NamedFeatureSetDeclaration[] = [

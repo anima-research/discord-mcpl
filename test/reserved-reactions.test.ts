@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ReservedReactionsPolicy } from '../src/reserved-reactions.js';
+import { normalizeReactionEmoji } from '../src/filters.js';
 import { DiscordMcplServer } from '../src/server.js';
 import type { DiscordAdapter, ReactionSummary } from '../src/discord-adapter.js';
 
@@ -500,6 +501,23 @@ describe('server integration', () => {
     assert.deepEqual(h3[0].reactions?.map((r) => r.emoji), [HARMLESS]);
     assert.equal(h3[0].reactionsUnavailable, undefined);
     assert.ok(!JSON.stringify(sent).includes(RESERVED_UNICODE), 'no reserved glyph on the wire in any phase');
+  });
+});
+
+describe('normalizeReactionEmoji (the single legacy matching implementation)', () => {
+  // Formerly tested beside the emergency filter helpers; those are deleted
+  // (superseded by the policy's legacy adapter) but the normalizer is the
+  // load-bearing shared semantics, so its unit coverage lives on.
+  it('strips VS-16 so keycap/pictographic variants compare equal', () => {
+    assert.equal(normalizeReactionEmoji('\u2623\uFE0F'), '\u2623');
+    assert.equal(normalizeReactionEmoji('\u2623'), '\u2623');
+  });
+  it('strips surrounding colons of custom-emoji names', () => {
+    assert.equal(normalizeReactionEmoji(':sigil:'), 'sigil');
+    assert.equal(normalizeReactionEmoji('sigil'), 'sigil');
+  });
+  it('leaves plain pictographic emoji untouched', () => {
+    assert.equal(normalizeReactionEmoji('\u{1F4BB}'), '\u{1F4BB}');
   });
 });
 
