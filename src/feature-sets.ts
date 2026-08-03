@@ -4,7 +4,23 @@
 
 import type { FeatureSetDeclaration } from '@animalabs/mcpl-core';
 
-export const featureSets: FeatureSetDeclaration[] = [
+/** Array-form declaration entry: a core FeatureSetDeclaration plus its name
+ *  inline. mcpl-core 0.5 types `McplCapabilities.featureSets` as the §5.2
+ *  Record-keyed-by-name shape, but this server still advertises the legacy
+ *  ARRAY form — hashed verbatim by the §17 digest conformance corpus and
+ *  normalized by hosts (af feature-set-manager handles Array.isArray).
+ *  Changing the wire shape changes the manifest digest, so migrating to the
+ *  Record form is a deliberate fleet decision (harness #5 adjacency), not a
+ *  type-error fix. Types-only adaptation here; bytes on the wire unchanged. */
+export interface NamedFeatureSetDeclaration extends FeatureSetDeclaration {
+  name: string;
+  /** 0.2.1-era field (state patches opt-in), dropped from the 0.5 core type
+   *  (§8 out of scope for 0.5.0). Kept on the wire for digest stability —
+   *  wrong-typed/extra fields hash verbatim per the conformance corpus. */
+  hostState?: boolean;
+}
+
+export const featureSets: NamedFeatureSetDeclaration[] = [
   {
     name: 'discord.messaging',
     description: 'Send, read, react to messages in Discord channels',

@@ -280,10 +280,15 @@ describe('DiscordMcplServer', () => {
     assert.equal(mcpl.channels, true);
     assert.equal(mcpl.rollback, true);
     assert.ok(mcpl.featureSets);
-    assert.equal(mcpl.featureSets!.length, 4);
-    assert.equal(mcpl.featureSets![0].name, 'discord.messaging');
+    // This server advertises the legacy ARRAY form (hashed verbatim per the
+    // conformance corpus; hosts normalize it — af feature-set-manager). The
+    // 0.5 core type is `Record<string, FeatureSetDeclaration> | boolean`, so
+    // narrow explicitly to the wire shape actually sent.
+    const declaredSets = mcpl.featureSets as unknown as Array<{ name: string }>;
+    assert.equal(declaredSets.length, 4);
+    assert.equal(declaredSets[0].name, 'discord.messaging');
     assert.ok(
-      mcpl.featureSets!.some((fs) => fs.name === 'discord.subscriptions'),
+      declaredSets.some((fs) => fs.name === 'discord.subscriptions'),
       'discord.subscriptions feature set should be declared',
     );
 

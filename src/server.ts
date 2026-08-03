@@ -778,7 +778,9 @@ export class DiscordMcplServer {
       pushEvents: true,
       channels: true,
       rollback: true,
-      featureSets,
+      // Legacy array form on the wire, unchanged (see NamedFeatureSetDeclaration
+      // in feature-sets.ts — digest-stable, host-normalized).
+      featureSets: featureSets as unknown as McplCapabilities['featureSets'],
       // NOTE: we intentionally no longer declare `contextHooks.afterInference`.
       // Output routing ("where does a plain-text reply go") is a HOST concern,
       // not a per-surface one — only the host sees the merged cross-surface
@@ -884,13 +886,17 @@ export class DiscordMcplServer {
           break;
         }
 
-        case method.CONTEXT_AFTER_INFERENCE: {
+        case 'context/afterInference': {
           // RETIRED no-op (see handleAfterInference). The capability is not
           // advertised; this case survives only so a stray call from an older
           // host is answered instead of erroring. It does NOT post anything —
           // an earlier comment here described the retired sticky-reply as if
           // live, and misled a reviewer into believing the capability was
           // still advertised. Issue #14.
+          // Literal wire string: mcpl-core 0.5 removed method.CONTEXT_AFTER_
+          // INFERENCE from the method map (the 0.2.1 constant equaled this
+          // string); a back-compat shim for old hosts is exactly where the
+          // removed name must not be load-bearing.
           await this.handleAfterInference(params);
           conn.sendResponse(req.id, { featureSet: 'discord.messaging' });
           break;
