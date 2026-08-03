@@ -221,6 +221,12 @@ export class DiscordMcplServer {
   private reactionChannels = new Set<string>();
   private reactionChannelsLoaded = false;
 
+  /** Resolved when the host's first featureSets/update (either form) has
+   *  been processed — the signal that §5.3 policy is settled and pushes
+   *  will land inside the granted window. Gates the reconnect sweep. */
+  private policyAnswered: Promise<void>;
+  private resolvePolicyAnswered!: () => void;
+
   /** Channels the agent has explicitly MUTED: no ambient, no mention/reply wake,
    *  and no auto-subscribe-on-mention. Dropped at the top of
    *  handleDiscordMessage. Persisted to a sibling of DISCORD_SUBSCRIPTIONS_FILE
@@ -394,7 +400,11 @@ export class DiscordMcplServer {
   /** Buffers for channels/outgoing/chunk streams, keyed by inferenceId */
   private outgoingBuffers = new Map<string, { channelId: string; chunks: string[] }>();
 
-  constructor(private discord: DiscordAdapter) {}
+  constructor(private discord: DiscordAdapter) {
+    this.policyAnswered = new Promise((resolve) => {
+      this.resolvePolicyAnswered = resolve;
+    });
+  }
 
   /**
    * Register slash commands with Discord and wire the interaction handler.
@@ -721,11 +731,26 @@ export class DiscordMcplServer {
     // Deliver anything that arrived while the bot was offline (mentions + DMs
     // everywhere, full missed backscroll for subscribed channels). Best-effort
     // and one-shot; failures must not block serving.
-    try {
-      await this.runReconnectSweep();
-    } catch (err) {
-      console.error('[discord-mcpl] Reconnect catch-up sweep failed:', (err as Error).message);
-    }
+    //
+    // ORDERING (Mythos 0.5-canary find): this used to be awaited BEFORE the
+    // main loop. A 0.5 host sends its §5.3 initial policy as a
+    // featureSets/update REQUEST right after initialize with a 15s timeout —
+    // while the sweep (Discord-rate-limited catch-up) blocked the loop, the
+    // request sat unread, timed out, and the whole MCPL surface landed in
+    // deny-until-policy. The transport is full-duplex, so the sweep now runs
+    // concurrently, gated on the policy being answered (or a 20s grace) so
+    // its pushes land inside the granted window, not the deny window.
+    void (async () => {
+      await Promise.race([
+        this.policyAnswered,
+        new Promise((r) => setTimeout(r, 20_000)),
+      ]);
+      try {
+        await this.runReconnectSweep();
+      } catch (err) {
+        console.error('[discord-mcpl] Reconnect catch-up sweep failed:', (err as Error).message);
+      }
+    })();
 
     // Main loop
     try {
@@ -886,6 +911,18 @@ export class DiscordMcplServer {
           break;
         }
 
+        case method.FEATURE_SETS_UPDATE: {
+          // §5.3/§6.7 Request form — the host's policy update, awaiting a
+          // degradation receipt. Pre-0.5 this method was notification-only
+          // here; a 0.5 host's initial policy Request then timed out and the
+          // whole MCPL surface stayed deny-until-policy (Mythos canary).
+          // Everything this server declares runs on plain tool/channel
+          // machinery, so there is nothing to degrade: accept plainly.
+          this.applyFeatureSetsUpdate(params as unknown as FeatureSetsUpdateParams);
+          conn.sendResponse(req.id, { accepted: true });
+          break;
+        }
+
         case 'context/afterInference': {
           // RETIRED no-op (see handleAfterInference). The capability is not
           // advertised; this case survives only so a stray call from an older
@@ -946,18 +983,27 @@ export class DiscordMcplServer {
     }
   }
 
+  /** Shared body of featureSets/update, both forms (§6.7). Also resolves
+   *  the policy gate that releases the reconnect sweep (see serve()). */
+  private applyFeatureSetsUpdate(p: FeatureSetsUpdateParams): void {
+    if (p.enabled) {
+      for (const name of p.enabled) this.enabledFeatureSets.add(name);
+    }
+    if (p.disabled) {
+      for (const name of p.disabled) this.enabledFeatureSets.delete(name);
+    }
+    this.resolvePolicyAnswered();
+  }
+
   // ── Notification Dispatch ──
 
   private handleNotification(notif: JsonRpcNotification): void {
     switch (notif.method) {
       case method.FEATURE_SETS_UPDATE: {
-        const p = notif.params as FeatureSetsUpdateParams;
-        if (p.enabled) {
-          for (const name of p.enabled) this.enabledFeatureSets.add(name);
-        }
-        if (p.disabled) {
-          for (const name of p.disabled) this.enabledFeatureSets.delete(name);
-        }
+        // §6.7 Notification form: descriptive metadata only. Grant-bearing
+        // updates (including the §5.3 initial policy) arrive as a Request —
+        // see the handleRequest case.
+        this.applyFeatureSetsUpdate(notif.params as FeatureSetsUpdateParams);
         break;
       }
 
