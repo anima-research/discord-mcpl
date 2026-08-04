@@ -74,6 +74,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   delete process.env.DISCORD_FILTERS_FILE;
   delete process.env.DISCORD_SUPPRESS_REACTION_EMOJIS;
+  delete process.env.DISCORD_SUPPRESSED_REACTIONS_BASELINE;
 });
 
 describe('DiscordFiltersState — plane status', () => {
@@ -333,6 +334,143 @@ describe('DiscordFiltersState — suppression', () => {
     assert.deepEqual(parseSuppressionEnvTokens(''), []);
     assert.deepEqual(parseSuppressionEnvTokens(' , ,, '), []);
     assert.deepEqual(parseSuppressionEnvTokens(`${HARMLESS}, x`), [HARMLESS, 'x']);
+  });
+});
+
+describe('DiscordFiltersState — host-injected protective baseline', () => {
+  const BASELINE = `${SUPPRESSED_UNICODE},${SUPPRESSED_CUSTOM_ID}`;
+
+  function baselineState(opts?: { legacyEnv?: string }): DiscordFiltersState {
+    return new DiscordFiltersState({ fileConfigured: true, legacyEnv: opts?.legacyEnv, baselineEnv: BASELINE });
+  }
+
+  it('absent key → baseline applies, source baseline-default, not deprecated', () => {
+    const st = baselineState();
+    st.applyParsed({ guildIds: ['999888777666555444'] }); // file exists, no key
+    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), true);
+    assert.equal(st.isSuppressed({ emoji: ':x:', emojiId: SUPPRESSED_CUSTOM_ID }), true);
+    const rs = st.suppressionStatus();
+    assert.equal(rs.status, 'active');
+    assert.equal(rs.source, 'baseline-default');
+    assert.equal(rs.deprecated, undefined, 'the baseline is the intended path, not a deprecation');
+    assert.equal(rs.protectionActive, true);
+  });
+
+  it('explicit [] → operator chose none; the baseline is overridden, not merged back', () => {
+    const st = baselineState();
+    st.applyParsed({ suppressedReactionEmojis: [] });
+    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'explicit empty beats the default');
+    const rs = st.suppressionStatus();
+    assert.equal(rs.status, 'configured-empty');
+    assert.equal(rs.source, 'file');
+  });
+
+  it('explicit nonempty key → exact operator set, baseline entries not unioned in', () => {
+    const st = baselineState();
+    st.applyParsed({ suppressedReactionEmojis: [HARMLESS] }); // operator set ≠ baseline
+    assert.equal(st.isSuppressed({ emoji: HARMLESS }), true, 'operator entries enforced exactly');
+    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'baseline entry must NOT ride along');
+    assert.equal(st.suppressionStatus().source, 'file');
+  });
+
+  it('operator-explicit legacy env beats the injected baseline', () => {
+    const st = baselineState({ legacyEnv: ENV_ONLY_GLYPH });
+    st.applyParsed({});
+    assert.equal(st.isSuppressed({ emoji: ENV_ONLY_GLYPH }), true);
+    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'baseline yields to explicit operator config');
+    assert.equal(st.suppressionStatus().source, 'legacy-env');
+  });
+
+  it('lost configuration never silently degrades back to baseline', () => {
+    // A file that HAD a key and broke: stale LKG, not baseline.
+    const st = baselineState();
+    st.applyParsed({ suppressedReactionEmojis: [HARMLESS] });
+    st.markBroken('missing');
+    assert.equal(st.isSuppressed({ emoji: HARMLESS }), true, 'LKG enforced');
+    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'baseline does NOT resurrect');
+    assert.equal(st.suppressionStatus().status, 'stale');
+
+    // A file whose operator explicitly chose none, then broke: fail
+    // closed — the baseline must not un-choose that either.
+    const stEmpty = baselineState();
+    stEmpty.applyParsed({ suppressedReactionEmojis: [] });
+    stEmpty.markBroken('invalid');
+    assert.equal(stEmpty.suppressAll(), true, 'configured-empty then broken stays fail-closed, not baseline-again');
+  });
+
+  it('baseline continues under a broken plane when it was already the source', () => {
+    const st = baselineState();
+    st.applyParsed({ guildIds: ['999888777666555444'] }); // running on baseline
+    st.markBroken('invalid');
+    assert.equal(st.suppressAll(), false);
+    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), true, 'the process-static baseline is unaffected by file failures');
+    assert.equal(st.planeStatus().desiredState, 'invalid', 'the plane still carries the broken fact');
+  });
+
+  it('first materialization seeds the baseline durably; legacy env wins the seed when both are set', () => {
+    const cap = captureStderr();
+    try {
+      const p1 = join(dir, 'seed-baseline.json');
+      const r1 = resolveStartupFilters(p1, {
+        DISCORD_SUPPRESSED_REACTIONS_BASELINE: BASELINE,
+      } as NodeJS.ProcessEnv);
+      assert.deepEqual(r1.filters.suppressedReactionEmojis, [SUPPRESSED_UNICODE, SUPPRESSED_CUSTOM_ID]);
+      assert.deepEqual(loadFiltersFile(p1)!.suppressedReactionEmojis, [SUPPRESSED_UNICODE, SUPPRESSED_CUSTOM_ID],
+        'restart with absent desired config re-seeds the baseline durably');
+
+      const p2 = join(dir, 'seed-both.json');
+      const r2 = resolveStartupFilters(p2, {
+        DISCORD_SUPPRESS_REACTION_EMOJIS: ENV_ONLY_GLYPH,
+        DISCORD_SUPPRESSED_REACTIONS_BASELINE: BASELINE,
+      } as NodeJS.ProcessEnv);
+      assert.deepEqual(r2.filters.suppressedReactionEmojis, [ENV_ONLY_GLYPH],
+        'operator-explicit legacy env wins the seed; never unioned with the baseline');
+      assert.ok(!cap.lines.join('\n').includes(SUPPRESSED_UNICODE), 'seed logs stay glyph-free');
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('an existing file without the key still uses the baseline — but is not rewritten', () => {
+    const path = join(dir, 'existing.json');
+    writeFileSync(path, JSON.stringify({ guildIds: ['999888777666555444'] }));
+    const before = readFileSync(path, 'utf8');
+    const cap = captureStderr();
+    try {
+      const { filters } = resolveStartupFilters(path, {
+        DISCORD_SUPPRESSED_REACTIONS_BASELINE: BASELINE,
+      } as NodeJS.ProcessEnv);
+      assert.equal(readFileSync(path, 'utf8'), before, 'no surprise rewrite');
+      const st = new DiscordFiltersState({ fileConfigured: true, baselineEnv: BASELINE });
+      st.applyParsed(filters);
+      assert.equal(st.suppressionStatus().source, 'baseline-default');
+      assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), true);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('baseline status and logs never contain a baseline glyph or id', () => {
+    const cap = captureStderr();
+    try {
+      const st = baselineState();
+      st.applyParsed({});
+      const blobs = [JSON.stringify(st.suppressionStatus()), JSON.stringify(st.planeStatus()), cap.lines.join('\n')];
+      for (const blob of blobs) {
+        for (const secret of [SUPPRESSED_UNICODE, SUPPRESSED_BARE, SUPPRESSED_CUSTOM_ID]) {
+          assert.ok(!blob.includes(secret), 'no baseline value in status/logs');
+        }
+      }
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('standalone (no baseline injected) honestly reports not-configured', () => {
+    const st = new DiscordFiltersState({ fileConfigured: true, baselineEnv: undefined });
+    st.applyParsed({});
+    assert.equal(st.suppressionStatus().status, 'not-configured');
+    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false);
   });
 });
 

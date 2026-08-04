@@ -793,6 +793,11 @@ export class DiscordMcplServer {
           'process-static — changing it needs a restart) — move the entries into the filters file suppressedReactionEmojis key ' +
           'and unset the env (alias retires per issue #16)',
       );
+    } else if (rs.source === 'baseline-default') {
+      console.error(
+        `[discord-mcpl] reaction-suppression: host-injected protective baseline in force (${rs.effectiveCount} entries, ` +
+          'no operator configuration present) — an explicit suppressedReactionEmojis key in the filters file overrides it',
+      );
     } else if (rs.status === 'unavailable') {
       console.error(
         '[discord-mcpl] reaction-suppression: filters file is configured but unreadable and no usable set was ever loaded — ' +

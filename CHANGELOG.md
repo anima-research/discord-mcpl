@@ -7,6 +7,22 @@ in the git log and PR descriptions.
 
 ### Added
 
+- **Host-injectable protective baseline for reaction suppression**
+  (`DISCORD_SUPPRESSED_REACTIONS_BASELINE`): new deployments and
+  never-configured installations default to the house classifier markers
+  when host composition injects them. Precedence is strict and never
+  unioned: a filters-file key (including an explicit `[]` = operator chose
+  none) beats everything; the deprecated operator env beats the baseline;
+  the baseline applies only when no operator configuration exists.
+  First materialization of the filters file writes the winning seed
+  durably. Lost configuration keeps the reviewed stale-LKG / fail-closed
+  postures and never silently degrades back to the baseline — it is for
+  never-configured, not for lost configuration. `filters_get` reports
+  `source: "baseline-default"` (count/digest only, not deprecated). The
+  Agent Framework owns the refusal-category→reaction map; host composition
+  derives and injects the concrete set below the model line — standalone
+  Discord deployments inject nothing and honestly report no protection.
+
 - **Reaction suppression on the filters plane** (issue #21):
   `suppressedReactionEmojis` in `DISCORD_FILTERS_FILE` names reaction
   markers that are filtered out of every model-visible surface — live

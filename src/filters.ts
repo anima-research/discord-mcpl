@@ -166,10 +166,13 @@ export function filtersFileMtime(path: string): number | null {
  *   the file is NOT overwritten. It belongs to the operator, and it may
  *   hold a suppressedReactionEmojis key the env seed wouldn't recreate;
  * - file absent: first materialization — seed it from the env whitelists
- *   plus DISCORD_SUPPRESS_REACTION_EMOJIS as the suppression key (that
- *   env's one-time migration into the plane). Only a durably-written seed
- *   claims file authority: if the write fails, the returned filters omit
- *   the key so the env stays the (legacy) source. */
+ *   plus a suppression key: DISCORD_SUPPRESS_REACTION_EMOJIS when set
+ *   (operator-explicit, the emergency env's one-time migration into the
+ *   plane), else DISCORD_SUPPRESSED_REACTIONS_BASELINE (the host-injected
+ *   protective baseline, written durably so the file becomes the
+ *   operator-ownable record of it). Never unioned. Only a durably-written
+ *   seed claims file authority: if the write fails, the returned filters
+ *   omit the key so the env snapshot stays the source. */
 export function resolveStartupFilters(
   filtersFile: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
@@ -190,7 +193,10 @@ export function resolveStartupFilters(
       );
     }
   } else {
-    const suppressSeed = parseSuppressionEnvTokens(env.DISCORD_SUPPRESS_REACTION_EMOJIS);
+    const legacySeed = parseSuppressionEnvTokens(env.DISCORD_SUPPRESS_REACTION_EMOJIS);
+    const baselineSeed = parseSuppressionEnvTokens(env.DISCORD_SUPPRESSED_REACTIONS_BASELINE);
+    const suppressSeed = legacySeed.length ? legacySeed : baselineSeed;
+    const seedSource = legacySeed.length ? 'DISCORD_SUPPRESS_REACTION_EMOJIS' : 'DISCORD_SUPPRESSED_REACTIONS_BASELINE';
     const seeded = suppressSeed.length
       ? { ...filters, suppressedReactionEmojis: suppressSeed }
       : filters;
@@ -200,8 +206,8 @@ export function resolveStartupFilters(
       console.error(
         `[discord-mcpl] filters file seeded from env -> ${filtersFile}` +
           (suppressSeed.length
-            ? ` (incl. ${suppressSeed.length} suppressed-reaction entries from DISCORD_SUPPRESS_REACTION_EMOJIS — ` +
-              'the file key is now authoritative; unset the env after verifying)'
+            ? ` (incl. ${suppressSeed.length} suppressed-reaction entries from ${seedSource} — ` +
+              'the file key is now authoritative)'
             : ''),
       );
     } catch (err) {
@@ -343,7 +349,12 @@ export interface ReactionSuppressionStatus {
   /** status 'unavailable' only: the plane is broken with no usable prior
    *  set, so every reaction is withheld until the file is repaired. */
   suppressingAllReactions?: true;
-  source: 'file' | 'legacy-env' | 'none';
+  /** baseline-default: the host-injected protective baseline is in force
+   *  because no operator configuration exists (key absent everywhere).
+   *  Not deprecated — this is the intended default-protective path for
+   *  host-launched deployments; a standalone Discord with no baseline
+   *  injected honestly reports none. */
+  source: 'file' | 'legacy-env' | 'baseline-default' | 'none';
   /** The deprecated DISCORD_SUPPRESS_REACTION_EMOJIS env is set but the
    *  file key is authoritative — the env is ignored, never unioned. */
   legacyEnvIgnored?: true;
@@ -382,13 +393,32 @@ function compileTokens(tokens: string[]): CompiledSet {
  * hiding.
  *
  * Suppression sources, in precedence order:
- * - file key present (even empty): sole authority. A concurrently-set
- *   legacy env is IGNORED — never unioned — with a glyph-free warning.
+ * - file key present (even empty): sole authority. An explicit `[]` means
+ *   the operator chose no suppression — it beats every default. A
+ *   concurrently-set legacy env is IGNORED — never unioned — with a
+ *   glyph-free warning; a concurrently-injected baseline is overridden
+ *   silently (that is normal operation, not an anomaly).
  * - file key absent, DISCORD_SUPPRESS_REACTION_EMOJIS set at startup: the
  *   deprecated compatibility source (process-static snapshot; changing the
  *   env requires a restart). Pre-existing filter files that lack the key
  *   stay on this source — no surprise rewrite of an operator's file.
- * - neither: honestly off.
+ *   Operator-explicit, so it beats the baseline below.
+ * - file key absent, DISCORD_SUPPRESSED_REACTIONS_BASELINE set at startup:
+ *   the host-injected protective baseline (source 'baseline-default').
+ *   The Agent Framework owns the refusal-category→reaction map because it
+ *   places the annotations; host composition derives the concrete set and
+ *   injects it below the model line — Discord never authors or duplicates
+ *   that catalog, it only enforces what it is handed. Process-static, not
+ *   deprecated: this is the intended default-protective path for
+ *   host-launched deployments. Standalone Discord without a host injects
+ *   nothing and honestly reports no protection.
+ * - none of the above: honestly off.
+ *
+ * Baseline is for NEVER-CONFIGURED, not for lost configuration: a file
+ * that goes missing or unparseable at runtime keeps the reviewed
+ * stale-LKG / fail-closed postures and never silently degrades back to
+ * the baseline — desired state that existed and was lost is a failure to
+ * witness, not an invitation to re-default.
  *
  * Failure posture when the plane breaks (markBroken), decided by what the
  * last GOOD parse established:
@@ -421,14 +451,20 @@ export class DiscordFiltersState {
   private suppression: CompiledSet | null = null;
   /** Deprecated env source, snapshotted once — process-static. */
   private readonly legacySet: CompiledSet | null;
+  /** Host-injected protective baseline, snapshotted once — process-static. */
+  private readonly baselineSet: CompiledSet | null;
   private warnedLegacyIgnored = false;
 
-  constructor(opts?: { fileConfigured?: boolean; legacyEnv?: string }) {
+  constructor(opts?: { fileConfigured?: boolean; legacyEnv?: string; baselineEnv?: string }) {
     this.fileConfigured = opts?.fileConfigured ?? !!process.env.DISCORD_FILTERS_FILE;
-    const raw =
+    const legacyRaw =
       opts && 'legacyEnv' in opts ? opts.legacyEnv : process.env.DISCORD_SUPPRESS_REACTION_EMOJIS;
-    const tokens = parseSuppressionEnvTokens(raw);
-    this.legacySet = tokens.length ? compileTokens(tokens) : null;
+    const legacyTokens = parseSuppressionEnvTokens(legacyRaw);
+    this.legacySet = legacyTokens.length ? compileTokens(legacyTokens) : null;
+    const baselineRaw =
+      opts && 'baselineEnv' in opts ? opts.baselineEnv : process.env.DISCORD_SUPPRESSED_REACTIONS_BASELINE;
+    const baselineTokens = parseSuppressionEnvTokens(baselineRaw);
+    this.baselineSet = baselineTokens.length ? compileTokens(baselineTokens) : null;
   }
 
   /** Apply a successfully-parsed DiscordFilters. Called at startup, from
@@ -493,10 +529,11 @@ export class DiscordFiltersState {
   }
 
   /** The set currently matched against, if any: the file key when present
-   *  (including a stale LKG), else the startup env snapshot. */
+   *  (including a stale LKG), else the operator's legacy env snapshot,
+   *  else the host-injected baseline. */
   private effectiveSet(): CompiledSet | null {
     if (this.keyPresent) return this.suppression;
-    return this.legacySet;
+    return this.legacySet ?? this.baselineSet;
   }
 
   /** True when the withhold-everything failure posture is on: the plane is
@@ -573,6 +610,15 @@ export class DiscordFiltersState {
         effectiveDigest: this.legacySet.digest,
         source: 'legacy-env',
         deprecated: true,
+      };
+    }
+    if (this.baselineSet) {
+      return {
+        status: 'active',
+        protectionActive: true,
+        effectiveCount: this.baselineSet.matchSet.size,
+        effectiveDigest: this.baselineSet.digest,
+        source: 'baseline-default',
       };
     }
     return {

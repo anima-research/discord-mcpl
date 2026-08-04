@@ -30,6 +30,16 @@
  *                       carries the key. Process-static: read once at
  *                       startup, changes require a restart (hot reload
  *                       belongs to the file plane). Retires per issue #16.
+ *   DISCORD_SUPPRESSED_REACTIONS_BASELINE - Host-injected protective
+ *                       baseline for reaction suppression (comma-
+ *                       separated). Applies (and seeds the filters file on
+ *                       first materialization) only when no operator
+ *                       configuration exists: a file key — including an
+ *                       explicit [] — or the legacy env above always wins,
+ *                       never unioned. Intended to be set by host
+ *                       composition from the Agent Framework's annotation
+ *                       map; standalone deployments leave it unset.
+ *                       Process-static, not deprecated.
  */
 
 import * as net from 'node:net';
