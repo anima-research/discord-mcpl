@@ -413,6 +413,10 @@ export class DiscordMcplServer {
    * `/undo [turns]` — admin-gated (DISCORD_ADMIN_USERS): asks the host to
    * revert the agent's last N turns via the `host/command` MCPL method, then
    * posts what the agent now sees as its latest context message.
+   *
+   * `/nudge` — admin-gated: asks the host to run inference on the agent's
+   * current context with no new events (ephemeral reply — see
+   * handleNudgeCommand).
    */
   async setupSlashCommands(): Promise<void> {
     this.discord.onSlashCommand((interaction) => {
@@ -452,6 +456,10 @@ export class DiscordMcplServer {
         ],
       },
       {
+        name: 'nudge',
+        description: 'Run the agent on its current context — no new events — admin only',
+      },
+      {
         name: 'unstick',
         description: 'Rewind blocked turns and re-run until the model stops refusing — admin only',
         options: [
@@ -472,7 +480,8 @@ export class DiscordMcplServer {
     if (
       interaction.commandName !== 'undo' &&
       interaction.commandName !== 'hide' &&
-      interaction.commandName !== 'unstick'
+      interaction.commandName !== 'unstick' &&
+      interaction.commandName !== 'nudge'
     ) {
       await interaction.reply({ content: `Unknown command: ${interaction.commandName}`, flags: MessageFlags.Ephemeral });
       return;
@@ -495,6 +504,11 @@ export class DiscordMcplServer {
 
     if (interaction.commandName === 'unstick') {
       await this.handleUnstickCommand(interaction);
+      return;
+    }
+
+    if (interaction.commandName === 'nudge') {
+      await this.handleNudgeCommand(interaction);
       return;
     }
 
@@ -707,6 +721,49 @@ export class DiscordMcplServer {
     } catch (err) {
       dbg('slash:unstick-failed', { error: (err as Error).message });
       await interaction.editReply(`⚠️ Unstick failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * `/nudge` — ask the host to run an inference turn on the agent's CURRENT
+   * context with no new events. The reply is EPHEMERAL by design: a visible
+   * channel message would itself be a new event, defeating the command's
+   * whole point (and the wake would then be "about" the confirmation).
+   */
+  private async handleNudgeCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    const conn = this.conn;
+    if (!conn) {
+      await interaction.reply({ content: 'Host is not connected — cannot nudge.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    dbg('slash:nudge', { userId: interaction.user.id, channelId: interaction.channelId });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    try {
+      const result = (await conn.sendRequest(
+        'host/command',
+        {
+          command: 'nudge',
+          requesterId: interaction.user.id,
+          requesterName: interaction.user.username,
+        },
+        30000,
+      )) as { ok?: boolean; error?: string; agentStatus?: string };
+
+      if (!result?.ok) {
+        await interaction.editReply(`⚠️ Nudge failed: ${result?.error ?? 'unknown error'}`);
+        return;
+      }
+      const when = result.agentStatus === 'idle'
+        ? 'running now'
+        : `queued behind the current turn (agent is ${result.agentStatus ?? 'busy'})`;
+      await interaction.editReply(
+        `👉 Nudged — the agent takes a turn on its current context, no new events (${when}).`,
+      );
+    } catch (err) {
+      dbg('slash:nudge-failed', { error: (err as Error).message });
+      await interaction.editReply(`⚠️ Nudge failed: ${(err as Error).message}`);
     }
   }
 
