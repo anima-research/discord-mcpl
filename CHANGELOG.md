@@ -7,27 +7,36 @@ in the git log and PR descriptions.
 
 ### Added
 
-- **Reserved-reaction projection policy** (`DISCORD_RESERVED_REACTIONS_FILE`,
-  issue #21): reaction emojis reserved for classifier signaling are filtered
-  out of every model-visible surface — live reaction events (including their
-  event ids), `fetch_history` / `fetch_around` results, and channel-open
-  backscroll metadata — before any text or token is produced. Policy is a
-  versioned JSON file (custom-emoji ids, exact unicode after NFC/presentation
-  normalization, and families covering skin-tone variants); unset means no
-  protection and startup says so; a configured-but-broken file fails closed
-  (all reactions suppressed, `reactionsUnavailable: true` marks history
-  messages) until repaired; the file hot-reloads with last-known-good on bad
-  rewrites. Raw Discord state is untouched — this is projection, not
-  deletion. A production glyph set must be supplied at deploy time.
+- **Reaction suppression on the filters plane** (issue #21):
+  `suppressedReactionEmojis` in `DISCORD_FILTERS_FILE` names reaction
+  markers that are filtered out of every model-visible surface — live
+  reaction events (including their event ids), `fetch_history` /
+  `fetch_around` results, and channel-open backscroll metadata — before any
+  text or token is produced. Raw Discord state is untouched: projection, not
+  deletion. The key is **operator-maintained**: `filters_update` has no
+  parameter that can carry it (in either direction — configured markers
+  never transit an agent turn), and resident guild/DM updates round-trip it
+  unchanged. `filters_get` reports redacted state only: status
+  (`not-configured` / `configured-empty` / `active` / `stale` /
+  `unavailable`), entry count, full `sha256:` digest of the normalized set,
+  source, and load time — never the entries. Matching is the emergency
+  filter's semantics (VS-16/colon differences ignored; numeric snowflake
+  entries also match custom emojis by id). Failure posture: a bad rewrite
+  after a good load keeps enforcing the last-known-good set
+  (process-lifetime only, reported `stale` with `desiredState: "invalid"`);
+  a filters file that is configured but was never readable withholds ALL
+  reactions (`unavailable`, history messages marked
+  `reactionsUnavailable: true`) until repaired. A malformed filters file is
+  never overwritten by the env seed.
   The `DISCORD_SUPPRESS_REACTION_EMOJIS` emergency containment (2026-08-03)
-  is now a **deprecated compatibility source** feeding this same policy:
-  with the file unset it keeps working exactly as shipped (same matching,
-  custom emoji by name, numeric snowflakes also matched as ids); with the
-  file set it is ignored outright — never merged — with a glyph-free
-  warning, so the reviewed file stays the sole authority. Status reports
-  `source` (`file` / `legacy-env` / `unset`), `protectionActive`, and the
-  deprecation state. Migration: provision the file, unset the env, verify
-  `source=file`; the alias is removed in the next config-cleanup release.
+  is now a **deprecated compatibility source**: on first materialization of
+  the filters file it seeds the key (its one-time migration into the
+  plane); an existing filters file without the key keeps using the env
+  exactly as shipped — no surprise rewrite; once a file carries the key the
+  env is ignored outright — never merged — with a glyph-free warning.
+  Migration: write the key (or let first materialization seed it), unset
+  the env, verify `source: "file"`; the alias retires per issue #16 once
+  fleet inventory shows migrated files.
 
 ### Changed
 

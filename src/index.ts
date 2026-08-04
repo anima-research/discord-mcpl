@@ -16,24 +16,25 @@
  *   DISCORD_ADMIN_USERS - Optional: Comma-separated user IDs allowed to use
  *                       admin slash commands (/undo). Unset = nobody.
  *   DISCORD_FILTERS_FILE - Optional: path to a JSON file holding the guild/
- *                       channel + DM whitelists (see filters.ts for schema).
- *                       When set, the file wins over DISCORD_GUILD_ID /
- *                       DISCORD_DM_USERS (and is seeded from them if absent),
- *                       and edits to it are HOT-RELOADED within ~3s — no
- *                       restart. Also enables the filters_get/filters_update
- *                       agent tools.
+ *                       channel + DM whitelists and the operator-maintained
+ *                       suppressedReactionEmojis list (see filters.ts for
+ *                       schema). When set, the file wins over
+ *                       DISCORD_GUILD_ID / DISCORD_DM_USERS (and is seeded
+ *                       from them if absent), and edits to it are
+ *                       HOT-RELOADED within ~3s — no restart. Also enables
+ *                       the filters_get/filters_update agent tools.
+ *   DISCORD_SUPPRESS_REACTION_EMOJIS - Deprecated compat source for
+ *                       reaction suppression (comma-separated). Seeds the
+ *                       filters file's suppressedReactionEmojis key on
+ *                       first materialization; ignored once a filters file
+ *                       carries the key. Retires per issue #16.
  */
 
 import * as net from 'node:net';
 import { McplConnection } from '@animalabs/mcpl-core';
 import { DiscordAdapter } from './discord-adapter.js';
 import { DiscordMcplServer } from './server.js';
-import {
-  parseFiltersFromEnv,
-  loadFiltersFile,
-  saveFiltersFile,
-  filtersFileMtime,
-} from './filters.js';
+import { resolveStartupFilters, loadFiltersFile, filtersFileMtime } from './filters.js';
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -53,26 +54,11 @@ async function main(): Promise<void> {
   }
 
   // Event filters: env vars are the seed; DISCORD_FILTERS_FILE (when set)
-  // becomes the live source of truth and is hot-reloaded below.
+  // becomes the live source of truth and is hot-reloaded below. Seeding
+  // happens only when the file is genuinely absent — an existing file that
+  // fails to parse is left untouched (see resolveStartupFilters).
   const filtersFile = process.env.DISCORD_FILTERS_FILE;
-  let filters = parseFiltersFromEnv();
-  if (filtersFile) {
-    const fromFile = loadFiltersFile(filtersFile);
-    if (fromFile) {
-      filters = fromFile;
-      console.error(`[discord-mcpl] filters loaded from ${filtersFile}`);
-    } else {
-      try {
-        saveFiltersFile(filtersFile, filters);
-        console.error(`[discord-mcpl] filters file seeded from env -> ${filtersFile}`);
-      } catch (err) {
-        console.error(
-          `[discord-mcpl] could not seed filters file ${filtersFile}:`,
-          (err as Error).message,
-        );
-      }
-    }
-  }
+  const { filters, fileBroken: filtersFileBroken } = resolveStartupFilters(filtersFile);
 
   // Connect Discord first
   const discord = new DiscordAdapter({
@@ -94,10 +80,21 @@ async function main(): Promise<void> {
 
   const server = new DiscordMcplServer(discord);
 
+  // Reaction suppression rides the same plane: hand the startup filters to
+  // the server's projection state, or the failure if the file was broken
+  // before anything good was ever loaded (which fails closed — see
+  // ReactionSuppression).
+  if (filtersFileBroken) {
+    server.reactionSuppression.markUnavailable(`unparseable at startup: ${filtersFile}`);
+  } else {
+    server.reactionSuppression.applyFilters(filters);
+  }
+
   // Hot-reload: poll the filters file mtime and apply changes live. Covers
   // edits from any source (human, ops tooling, the filters_update tool —
   // which also applies its change directly; the poller is then an idempotent
-  // no-op re-apply). Parse failures keep the previous filters (fail-safe).
+  // no-op re-apply). Parse failures keep the previous whitelists (fail-safe)
+  // and put suppression into its documented failure posture.
   if (filtersFile) {
     let lastMtime = filtersFileMtime(filtersFile);
     const poll = setInterval(() => {
@@ -109,9 +106,11 @@ async function main(): Promise<void> {
         console.error(
           `[discord-mcpl] filters file changed but is unparseable — keeping previous filters (${filtersFile})`,
         );
+        server.reactionSuppression.markUnavailable('unparseable on reload');
         return;
       }
       const diff = discord.updateFilters(next);
+      server.reactionSuppression.applyFilters(next);
       console.error(
         `[discord-mcpl] filters hot-reloaded from ${filtersFile} ` +
           `(guilds +${diff.addedGuilds.length}/-${diff.removedGuilds.length})`,
