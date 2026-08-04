@@ -27,14 +27,21 @@
  *                       reaction suppression (comma-separated). Seeds the
  *                       filters file's suppressedReactionEmojis key on
  *                       first materialization; ignored once a filters file
- *                       carries the key. Retires per issue #16.
+ *                       carries the key. Process-static: read once at
+ *                       startup, changes require a restart (hot reload
+ *                       belongs to the file plane). Retires per issue #16.
  */
 
 import * as net from 'node:net';
 import { McplConnection } from '@animalabs/mcpl-core';
 import { DiscordAdapter } from './discord-adapter.js';
 import { DiscordMcplServer } from './server.js';
-import { resolveStartupFilters, loadFiltersFile, filtersFileMtime } from './filters.js';
+import {
+  resolveStartupFilters,
+  loadFiltersFile,
+  filtersFileMtime,
+  FiltersFilePollTracker,
+} from './filters.js';
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -80,37 +87,51 @@ async function main(): Promise<void> {
 
   const server = new DiscordMcplServer(discord);
 
-  // Reaction suppression rides the same plane: hand the startup filters to
-  // the server's projection state, or the failure if the file was broken
-  // before anything good was ever loaded (which fails closed — see
-  // ReactionSuppression).
+  // The filters plane state (whitelists + reaction suppression share one
+  // desired/effective/status lifecycle): hand it the startup filters, or
+  // the failure if the file was broken before anything good was ever
+  // loaded — which fails closed for reactions; see DiscordFiltersState.
   if (filtersFileBroken) {
-    server.reactionSuppression.markUnavailable(`unparseable at startup: ${filtersFile}`);
+    server.filtersState.markBroken('invalid');
   } else {
-    server.reactionSuppression.applyFilters(filters);
+    server.filtersState.applyParsed(filters);
   }
 
-  // Hot-reload: poll the filters file mtime and apply changes live. Covers
-  // edits from any source (human, ops tooling, the filters_update tool —
-  // which also applies its change directly; the poller is then an idempotent
-  // no-op re-apply). Parse failures keep the previous whitelists (fail-safe)
-  // and put suppression into its documented failure posture.
+  // Hot-reload: poll the filters file and apply changes live. Covers edits
+  // from any source (human, ops tooling, the filters_update tool — which
+  // also applies its change directly; the poller is then an idempotent
+  // no-op re-apply). Parse failures keep the previous filters (fail-safe)
+  // and mark the whole plane's desired state invalid. A file missing for
+  // two consecutive polls (one poll of grace for non-atomic editors) marks
+  // the plane 'missing' — a deleted desired config must never keep
+  // reporting as healthy — and a reappearing file force-reloads even with
+  // a preserved mtime (restored backups can carry different bytes under
+  // identical timestamps).
   if (filtersFile) {
-    let lastMtime = filtersFileMtime(filtersFile);
+    const tracker = new FiltersFilePollTracker(filtersFileMtime(filtersFile));
     const poll = setInterval(() => {
-      const m = filtersFileMtime(filtersFile);
-      if (m === null || m === lastMtime) return; // missing (mid-rename) or unchanged
-      lastMtime = m;
+      const action = tracker.observe(filtersFileMtime(filtersFile));
+      if (action === 'none') return;
+      if (action === 'missing') {
+        if (server.filtersState.markBroken('missing')) {
+          console.error(
+            `[discord-mcpl] filters file ${filtersFile} is MISSING — plane is stale; ` +
+              'last-known-good filters stay in force until the file reappears',
+          );
+        }
+        return;
+      }
       const next = loadFiltersFile(filtersFile);
       if (!next) {
-        console.error(
-          `[discord-mcpl] filters file changed but is unparseable — keeping previous filters (${filtersFile})`,
-        );
-        server.reactionSuppression.markUnavailable('unparseable on reload');
+        if (server.filtersState.markBroken('invalid')) {
+          console.error(
+            `[discord-mcpl] filters file changed but is unparseable — keeping previous filters (${filtersFile})`,
+          );
+        }
         return;
       }
       const diff = discord.updateFilters(next);
-      server.reactionSuppression.applyFilters(next);
+      server.filtersState.applyParsed(next);
       console.error(
         `[discord-mcpl] filters hot-reloaded from ${filtersFile} ` +
           `(guilds +${diff.addedGuilds.length}/-${diff.removedGuilds.length})`,

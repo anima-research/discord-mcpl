@@ -1,6 +1,7 @@
 /**
- * Discord event filters (guild/channel whitelist + DM user whitelist) with
- * optional hot-reload from a JSON file.
+ * Discord event filters (guild/channel whitelist + DM user whitelist +
+ * operator-maintained reaction suppression) with optional hot-reload from a
+ * JSON file.
  *
  * Precedence: when DISCORD_FILTERS_FILE is set and the file exists, the file
  * wins over the DISCORD_GUILD_ID / DISCORD_DM_USERS env vars. When
@@ -18,8 +19,15 @@
  *   {
  *     "guildIds": ["111", "222"],
  *     "guildChannels": { "222": ["333", "444"] },
- *     "dmUsers": ["555"]
+ *     "dmUsers": ["555"],
+ *     "suppressedReactionEmojis": ["<emoji>", "<custom emoji snowflake>"]
  *   }
+ *
+ * The plane has ONE desired/effective/status lifecycle (DiscordFiltersState
+ * below), shared by the whitelists and the suppression key alike: guild/DM
+ * state goes stale under exactly the same failures (unparseable rewrite,
+ * deleted file) as suppression does, so staleness is a property of the
+ * plane, not of any one key.
  */
 import { readFileSync, writeFileSync, renameSync, statSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -39,7 +47,7 @@ export interface DiscordFilters {
    *
    *  Operator-write only: filters_update cannot carry this field, so the
    *  configured glyphs never transit an agent turn in either direction —
-   *  they live in this file, below the model line. See ReactionSuppression
+   *  they live in this file, below the model line. See DiscordFiltersState
    *  for status/failure semantics. */
   suppressedReactionEmojis?: string[];
 }
@@ -98,8 +106,16 @@ export function parseFiltersFromEnv(env: NodeJS.ProcessEnv = process.env): Disco
   return normalizeFilters(filters);
 }
 
-/** Load + validate the filters file. Returns null when the file is missing or
- *  unparseable — callers keep the previous filters (fail-safe, never fail-open). */
+/** Load + validate the filters file. Returns null when the file is missing,
+ *  unparseable, or carries a wrong-typed safety field — callers keep the
+ *  previous filters (fail-safe, never fail-open).
+ *
+ *  The whitelist keys tolerate loose shapes (a wrong-typed whitelist fails
+ *  toward "unrestricted", which is the env-unset default and visible in
+ *  filters_get). suppressedReactionEmojis does NOT: it is safety-bearing,
+ *  and a wrong-typed value degrading to "key absent" would silently drop
+ *  active protection (or silently re-enable the deprecated env source). A
+ *  present-but-not-string[] key therefore invalidates the whole load. */
 export function loadFiltersFile(path: string): DiscordFilters | null {
   try {
     const raw: unknown = JSON.parse(readFileSync(path, 'utf-8'));
@@ -114,8 +130,10 @@ export function loadFiltersFile(path: string): DiscordFilters | null {
       }
     }
     if (Array.isArray(r.dmUsers)) out.dmUsers = r.dmUsers.map(String).filter(Boolean);
-    if (Array.isArray(r.suppressedReactionEmojis)) {
-      out.suppressedReactionEmojis = r.suppressedReactionEmojis.map(String);
+    if ('suppressedReactionEmojis' in r) {
+      const v = r.suppressedReactionEmojis;
+      if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) return null;
+      out.suppressedReactionEmojis = v as string[];
     }
     return normalizeFilters(out);
   } catch {
@@ -151,7 +169,7 @@ export function filtersFileMtime(path: string): number | null {
  *   plus DISCORD_SUPPRESS_REACTION_EMOJIS as the suppression key (that
  *   env's one-time migration into the plane). Only a durably-written seed
  *   claims file authority: if the write fails, the returned filters omit
- *   the key so the env stays the live (legacy) source. */
+ *   the key so the env stays the (legacy) source. */
 export function resolveStartupFilters(
   filtersFile: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
@@ -193,21 +211,53 @@ export function resolveStartupFilters(
   return { filters, fileBroken };
 }
 
+/** Poll-cycle interpreter for the filters file's presence/mtime, so the
+ *  poller can tell an atomic-rename blink from a real deletion and can
+ *  force a reload when a vanished file reappears with a preserved mtime
+ *  (restored-from-backup files can carry different bytes under identical
+ *  timestamps).
+ *
+ *  One missing observation is grace (a non-atomic editor mid-replace);
+ *  persistent absence is a real state the plane must witness — a deleted
+ *  desired config reporting as healthy is exactly disk≠process with no
+ *  witness. */
+export class FiltersFilePollTracker {
+  private lastMtime: number | null;
+  private missedPolls = 0;
+
+  constructor(initialMtime: number | null) {
+    this.lastMtime = initialMtime;
+  }
+
+  observe(mtime: number | null): 'none' | 'missing' | 'reload' {
+    if (mtime === null) {
+      this.missedPolls++;
+      return this.missedPolls >= 2 ? 'missing' : 'none';
+    }
+    const reappeared = this.missedPolls > 0;
+    this.missedPolls = 0;
+    if (!reappeared && mtime === this.lastMtime) return 'none';
+    this.lastMtime = mtime;
+    return 'reload';
+  }
+}
+
 /* ------------------------------------------------------------------------- *
- * Reaction suppression (issue #21, folded into this plane per PR #13 review)
+ * Plane state + reaction suppression (issue #21, folded per PR #13 review)
  *
  * Hosts mark inference refusals by reacting to the triggering message with a
  * category emoji. Letting those reactions re-enter agent context feeds
  * classifier-meta back into the very windows that are refusing: a
  * self-amplifying loop, observed cross-agent (Mythos 2026-08-03).
  *
- * The suppression list lives in THIS file's plane as
- * `suppressedReactionEmojis` — one config plane, one reload lifecycle, one
- * matcher (ReactionSuppression below). The 2026-08-03 emergency env
- * (DISCORD_SUPPRESS_REACTION_EMOJIS) seeds the file on first
- * materialization and otherwise survives as a deprecated legacy source
- * with its exact original semantics until fleet inventory shows migrated
- * files (issue #16).
+ * The suppression list lives in this plane as `suppressedReactionEmojis`.
+ * The 2026-08-03 emergency env (DISCORD_SUPPRESS_REACTION_EMOJIS) seeds the
+ * file on first materialization and otherwise survives as a deprecated
+ * PROCESS-STATIC source: it is read once at startup, and changing it
+ * requires a restart — a running process's environment cannot be edited
+ * from outside, so no hot-apply is claimed for it. Hot reload belongs to
+ * the file plane alone. The alias retires once fleet inventory shows
+ * migrated files (issue #16).
  * ------------------------------------------------------------------------- */
 
 /** Normalize a reaction emoji for suppression matching: strip VS-16
@@ -226,45 +276,72 @@ const SNOWFLAKE = /^\d{17,20}$/;
 /** Comma-separated env value → raw suppression tokens. Unset, empty, and
  *  all-separators all mean "no tokens" — the emergency filter's
  *  backward-compatible OFF. Used both to seed the filters file on first
- *  materialization and by the deprecated live legacy-env source. */
+ *  materialization and by the deprecated process-static legacy source. */
 export function parseSuppressionEnvTokens(raw: string | undefined): string[] {
   if (!raw) return [];
   return raw.split(',').map((s) => s.trim()).filter((s) => normalizeReactionEmoji(s));
 }
 
+/** JSON.stringify with recursively sorted object keys, so the plane digest
+ *  is stable across key ordering. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256(s: string): string {
+  return 'sha256:' + createHash('sha256').update(s).digest('hex');
+}
+
+export interface FiltersPlaneStatus {
+  /** live: file configured, last parse applied, desired state readable.
+   *  stale: desired state is unreadable/missing; the last-known-good
+   *  filters (whitelists AND suppression alike) are still enforced —
+   *  process-lifetime only, they do not survive a restart. unavailable:
+   *  desired state is unreadable/missing and no good parse ever happened
+   *  this process (whitelists run on the env fallback; reactions are
+   *  withheld). env-static: no DISCORD_FILTERS_FILE — filters came from
+   *  env at startup and cannot change without a restart. */
+  status: 'live' | 'stale' | 'unavailable' | 'env-static';
+  /** What the on-disk desired state looks like right now. Only present
+   *  when a filters file is configured. */
+  desiredState?: 'ok' | 'invalid' | 'missing';
+  /** Full machine digest (`sha256:<hex>`) of the normalized effective
+   *  filters — the whole plane, not any one key. Null before the first
+   *  good parse. Deliberately no revision counter: the plane is an
+   *  mtime-polled file with no durable monotonic source. */
+  effectiveDigest: string | null;
+  /** When the current effective filters were applied, in this process. */
+  loadedAt?: string;
+  /** When the desired state became unreadable/missing (stale/unavailable). */
+  staleSince?: string;
+}
+
 export interface ReactionSuppressionStatus {
   /** not-configured: no suppression anywhere — reported plainly, never
    *  implying protection. configured-empty: the file key exists with zero
-   *  entries (deliberate operator clear; mechanism present, protection
-   *  not). active: entries are being enforced. stale: the file broke after
-   *  a good load and the last-known-good entries are STILL ENFORCED —
-   *  process-lifetime only, they do not survive a restart. unavailable:
-   *  the file is unreadable with no usable previous set, so every reaction
-   *  is being withheld. */
+   *  entries (deliberate operator clear). active: entries are being
+   *  enforced. stale: the plane broke after a good load and the
+   *  last-known-good entries are still enforced. unavailable: the
+   *  withhold-everything posture (see suppressingAllReactions). Plane-level
+   *  facts (desiredState, staleSince, loadedAt) live on the plane status,
+   *  not here. */
   status: 'not-configured' | 'configured-empty' | 'active' | 'stale' | 'unavailable';
-  /** True whenever reactions are actually being withheld from the model
-   *  (enforced entries, a stale LKG set, or the withhold-everything
-   *  failure posture); false when nothing is suppressed. */
+  /** True whenever reactions are actually being withheld from the model. */
   protectionActive: boolean;
   /** Distinct entries currently enforced (post-normalization). */
   effectiveCount: number;
-  /** Full machine digest (`sha256:<hex>`) of the normalized enforced set;
-   *  null when nothing is enforced. Lets an operator correlate the running
-   *  state against the file without any glyph leaving the file plane.
-   *  Deliberately no revision counter: the plane is an mtime-polled file
-   *  with no durable monotonic source, and inventing one here would imply
-   *  more than the poller provides. */
+  /** Full `sha256:` digest of the normalized enforced set; null when
+   *  nothing is enforced. Redacted by construction — never the entries. */
   effectiveDigest: string | null;
-  /** When the current effective set was applied, in this process. */
-  loadedAt?: string;
-  /** The filters file is currently unparseable/unreadable — the DESIRED
-   *  state cannot be determined from disk. Present on every status shape
-   *  while the file is broken, whatever the enforcement posture. */
-  desiredState?: 'invalid';
-  /** status 'stale' only: when the file broke. The enforced set predates
-   *  this moment and lives only as long as the process. */
-  staleSince?: string;
-  /** status 'unavailable' only: the withhold-everything posture is on. */
+  /** status 'unavailable' only: the plane is broken with no usable prior
+   *  set, so every reaction is withheld until the file is repaired. */
   suppressingAllReactions?: true;
   source: 'file' | 'legacy-env' | 'none';
   /** The deprecated DISCORD_SUPPRESS_REACTION_EMOJIS env is set but the
@@ -275,8 +352,7 @@ export interface ReactionSuppressionStatus {
 }
 
 interface CompiledSet {
-  /** Raw tokens exactly as configured — carried through filters_update
-   *  rewrites, never surfaced in status/diagnostics. */
+  /** Raw tokens exactly as configured — never surfaced in status. */
   tokens: string[];
   matchSet: Set<string>;
   idSet: Set<string>;
@@ -289,138 +365,153 @@ function compileTokens(tokens: string[]): CompiledSet {
     tokens,
     matchSet: new Set(normalized),
     idSet: new Set(normalized.filter((t) => SNOWFLAKE.test(t))),
-    digest: 'sha256:' + createHash('sha256').update(JSON.stringify([...normalized].sort())).digest('hex'),
+    digest: sha256(JSON.stringify([...normalized].sort())),
   };
 }
 
 /**
- * Reaction-suppression state, fed by the DiscordFilters plane.
+ * One desired/effective/status state for the whole Discord filters plane,
+ * plus the reaction-suppression projection derived from it.
  *
- * This class holds no file I/O of its own: the existing filters lifecycle
- * (env seed → DISCORD_FILTERS_FILE → 3s mtime poller → filters_update)
- * drives it through applyFilters()/markUnavailable(). One config plane, one
- * reload path, one matcher.
+ * This class holds no file I/O of its own: the filters lifecycle (env seed
+ * → DISCORD_FILTERS_FILE → 3s mtime poller → filters_update) drives it
+ * through applyParsed()/markBroken(). Guild/DM whitelists and the
+ * suppression key share one staleness model because they fail together —
+ * an unparseable rewrite or deleted file makes ALL of them stale, and
+ * reporting that per-plane (not per-key) is what keeps disk≠process from
+ * hiding.
  *
- * Sources, in precedence order:
+ * Suppression sources, in precedence order:
  * - file key present (even empty): sole authority. A concurrently-set
  *   legacy env is IGNORED — never unioned — with a glyph-free warning.
- *   Unioning would let stale hidden config silently broaden suppression
- *   and make the reviewed file non-authoritative.
- * - file key absent, DISCORD_SUPPRESS_REACTION_EMOJIS set: the deprecated
- *   compatibility source, preserving the 2026-08-03 emergency filter's
- *   exact semantics (re-read per decision so env edits apply without
- *   restart). Pre-existing filter files that lack the key stay on this
- *   source — there is no surprise rewrite of an operator's file; the alias
- *   retires only once fleet inventory shows migrated files (issue #16).
+ * - file key absent, DISCORD_SUPPRESS_REACTION_EMOJIS set at startup: the
+ *   deprecated compatibility source (process-static snapshot; changing the
+ *   env requires a restart). Pre-existing filter files that lack the key
+ *   stay on this source — no surprise rewrite of an operator's file.
  * - neither: honestly off.
  *
- * Failure posture when the filters file breaks (markUnavailable), decided
- * by what the last GOOD parse established:
- * - key present with entries → 'stale': keep enforcing the last-known-good
- *   set (stale correct suppression beats none). Process-lifetime only — a
- *   restart into a still-broken file lands in 'unavailable', not here.
- * - key present but empty → 'unavailable': withhold ALL reactions. An
- *   empty set is deliberately not a fallback: it suppresses nothing, so
- *   keeping it would fail open on the expected deployment sequence (ship
- *   the key empty, then typo the first real entries).
- * - key absent → the file never carried suppression, so its brokenness
- *   says nothing about suppression intent: the live env source (or
- *   nothing) continues, with desiredState:'invalid' reported.
- * - never parsed (broken at startup) → 'unavailable': intent is unknowable
- *   and a configured plane must not fail open. This widens a whitelist
- *   typo's blast radius to reactions — accepted: the failure is loud,
- *   message delivery is unaffected, and history surfaces carry an explicit
+ * Failure posture when the plane breaks (markBroken), decided by what the
+ * last GOOD parse established:
+ * - good parse exists, key had entries → suppression 'stale': keep
+ *   enforcing the last-known-good set. Process-lifetime only.
+ * - good parse exists, key was empty → 'unavailable': withhold ALL
+ *   reactions. An empty set is deliberately not a fallback — it suppresses
+ *   nothing, so keeping it would fail open on the expected deployment
+ *   sequence (ship the key empty, then typo the first real entries).
+ * - good parse exists, key absent → the file never carried suppression, so
+ *   its brokenness says nothing about suppression intent: the env snapshot
+ *   (or nothing) continues; the plane status carries the invalid/missing
+ *   fact.
+ * - no good parse ever (broken at startup) → 'unavailable': intent is
+ *   unknowable and a configured plane must not fail open. Whitelists run
+ *   on the env fallback meanwhile; this widens a whitelist typo's blast
+ *   radius to reactions — accepted: the failure is loud, message delivery
+ *   is unaffected, and history surfaces carry an explicit
  *   reactionsUnavailable marker instead of a false "none".
  */
-export class ReactionSuppression {
-  /** A successful parse has been applied at least once this process. */
-  private loadedOnce = false;
-  /** The last successfully-parsed filters had the suppression key. */
-  private keyPresent = false;
-  private current: CompiledSet | null = null;
+export class DiscordFiltersState {
+  private readonly fileConfigured: boolean;
+  private effectiveF: DiscordFilters | null = null;
+  private planeDigest: string | null = null;
   private loadedAt: string | null = null;
-  private broken: { since: string; reason: string } | null = null;
+  private broken: { since: string; desired: 'invalid' | 'missing' } | null = null;
+
+  /** Suppression derivation over the effective filters. */
+  private keyPresent = false;
+  private suppression: CompiledSet | null = null;
+  /** Deprecated env source, snapshotted once — process-static. */
+  private readonly legacySet: CompiledSet | null;
   private warnedLegacyIgnored = false;
 
-  /** Deprecated env source, compiled lazily and cached by raw value. */
-  private readonly legacyEnvReader: () => string | undefined;
-  private legacyRaw: string | undefined | null = null;
-  private legacyCompiled: CompiledSet | null = null;
-
-  constructor(legacyEnvReader?: () => string | undefined) {
-    this.legacyEnvReader = legacyEnvReader ?? (() => process.env.DISCORD_SUPPRESS_REACTION_EMOJIS);
+  constructor(opts?: { fileConfigured?: boolean; legacyEnv?: string }) {
+    this.fileConfigured = opts?.fileConfigured ?? !!process.env.DISCORD_FILTERS_FILE;
+    const raw =
+      opts && 'legacyEnv' in opts ? opts.legacyEnv : process.env.DISCORD_SUPPRESS_REACTION_EMOJIS;
+    const tokens = parseSuppressionEnvTokens(raw);
+    this.legacySet = tokens.length ? compileTokens(tokens) : null;
   }
 
   /** Apply a successfully-parsed DiscordFilters. Called at startup, from
    *  the poller on every good reload, and after filters_update saves. */
-  applyFilters(filters: DiscordFilters): void {
-    this.loadedOnce = true;
+  applyParsed(filters: DiscordFilters): void {
     this.broken = null;
-    const list = filters.suppressedReactionEmojis;
+    const normalized = normalizeFilters(filters);
+    const digest = sha256(stableStringify(normalized));
+    if (digest !== this.planeDigest) this.loadedAt = new Date().toISOString();
+    this.planeDigest = digest;
+    this.effectiveF = normalized;
+    const list = normalized.suppressedReactionEmojis;
     this.keyPresent = list !== undefined;
-    const compiled = list !== undefined ? compileTokens(list) : null;
-    if (compiled?.digest !== this.current?.digest) this.loadedAt = new Date().toISOString();
-    this.current = compiled;
+    this.suppression = list !== undefined ? compileTokens(list) : null;
     this.warnLegacyIgnoredOnce();
   }
 
-  /** The filters file changed but could not be parsed (or was unreadable at
-   *  startup while configured). Enforcement posture per the class doc. */
-  markUnavailable(reason: string): void {
-    if (!this.broken) this.broken = { since: new Date().toISOString(), reason };
-  }
-
-  /** Raw tokens for carrying the key through a filters-file rewrite —
-   *  filters_update must not drop an operator's suppression entries when it
-   *  saves whitelist changes. undefined = key not present in the last good
-   *  parse. */
-  fileTokens(): string[] | undefined {
-    return this.keyPresent ? this.current?.tokens ?? [] : undefined;
-  }
-
-  private legacyEnv(): CompiledSet | null {
-    const raw = this.legacyEnvReader();
-    if (raw !== this.legacyRaw) {
-      this.legacyRaw = raw;
-      const tokens = parseSuppressionEnvTokens(raw);
-      this.legacyCompiled = tokens.length ? compileTokens(tokens) : null;
+  /** The desired state on disk is unreadable ('invalid') or the file is
+   *  gone ('missing'). Effective state is retained as last-known-good.
+   *  Returns true on the transition (callers log once, not per poll). */
+  markBroken(desired: 'invalid' | 'missing'): boolean {
+    if (this.broken) {
+      this.broken.desired = desired;
+      return false;
     }
-    return this.legacyCompiled;
+    this.broken = { since: new Date().toISOString(), desired };
+    return true;
   }
 
-  /** The set currently being matched against, if any: the file key when
-   *  present (including a stale LKG), else the live legacy env. */
-  private effective(): CompiledSet | null {
-    if (this.keyPresent) return this.current;
-    return this.legacyEnv();
+  /** The effective filters (normalized), or null before any good parse. */
+  effectiveFilters(): DiscordFilters | null {
+    return this.effectiveF;
+  }
+
+  planeStatus(): FiltersPlaneStatus {
+    if (!this.fileConfigured) {
+      return { status: 'env-static', effectiveDigest: this.planeDigest, ...(this.loadedAt ? { loadedAt: this.loadedAt } : {}) };
+    }
+    const loaded = this.loadedAt ? { loadedAt: this.loadedAt } : {};
+    if (this.broken) {
+      return {
+        status: this.effectiveF ? 'stale' : 'unavailable',
+        desiredState: this.broken.desired,
+        effectiveDigest: this.planeDigest,
+        staleSince: this.broken.since,
+        ...loaded,
+      };
+    }
+    return { status: 'live', desiredState: 'ok', effectiveDigest: this.planeDigest, ...loaded };
   }
 
   /** Glyph-free once-per-process warning that the env alias is being
    *  ignored because the file key is authoritative. */
   private warnLegacyIgnoredOnce(): void {
-    if (this.warnedLegacyIgnored || !this.keyPresent) return;
-    const legacy = this.legacyEnv();
-    if (!legacy) return;
+    if (this.warnedLegacyIgnored || !this.keyPresent || !this.legacySet) return;
     this.warnedLegacyIgnored = true;
     console.error(
-      `[discord-mcpl] reaction-suppression: DISCORD_SUPPRESS_REACTION_EMOJIS is set (${legacy.matchSet.size} tokens) ` +
+      `[discord-mcpl] reaction-suppression: DISCORD_SUPPRESS_REACTION_EMOJIS is set (${this.legacySet.matchSet.size} tokens) ` +
         'but the filters file suppressedReactionEmojis key is authoritative — the env is IGNORED, not merged. ' +
         'Fold its entries into the filters file and unset the env (alias retires per issue #16).',
     );
   }
 
-  /** True when the withhold-everything failure posture is on: the filters
-   *  file is broken and the last good parse left no usable set to enforce
-   *  (or never happened). */
+  /** The set currently matched against, if any: the file key when present
+   *  (including a stale LKG), else the startup env snapshot. */
+  private effectiveSet(): CompiledSet | null {
+    if (this.keyPresent) return this.suppression;
+    return this.legacySet;
+  }
+
+  /** True when the withhold-everything failure posture is on: the plane is
+   *  broken and the last good parse left no usable set (or never
+   *  happened). Known key-absence does NOT withhold — the env snapshot (or
+   *  nothing) continues, and the plane status carries the broken fact. */
   suppressAll(): boolean {
     if (!this.broken) return false;
-    if (!this.loadedOnce) return true;
-    if (!this.keyPresent) return false; // known absence: env (or nothing) continues
-    return !(this.current && this.current.matchSet.size > 0);
+    if (!this.effectiveF) return true;
+    if (!this.keyPresent) return false;
+    return !(this.suppression && this.suppression.matchSet.size > 0);
   }
 
   isSuppressed(reaction: { emojiId?: string | null; emoji: string }): boolean {
-    const set = this.effective();
+    const set = this.effectiveSet();
     if (!set) return false;
     if (reaction.emojiId && set.idSet.has(reaction.emojiId)) return true;
     return set.matchSet.has(normalizeReactionEmoji(reaction.emoji));
@@ -438,11 +529,8 @@ export class ReactionSuppression {
     return { reactions: reactions.filter((r) => !this.isSuppressed(r)), unavailable: false };
   }
 
-  status(): ReactionSuppressionStatus {
+  suppressionStatus(): ReactionSuppressionStatus {
     this.warnLegacyIgnoredOnce();
-    const invalid = this.broken ? { desiredState: 'invalid' as const } : {};
-    const loaded = this.loadedAt ? { loadedAt: this.loadedAt } : {};
-
     if (this.suppressAll()) {
       return {
         status: 'unavailable',
@@ -451,27 +539,20 @@ export class ReactionSuppression {
         effectiveDigest: null,
         suppressingAllReactions: true,
         source: this.keyPresent ? 'file' : 'none',
-        ...invalid,
-        ...loaded,
       };
     }
-
     if (this.keyPresent) {
-      const n = this.current?.matchSet.size ?? 0;
-      const legacyIgnored = this.legacyEnv() ? { legacyEnvIgnored: true as const } : {};
+      const n = this.suppression?.matchSet.size ?? 0;
+      const legacyIgnored = this.legacySet ? { legacyEnvIgnored: true as const } : {};
       if (this.broken) {
-        // Stale: the file broke after a good load; the LKG set is still
-        // enforced. suppressAll() already routed the unusable-LKG cases
-        // away, so n > 0 here.
+        // suppressAll() already routed the unusable-LKG cases away, so the
+        // stale set has entries and stays enforced.
         return {
           status: 'stale',
           protectionActive: true,
           effectiveCount: n,
-          effectiveDigest: this.current!.digest,
-          staleSince: this.broken.since,
+          effectiveDigest: this.suppression!.digest,
           source: 'file',
-          ...invalid,
-          ...loaded,
           ...legacyIgnored,
         };
       }
@@ -479,23 +560,19 @@ export class ReactionSuppression {
         status: n > 0 ? 'active' : 'configured-empty',
         protectionActive: n > 0,
         effectiveCount: n,
-        effectiveDigest: n > 0 ? this.current!.digest : null,
+        effectiveDigest: n > 0 ? this.suppression!.digest : null,
         source: 'file',
-        ...loaded,
         ...legacyIgnored,
       };
     }
-
-    const legacy = this.legacyEnv();
-    if (legacy) {
+    if (this.legacySet) {
       return {
         status: 'active',
         protectionActive: true,
-        effectiveCount: legacy.matchSet.size,
-        effectiveDigest: legacy.digest,
+        effectiveCount: this.legacySet.matchSet.size,
+        effectiveDigest: this.legacySet.digest,
         source: 'legacy-env',
         deprecated: true,
-        ...invalid,
       };
     }
     return {
@@ -504,7 +581,6 @@ export class ReactionSuppression {
       effectiveCount: 0,
       effectiveDigest: null,
       source: 'none',
-      ...invalid,
     };
   }
 }
