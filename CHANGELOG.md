@@ -13,9 +13,17 @@ in the git log and PR descriptions.
   when host composition injects them. Precedence is strict and never
   unioned: a filters-file key (including an explicit `[]` = operator chose
   none) beats everything; the deprecated operator env beats the baseline;
-  the baseline applies only when no operator configuration exists.
+  the baseline applies only when no operator configuration exists. The
+  legacy env's PRESENCE wins even when its parsed list is empty or
+  separator-only — the emergency filter treated an explicitly-empty env as
+  OFF, and the baseline never reappears underneath an operator's off
+  switch. This is a stated choice: the alternative (only a file `[]` can
+  express none) would have changed existing emergency deployments'
+  semantics.
   First materialization of the filters file writes the winning seed
-  durably. Lost configuration keeps the reviewed stale-LKG / fail-closed
+  durably — including a present-but-empty legacy env, which is written as
+  an explicit `[]` key so the operator's off survives env cleanup and
+  future baseline injection. Lost configuration keeps the reviewed stale-LKG / fail-closed
   postures and never silently degrades back to the baseline — it is for
   never-configured, not for lost configuration. `filters_get` reports
   `source: "baseline-default"` (count/digest only, not deprecated). The

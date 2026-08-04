@@ -193,23 +193,30 @@ export function resolveStartupFilters(
       );
     }
   } else {
+    // Suppression seed precedence mirrors the runtime source precedence:
+    // a PRESENT legacy env wins even when its parsed list is empty — the
+    // emergency filter treated explicit empty as OFF, and the seed makes
+    // that off durable as an explicit [] key rather than letting the
+    // baseline claim a slot the operator had switched off. No legacy env
+    // at all → the host-injected baseline seeds (when set).
+    const legacyPresent = env.DISCORD_SUPPRESS_REACTION_EMOJIS !== undefined;
     const legacySeed = parseSuppressionEnvTokens(env.DISCORD_SUPPRESS_REACTION_EMOJIS);
     const baselineSeed = parseSuppressionEnvTokens(env.DISCORD_SUPPRESSED_REACTIONS_BASELINE);
-    const suppressSeed = legacySeed.length ? legacySeed : baselineSeed;
-    const seedSource = legacySeed.length ? 'DISCORD_SUPPRESS_REACTION_EMOJIS' : 'DISCORD_SUPPRESSED_REACTIONS_BASELINE';
-    const seeded = suppressSeed.length
-      ? { ...filters, suppressedReactionEmojis: suppressSeed }
-      : filters;
+    let seeded = filters;
+    let seedNote = '';
+    if (legacyPresent) {
+      seeded = { ...filters, suppressedReactionEmojis: legacySeed };
+      seedNote = legacySeed.length
+        ? ` (incl. ${legacySeed.length} suppressed-reaction entries from DISCORD_SUPPRESS_REACTION_EMOJIS — the file key is now authoritative)`
+        : ' (DISCORD_SUPPRESS_REACTION_EMOJIS is present but empty — written as an explicit empty suppression key: operator chose none)';
+    } else if (baselineSeed.length) {
+      seeded = { ...filters, suppressedReactionEmojis: baselineSeed };
+      seedNote = ` (incl. ${baselineSeed.length} suppressed-reaction entries from DISCORD_SUPPRESSED_REACTIONS_BASELINE — the file key is now authoritative)`;
+    }
     try {
       saveFiltersFile(filtersFile, seeded);
       filters = seeded;
-      console.error(
-        `[discord-mcpl] filters file seeded from env -> ${filtersFile}` +
-          (suppressSeed.length
-            ? ` (incl. ${suppressSeed.length} suppressed-reaction entries from ${seedSource} — ` +
-              'the file key is now authoritative)'
-            : ''),
-      );
+      console.error(`[discord-mcpl] filters file seeded from env -> ${filtersFile}${seedNote}`);
     } catch (err) {
       console.error(`[discord-mcpl] could not seed filters file ${filtersFile}:`, (err as Error).message);
     }
@@ -451,6 +458,15 @@ export class DiscordFiltersState {
   private suppression: CompiledSet | null = null;
   /** Deprecated env source, snapshotted once — process-static. */
   private readonly legacySet: CompiledSet | null;
+  /** The legacy env VARIABLE is set at all — tracked separately from its
+   *  token count. Presence beats the baseline even when the parsed list is
+   *  empty/separator-only: the emergency filter treated an explicitly
+   *  empty env as OFF, and letting the baseline reappear underneath an
+   *  operator's explicit off would silently change that behavior. (The
+   *  deliberate alternative — only a file `[]` can express none — was
+   *  considered and not taken, precisely to leave existing emergency
+   *  deployments' semantics untouched.) */
+  private readonly legacyPresent: boolean;
   /** Host-injected protective baseline, snapshotted once — process-static. */
   private readonly baselineSet: CompiledSet | null;
   private warnedLegacyIgnored = false;
@@ -459,6 +475,7 @@ export class DiscordFiltersState {
     this.fileConfigured = opts?.fileConfigured ?? !!process.env.DISCORD_FILTERS_FILE;
     const legacyRaw =
       opts && 'legacyEnv' in opts ? opts.legacyEnv : process.env.DISCORD_SUPPRESS_REACTION_EMOJIS;
+    this.legacyPresent = legacyRaw !== undefined;
     const legacyTokens = parseSuppressionEnvTokens(legacyRaw);
     this.legacySet = legacyTokens.length ? compileTokens(legacyTokens) : null;
     const baselineRaw =
@@ -530,10 +547,13 @@ export class DiscordFiltersState {
 
   /** The set currently matched against, if any: the file key when present
    *  (including a stale LKG), else the operator's legacy env snapshot,
-   *  else the host-injected baseline. */
+   *  else the host-injected baseline. A PRESENT legacy env owns the slot
+   *  even when its parsed list is empty (= explicit off) — the baseline
+   *  never reappears underneath an operator's off switch. */
   private effectiveSet(): CompiledSet | null {
     if (this.keyPresent) return this.suppression;
-    return this.legacySet ?? this.baselineSet;
+    if (this.legacyPresent) return this.legacySet;
+    return this.baselineSet;
   }
 
   /** True when the withhold-everything failure posture is on: the plane is
@@ -602,14 +622,39 @@ export class DiscordFiltersState {
         ...legacyIgnored,
       };
     }
-    if (this.legacySet) {
+    if (this.legacyPresent) {
+      if (this.legacySet) {
+        return {
+          status: 'active',
+          protectionActive: true,
+          effectiveCount: this.legacySet.matchSet.size,
+          effectiveDigest: this.legacySet.digest,
+          source: 'legacy-env',
+          deprecated: true,
+        };
+      }
+      if (this.baselineSet) {
+        // Present-but-empty legacy env holding off an injected baseline:
+        // that is an operator's explicit off actively overriding a
+        // default, so it reports as a deliberate empty configuration —
+        // not as "nothing was ever configured".
+        return {
+          status: 'configured-empty',
+          protectionActive: false,
+          effectiveCount: 0,
+          effectiveDigest: null,
+          source: 'legacy-env',
+          deprecated: true,
+        };
+      }
+      // Present-but-empty with no baseline to override: behaviorally and
+      // historically identical to unset (the emergency filter's OFF).
       return {
-        status: 'active',
-        protectionActive: true,
-        effectiveCount: this.legacySet.matchSet.size,
-        effectiveDigest: this.legacySet.digest,
-        source: 'legacy-env',
-        deprecated: true,
+        status: 'not-configured',
+        protectionActive: false,
+        effectiveCount: 0,
+        effectiveDigest: null,
+        source: 'none',
       };
     }
     if (this.baselineSet) {

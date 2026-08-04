@@ -381,6 +381,27 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
     assert.equal(st.suppressionStatus().source, 'legacy-env');
   });
 
+  it('legacy env PRESENCE beats the baseline even when its parsed list is empty', () => {
+    // The emergency filter treated an explicitly-empty env as OFF; the
+    // baseline must not reappear underneath an operator's off switch —
+    // presence is tested separately from token count (Sol's edge).
+    for (const emptyish of ['', ' , ,, ']) {
+      const st = baselineState({ legacyEnv: emptyish });
+      st.applyParsed({});
+      assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, `baseline suppressed nothing under legacyEnv=${JSON.stringify(emptyish)}`);
+      const rs = st.suppressionStatus();
+      assert.equal(rs.status, 'configured-empty', 'an explicit off overriding a default reports as deliberate');
+      assert.equal(rs.source, 'legacy-env');
+      assert.equal(rs.deprecated, true);
+      assert.equal(rs.protectionActive, false);
+    }
+    // Present-but-empty with no baseline to override: historically
+    // identical to unset, and reported that way.
+    const stNoBaseline = new DiscordFiltersState({ fileConfigured: true, legacyEnv: '', baselineEnv: undefined });
+    stNoBaseline.applyParsed({});
+    assert.equal(stNoBaseline.suppressionStatus().status, 'not-configured');
+  });
+
   it('lost configuration never silently degrades back to baseline', () => {
     // A file that HAD a key and broke: stale LKG, not baseline.
     const st = baselineState();
@@ -425,6 +446,16 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
       } as NodeJS.ProcessEnv);
       assert.deepEqual(r2.filters.suppressedReactionEmojis, [ENV_ONLY_GLYPH],
         'operator-explicit legacy env wins the seed; never unioned with the baseline');
+
+      const p3 = join(dir, 'seed-empty-legacy.json');
+      const r3 = resolveStartupFilters(p3, {
+        DISCORD_SUPPRESS_REACTION_EMOJIS: '',
+        DISCORD_SUPPRESSED_REACTIONS_BASELINE: BASELINE,
+      } as NodeJS.ProcessEnv);
+      assert.deepEqual(r3.filters.suppressedReactionEmojis, [],
+        'present-but-empty legacy env seeds an explicit [] — the off becomes durable, the baseline does not claim the slot');
+      assert.deepEqual(loadFiltersFile(p3)!.suppressedReactionEmojis, [],
+        'the explicit empty key is on disk, so the off survives env cleanup and future baseline injection');
       assert.ok(!cap.lines.join('\n').includes(SUPPRESSED_UNICODE), 'seed logs stay glyph-free');
     } finally {
       cap.restore();
