@@ -24,9 +24,10 @@
  * Guild qualification matters more than it looks. Bare `#general` collides
  * across guilds, and a bot in several servers hits that constantly rather than
  * rarely — so "hard-error on ambiguity" alone would send agents straight back to
- * snowflakes exactly as the channel count grows. The qualified form always
- * resolves, and the ambiguity error quotes qualified labels (addresses, not
- * snowflakes) so even the failure hands you something usable.
+ * snowflakes exactly as the channel count grows. The qualified form resolves
+ * NORMALLY but not always: Discord permits duplicate text-channel names within
+ * one guild, so two candidates can share a label. That case falls through to the
+ * ambiguity error, which then quotes ids because labels no longer separate them.
  *
  * NO FUZZY MATCHING. Exact name, case-insensitive, leading `#` optional. A
  * "did you mean" would reintroduce silent wrong-room delivery in friendlier
@@ -106,6 +107,27 @@ export function parseChannelRef(raw: string): ChannelRef | null {
 
   const name = stripHash(value);
   return name ? { kind: 'name', name } : null;
+}
+
+/**
+ * True when the string can ONLY have been a name attempt: `#`-prefixed, or the
+ * `name (Guild)` qualified form. Distinguishes "the caller meant a name" from
+ * "this is an opaque id from some non-Discord adapter" — a bare token like
+ * `c1` is genuinely ambiguous between the two, and adapters predating name
+ * addressing may legitimately use such ids.
+ *
+ * Used to decide how hard to fail when no resolver is available: refuse
+ * explicit name syntax (we know what was meant and cannot honour it), pass an
+ * opaque token through unchanged (exactly the pre-feature behaviour, so no
+ * regression). Strictly better information where we are sure; unchanged where
+ * we are not.
+ */
+export function looksLikeExplicitName(raw: string): boolean {
+  const value = raw.trim();
+  if (!value || isSnowflake(value)) return false;
+  const parts = value.split(':');
+  if (parts.length === 3 && parts[0] === 'discord') return false;
+  return value.startsWith('#') || /\([^()]*\)\s*$/.test(value);
 }
 
 function stripHash(value: string): string {

@@ -44,7 +44,9 @@ const CHANNEL_ID_DESC =
   'Channel to act on. Accepts EITHER a name or an id — prefer the name, it is ' +
   'far easier to get right than a 19-digit snowflake.\n' +
   '  • `#kitchen-table (Separatrix)` — the exact label shown in channel ' +
-  'listings and announcements. Always unambiguous; paste it back verbatim.\n' +
+  'listings and announcements. Normally unambiguous; paste it back verbatim. ' +
+  '(Discord permits duplicate channel names within one server, so if two ' +
+  'candidates share a label the error lists their ids instead.)\n' +
   '  • `#kitchen-table` — shorthand. Errors (listing the qualified options) if ' +
   'the name exists in more than one server, rather than guessing.\n' +
   '  • `123456789012345678` — raw Discord snowflake, still accepted.\n' +

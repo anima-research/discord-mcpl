@@ -52,7 +52,12 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
-import { channelLabel, isSnowflake, type AddressingPath } from './channel-names.js';
+import {
+  channelLabel,
+  isSnowflake,
+  looksLikeExplicitName,
+  type AddressingPath,
+} from './channel-names.js';
 import { saveFiltersFile, loadFiltersFile, DiscordFiltersState, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1176,12 +1181,25 @@ export class DiscordMcplServer {
     if (typeof args.channelId === 'string' && args.channelId.trim()) {
       const given = args.channelId;
       const path: AddressingPath = isSnowflake(given.trim()) ? 'explicit-id' : 'name-resolved';
-      // Feature-detect: adapters predating this feature (and the structural
-      // mocks in the test suite) have no resolver. Degrade to the previous
-      // behaviour -- pass the string through and let Discord reject it loudly --
-      // rather than throwing on an adapter that was valid yesterday.
-      const canResolve = typeof this.discord.resolveChannelRef === 'function';
-      if (path === 'name-resolved' && canResolve) {
+      // An adapter predating this feature has no resolver. Do NOT pass the
+      // unresolved name downstream hoping Discord rejects it: "probably bounces"
+      // is not the guarantee this feature is for. The whole point is that a send
+      // either reaches the channel the agent named or fails audibly, never
+      // anything in between -- so refuse here, explicitly, where we can still say
+      // why. (Review: Sol, 2026-08-04.)
+      const noResolver = typeof this.discord.resolveChannelRef !== 'function';
+      if (path === 'name-resolved' && noResolver && looksLikeExplicitName(given)) {
+        dbg('channel:resolver-unavailable', { tool: name, given });
+        return {
+          content: [textContent(
+            `Cannot address a channel by name here: this adapter has no channel ` +
+            `resolver, so "${given}" cannot be turned into a channel id. Pass the ` +
+            `numeric channel id instead.`,
+          )],
+          isError: true,
+        };
+      }
+      if (path === 'name-resolved' && !noResolver) {
         const resolved = this.discord.resolveChannelRef(given);
         if (!resolved.ok) {
           // Telemetry: log the failure with what was ASKED FOR, so drift is

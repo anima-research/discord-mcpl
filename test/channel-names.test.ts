@@ -289,3 +289,121 @@ describe('buildCandidates', () => {
     assert.equal(buildCandidates(gs, { mapType, allowed: allowAll }).length, 2);
   });
 });
+
+// ── Integration: the handleToolCall chokepoint ───────────────────────────────
+// Sol's review: the resolver suite is strong but proves nothing about the
+// SAFETY BOUNDARY — that resolution happens exactly once, before any side
+// effect. These exercise the real DiscordMcplServer against a structural mock,
+// asserting on what the adapter actually received.
+
+import { DiscordMcplServer } from '../src/server.js';
+import type { DiscordAdapter } from '../src/discord-adapter.js';
+import { looksLikeExplicitName } from '../src/channel-names.js';
+
+const SNOWFLAKE = '100000000000000001';
+
+/** Minimal adapter recording what it was asked to do. `withResolver: false`
+ *  models an adapter predating name addressing. */
+function mockAdapter(withResolver: boolean) {
+  const sent: Array<{ channelId: string; content: string }> = [];
+  const base = {
+    sent,
+    async sendMessage(channelId: string, content: string) {
+      sent.push({ channelId, content });
+      return { messageId: 'm1' };
+    },
+    onMessage() {}, onChannelCreate() {}, onChannelDelete() {},
+    onGuildCreate() {}, onReaction() {},
+  };
+  if (!withResolver) return base;
+  return Object.assign(base, {
+    resolveChannelRef(ref: string) {
+      // Delegate id/composite handling to the real parser, as the real adapter
+      // does — otherwise the mock quietly diverges from the thing under test.
+      const parsed = parseChannelRef(ref);
+      if (parsed?.kind === 'id') return { ok: true as const, id: parsed.id };
+      if (/^#?general \(Separatrix\)$/i.test(ref)) {
+        return { ok: true as const, id: SNOWFLAKE };
+      }
+      if (/^#?general$/i.test(ref)) {
+        return {
+          ok: false as const, reason: 'ambiguous' as const,
+          message: '#general is ambiguous — 2 channels match.',
+        };
+      }
+      return { ok: false as const, reason: 'not-found' as const, message: 'nope' };
+    },
+  });
+}
+
+const callTool = (adapter: unknown, args: Record<string, unknown>) => {
+  const server = new DiscordMcplServer(adapter as unknown as DiscordAdapter) as unknown as {
+    handleToolCall(n: string, a: Record<string, unknown>): Promise<{ isError?: boolean; content: Array<{ text?: string }> }>;
+  };
+  return server.handleToolCall('send_message', { content: 'hi', ...args });
+};
+
+describe('handleToolCall chokepoint', () => {
+  it('a qualified name reaches the adapter as a RESOLVED SNOWFLAKE', async () => {
+    const a = mockAdapter(true);
+    await callTool(a, { channelId: '#general (Separatrix)' });
+    assert.deepEqual(a.sent.map((s) => s.channelId), [SNOWFLAKE],
+      'adapter must never see the name');
+  });
+
+  it('an ambiguous name errors AND the send is never attempted', async () => {
+    // The ordering proof: resolution precedes side effects. If this ever sends,
+    // an ambiguous address has already left the building.
+    const a = mockAdapter(true);
+    const r = await callTool(a, { channelId: '#general' });
+    assert.equal(r.isError, true);
+    assert.equal(a.sent.length, 0, 'NOTHING may be sent on an ambiguous address');
+    assert.match(r.content[0].text ?? '', /ambiguous/i);
+  });
+
+  it('a raw snowflake passes through untouched', async () => {
+    const a = mockAdapter(true);
+    await callTool(a, { channelId: SNOWFLAKE });
+    assert.deepEqual(a.sent.map((s) => s.channelId), [SNOWFLAKE]);
+  });
+
+  it('the discord:<guild>:<channel> composite normalizes to the bare id', async () => {
+    // Undocumented positive change: previously this reached channels.fetch()
+    // verbatim and failed. Now it normalizes -- which also means downstream
+    // state (sticky reply, mute sets) keys on the bare id rather than being
+    // poisoned by a composite.
+    const a = mockAdapter(true);
+    await callTool(a, { channelId: `discord:200000000000000000:${SNOWFLAKE}` });
+    assert.deepEqual(a.sent.map((s) => s.channelId), [SNOWFLAKE]);
+  });
+
+  it('a legacy adapter REFUSES explicit name syntax rather than passing it on', async () => {
+    // "It probably bounces at Discord" is not the guarantee this feature is
+    // for. Where we know a name was meant, fail here, where we can say why.
+    const a = mockAdapter(false);
+    const r = await callTool(a, { channelId: '#general (Separatrix)' });
+    assert.equal(r.isError, true);
+    assert.equal(a.sent.length, 0);
+    assert.match(r.content[0].text ?? '', /no channel resolver|numeric channel id/i);
+  });
+
+  it('a legacy adapter still passes an OPAQUE id through unchanged', async () => {
+    // Bare tokens are ambiguous between "name" and "opaque id from a
+    // non-Discord adapter". Passing through is exactly the pre-feature
+    // behaviour, so adapters that were valid yesterday keep working.
+    const a = mockAdapter(false);
+    await callTool(a, { channelId: 'c1' });
+    assert.deepEqual(a.sent.map((s) => s.channelId), ['c1']);
+  });
+});
+
+describe('looksLikeExplicitName', () => {
+  it('recognises only unambiguous name syntax', () => {
+    for (const v of ['#general', '#general (Separatrix)', 'general (Separatrix)']) {
+      assert.ok(looksLikeExplicitName(v), v);
+    }
+    for (const v of ['c1', 'chan1', SNOWFLAKE, `discord:g1:${SNOWFLAKE}`, '']) {
+      assert.ok(!looksLikeExplicitName(v), v);
+    }
+  });
+});
