@@ -41,9 +41,25 @@ const FILES_PROP = {
  * to a relay and uses a different id scheme.
  */
 const CHANNEL_ID_DESC =
-  'Discord channel snowflake (the raw numeric channel id). Surface marker: ' +
-  'discord-mcpl namespaces its MCPL channels as `discord:<guildId>:<channelId>` ' +
-  '— a different id space from the portal surface (`portal:<channelId>`).';
+  'Channel to act on. Accepts EITHER a name or an id — prefer the name, it is ' +
+  'far easier to get right than a 19-digit snowflake.\n' +
+  '  • `#kitchen-table (Separatrix)` — the exact label shown in channel ' +
+  'listings and announcements. Normally unambiguous; paste it back verbatim. ' +
+  '(Discord permits duplicate channel names within one server, so if two ' +
+  'candidates share a label the error lists their ids instead.)\n' +
+  '  • `#kitchen-table` — shorthand. Errors (listing the qualified options) if ' +
+  'the name exists in more than one server, rather than guessing.\n' +
+  '  • `123456789012345678` — raw Discord snowflake, still accepted.\n' +
+  'Names are matched exactly (case-insensitive, leading # optional); there is ' +
+  'no fuzzy matching, so a near-miss fails loudly instead of delivering to the ' +
+  'wrong room. If two channels share a name the error lists them with ids, ' +
+  'which are always a valid address. Threads, categories and forum roots are ' +
+  'addressable by id only. A channel whose own name ends in parentheses ' +
+  '(e.g. `#standup (weekly)`) must use the qualified form, since bare parens ' +
+  'read as a guild. Surface ' +
+  'marker: discord-mcpl namespaces its MCPL channels as ' +
+  '`discord:<guildId>:<channelId>` — a different id space from the portal ' +
+  'surface (`portal:<channelId>`).';
 
 /** Contrasts a per-channel Discord snowflake against portal's global relay id. */
 const MESSAGE_ID_KIND =
@@ -177,7 +193,7 @@ export const toolDefinitions: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        channelId: { type: 'string', description: 'Discord channel ID' },
+        channelId: { type: 'string', description: CHANNEL_ID_DESC },
       },
       required: ['channelId'],
     },

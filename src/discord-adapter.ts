@@ -31,6 +31,13 @@ import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { dbg } from './debug-log.js';
 
+import {
+  buildCandidates,
+  parseChannelRef,
+  resolveChannelName,
+  type ResolveResult,
+} from './channel-names.js';
+
 /** Maximum attachments Discord accepts on a single message. */
 const MAX_DISCORD_ATTACHMENTS = 10;
 
@@ -160,6 +167,13 @@ export interface DiscordChannelInfo {
   name: string;
   type: 'text' | 'voice' | 'category' | 'thread' | 'forum' | 'unknown';
   parentId?: string;
+  /** Guild-qualified display label, `#name (GuildName)` — the same string
+   *  `toDescriptor` produces and the same string the channelId argument
+   *  accepts. Returned so listings hand back something PASTEABLE: the
+   *  not-found error tells agents to "use list_channels to see what is
+   *  addressable", which was only true once this field existed. Both forms are
+   *  present on purpose — label to compose a send now, id to store. */
+  label: string;
 }
 
 /** One member of a channel, as the agent should see them. */
@@ -1273,10 +1287,58 @@ export class DiscordAdapter {
           name: c.name,
           type: mapChannelType(c.type),
           parentId: c.parentId ?? undefined,
+          label: `#${c.name} (${guild.name})`,
         });
       }
     });
     return result;
+  }
+
+
+  /**
+   * Resolve a channel reference that may be a name instead of a snowflake.
+   *
+   * Accepts a raw id or the MCPL composite unchanged; otherwise resolves
+   * `#name` / `#name (GuildName)` against the channels the bot can currently
+   * see. See `channel-names.ts` for why, and for the no-fuzzy-matching rule.
+   *
+   * Inverse of `resolveChannelMeta` in server.ts (id -> label); this is
+   * label -> id. The two are siblings and should stay consistent about which
+   * channels are addressable.
+   *
+   * THREE THINGS THIS DELIBERATELY DOES:
+   *
+   * 1. Reads the LIVE cache every call, never a startup snapshot. discord.js
+   *    keeps `guild.channels.cache` current from gateway events. A cached
+   *    name->id map would go stale on rename, and if a freed name were later
+   *    reused by a different channel it would deliver silently to the wrong
+   *    room — reintroducing the exact failure this feature removes.
+   * 2. Applies `channelAllowed` BEFORE matching, so a name can never address a
+   *    channel the allowlist excludes, and an excluded `#general` cannot
+   *    manufacture a spurious collision with a permitted one.
+   * 3. Excludes categories and threads. Categories are not sendable. Thread
+   *    names are not unique — not even within one channel — so including them
+   *    would make the ambiguity error fire constantly and render the feature
+   *    unusable. Threads remain addressable by id.
+   */
+  resolveChannelRef(ref: string): ResolveResult {
+    const parsed = parseChannelRef(ref);
+    if (!parsed) {
+      return { ok: false, reason: 'not-found', message: `Unusable channel reference: "${ref}"` };
+    }
+    if (parsed.kind === 'id') return { ok: true, id: parsed.id };
+
+    const candidates = buildCandidates(
+      [...this.client.guilds.cache.values()].map((g) => ({
+        id: g.id, name: g.name, channels: g.channels.cache.values(),
+      })),
+      {
+        ...(this.guildIds?.length ? { guildIds: this.guildIds } : {}),
+        mapType: mapChannelType,
+        allowed: (gid, cid, pid) => this.channelAllowed(gid, cid, pid),
+      },
+    );
+    return resolveChannelName(parsed, candidates);
   }
 
   /** Channel membership, by scope. Guild channels resolve to everyone whose
@@ -1440,6 +1502,7 @@ export class DiscordAdapter {
       name: channel.name,
       type: 'text',
       parentId: channel.parentId ?? undefined,
+      label: `#${channel.name} (${guild.name})`,
     };
   }
 
@@ -1469,6 +1532,7 @@ export class DiscordAdapter {
               name: channel.name,
               type: 'text',
               parentId: channel.parentId ?? undefined,
+              label: `#${channel.name} (${guild.name})`,
             },
           });
         }
@@ -1490,6 +1554,7 @@ export class DiscordAdapter {
           name: channel.name,
           type: 'text',
           parentId: channel.parentId ?? undefined,
+          label: `#${channel.name} (${guild.name})`,
         });
       }
     }
@@ -1567,6 +1632,7 @@ export class DiscordAdapter {
         this.channelCreateHandler?.(channel.guildId, {
           id: channel.id,
           name: channel.name,
+          label: `#${channel.name} (${channel.guild?.name ?? channel.guildId})`,
           type: mapChannelType(channel.type),
           parentId: 'parentId' in channel ? (channel.parentId ?? undefined) : undefined,
         });
@@ -1644,6 +1710,7 @@ export class DiscordAdapter {
       this.channelAvailableHandler?.(guild.id, {
         id: newChannel.id,
         name: newChannel.name,
+        label: `#${newChannel.name} (${guild.name})`,
         type: 'text',
         parentId: newChannel.parentId ?? undefined,
       });

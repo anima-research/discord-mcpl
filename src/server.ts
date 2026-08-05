@@ -52,6 +52,12 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
+import {
+  channelLabel,
+  isSnowflake,
+  looksLikeExplicitName,
+  type AddressingPath,
+} from './channel-names.js';
 import { saveFiltersFile, loadFiltersFile, DiscordFiltersState, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1162,6 +1168,55 @@ export class DiscordMcplServer {
         content: [textContent(`Feature set '${fs}' is not enabled`)],
         isError: true,
       };
+    }
+
+    // Name-based channel addressing. Resolved HERE, once, rather than in each
+    // of the dozen-odd tools that take a channelId — one chokepoint means no
+    // tool can be added later that silently misses it.
+    //
+    // Snowflakes and the `discord:<guild>:<channel>` composite pass through
+    // untouched, so this is backwards compatible. A name resolves against the
+    // live channel cache; ambiguity is a hard error listing qualified labels
+    // rather than a silent pick. See channel-names.ts.
+    if (typeof args.channelId === 'string' && args.channelId.trim()) {
+      const given = args.channelId;
+      const path: AddressingPath = isSnowflake(given.trim()) ? 'explicit-id' : 'name-resolved';
+      // An adapter predating this feature has no resolver. Do NOT pass the
+      // unresolved name downstream hoping Discord rejects it: "probably bounces"
+      // is not the guarantee this feature is for. The whole point is that a send
+      // either reaches the channel the agent named or fails audibly, never
+      // anything in between -- so refuse here, explicitly, where we can still say
+      // why. (Review: Sol, 2026-08-04.)
+      const noResolver = typeof this.discord.resolveChannelRef !== 'function';
+      if (path === 'name-resolved' && noResolver && looksLikeExplicitName(given)) {
+        dbg('channel:resolver-unavailable', { tool: name, given });
+        return {
+          content: [textContent(
+            `Cannot address a channel by name here: this adapter has no channel ` +
+            `resolver, so "${given}" cannot be turned into a channel id. Pass the ` +
+            `numeric channel id instead.`,
+          )],
+          isError: true,
+        };
+      }
+      if (path === 'name-resolved' && !noResolver) {
+        const resolved = this.discord.resolveChannelRef(given);
+        if (!resolved.ok) {
+          // Telemetry: log the failure with what was ASKED FOR, so drift is
+          // reconstructable from receipts rather than from memory afterwards.
+          dbg('channel:resolve-failed', { tool: name, given, reason: resolved.reason });
+          return { content: [textContent(resolved.message)], isError: true };
+        }
+        dbg('channel:resolved', {
+          tool: name,
+          given,
+          channelId: resolved.id,
+          label: resolved.matched ? channelLabel(resolved.matched) : undefined,
+        });
+        args = { ...args, channelId: resolved.id };
+      } else {
+        dbg('channel:addressing', { tool: name, path, channelId: given });
+      }
     }
 
     try {
