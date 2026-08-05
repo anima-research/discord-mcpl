@@ -52,6 +52,7 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
+import { channelLabel, isSnowflake, type AddressingPath } from './channel-names.js';
 import { saveFiltersFile, loadFiltersFile, DiscordFiltersState, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1162,6 +1163,42 @@ export class DiscordMcplServer {
         content: [textContent(`Feature set '${fs}' is not enabled`)],
         isError: true,
       };
+    }
+
+    // Name-based channel addressing. Resolved HERE, once, rather than in each
+    // of the dozen-odd tools that take a channelId — one chokepoint means no
+    // tool can be added later that silently misses it.
+    //
+    // Snowflakes and the `discord:<guild>:<channel>` composite pass through
+    // untouched, so this is backwards compatible. A name resolves against the
+    // live channel cache; ambiguity is a hard error listing qualified labels
+    // rather than a silent pick. See channel-names.ts.
+    if (typeof args.channelId === 'string' && args.channelId.trim()) {
+      const given = args.channelId;
+      const path: AddressingPath = isSnowflake(given.trim()) ? 'explicit-id' : 'name-resolved';
+      // Feature-detect: adapters predating this feature (and the structural
+      // mocks in the test suite) have no resolver. Degrade to the previous
+      // behaviour -- pass the string through and let Discord reject it loudly --
+      // rather than throwing on an adapter that was valid yesterday.
+      const canResolve = typeof this.discord.resolveChannelRef === 'function';
+      if (path === 'name-resolved' && canResolve) {
+        const resolved = this.discord.resolveChannelRef(given);
+        if (!resolved.ok) {
+          // Telemetry: log the failure with what was ASKED FOR, so drift is
+          // reconstructable from receipts rather than from memory afterwards.
+          dbg('channel:resolve-failed', { tool: name, given, reason: resolved.reason });
+          return { content: [textContent(resolved.message)], isError: true };
+        }
+        dbg('channel:resolved', {
+          tool: name,
+          given,
+          channelId: resolved.id,
+          label: resolved.matched ? channelLabel(resolved.matched) : undefined,
+        });
+        args = { ...args, channelId: resolved.id };
+      } else {
+        dbg('channel:addressing', { tool: name, path, channelId: given });
+      }
     }
 
     try {

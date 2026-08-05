@@ -31,6 +31,13 @@ import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { dbg } from './debug-log.js';
 
+import {
+  parseChannelRef,
+  resolveChannelName,
+  type ChannelCandidate,
+  type ResolveResult,
+} from './channel-names.js';
+
 /** Maximum attachments Discord accepts on a single message. */
 const MAX_DISCORD_ATTACHMENTS = 10;
 
@@ -1277,6 +1284,54 @@ export class DiscordAdapter {
       }
     });
     return result;
+  }
+
+
+  /**
+   * Resolve a channel reference that may be a name instead of a snowflake.
+   *
+   * Accepts a raw id or the MCPL composite unchanged; otherwise resolves
+   * `#name` / `#name (GuildName)` against the channels the bot can currently
+   * see. See `channel-names.ts` for why, and for the no-fuzzy-matching rule.
+   *
+   * Inverse of `resolveChannelMeta` in server.ts (id -> label); this is
+   * label -> id. The two are siblings and should stay consistent about which
+   * channels are addressable.
+   *
+   * THREE THINGS THIS DELIBERATELY DOES:
+   *
+   * 1. Reads the LIVE cache every call, never a startup snapshot. discord.js
+   *    keeps `guild.channels.cache` current from gateway events. A cached
+   *    name->id map would go stale on rename, and if a freed name were later
+   *    reused by a different channel it would deliver silently to the wrong
+   *    room — reintroducing the exact failure this feature removes.
+   * 2. Applies `channelAllowed` BEFORE matching, so a name can never address a
+   *    channel the allowlist excludes, and an excluded `#general` cannot
+   *    manufacture a spurious collision with a permitted one.
+   * 3. Excludes categories and threads. Categories are not sendable. Thread
+   *    names are not unique — not even within one channel — so including them
+   *    would make the ambiguity error fire constantly and render the feature
+   *    unusable. Threads remain addressable by id.
+   */
+  resolveChannelRef(ref: string): ResolveResult | { ok: true; id: string; matched?: undefined } {
+    const parsed = parseChannelRef(ref);
+    if (!parsed) {
+      return { ok: false, reason: 'not-found', message: `Unusable channel reference: "${ref}"` };
+    }
+    if (parsed.kind === 'id') return { ok: true, id: parsed.id };
+
+    const candidates: ChannelCandidate[] = [];
+    for (const guild of this.client.guilds.cache.values()) {
+      if (this.guildIds?.length && !this.guildIds.includes(guild.id)) continue;
+      for (const c of guild.channels.cache.values()) {
+        if (!c) continue;
+        const kind = mapChannelType(c.type);
+        if (kind === 'category' || kind === 'thread') continue;
+        if (!this.channelAllowed(guild.id, c.id, c.parentId)) continue;
+        candidates.push({ id: c.id, name: c.name, guildId: guild.id, guildName: guild.name });
+      }
+    }
+    return resolveChannelName(parsed, candidates);
   }
 
   /** Channel membership, by scope. Guild channels resolve to everyone whose
