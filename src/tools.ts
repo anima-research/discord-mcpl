@@ -218,7 +218,15 @@ export const toolDefinitions: ToolDefinition[] = [
       'Show the active event filters: which guilds/channels can deliver events to you ' +
       '(guild whitelist, optional per-guild channel whitelist) and which users may DM you. ' +
       'null means unrestricted. Filters gate delivery only — the bot must also be a ' +
-      'member of a guild to see it at all.',
+      'member of a guild to see it at all. Reports the config plane\'s desired-vs-effective ' +
+      'state (live / stale / unavailable — whitelists and suppression share one lifecycle, so ' +
+      'a broken filters file makes ALL of them stale together) and reaction-suppression state ' +
+      '(status/count/digest, never the entries themselves): some reaction markers are ' +
+      'withheld from your view across every surface. Those entries are operator-maintained ' +
+      'in the filters file and not adjustable from this tool surface — that is a facility ' +
+      'not built yet (a referential suppress-by-key surface is planned host-side), not a ' +
+      'policy about you. Note: some reactions on your account are placed by the host, not ' +
+      'by you; "me": true on a reaction is not evidence you authored it.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -231,7 +239,11 @@ export const toolDefinitions: ToolDefinition[] = [
       'DISCORD_FILTERS_FILE to be configured (filters_get tells you). If the guild filter ' +
       'is currently unrestricted, the first add/remove materializes it as the list of all ' +
       'current guilds first, so nothing silently drops. Newly-allowed guilds have their ' +
-      'channels registered right away.',
+      'channels registered right away. Reaction-suppression entries are operator-owned and ' +
+      'ride through updates untouched; this tool has no parameter that can carry them. ' +
+      'If the filters file is missing or unparseable on disk, updates are refused without ' +
+      'writing anything — an operator repairs the file (hot reload applies it within seconds) ' +
+      'and the update can then be retried.',
     inputSchema: {
       type: 'object',
       properties: {

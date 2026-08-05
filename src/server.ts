@@ -46,19 +46,13 @@ import type {
   ChannelsOutgoingCompleteParams,
 } from '@animalabs/mcpl-core';
 
-import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile } from './discord-adapter.js';
+import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile, ReactionSummary } from './discord-adapter.js';
 import type { ChatInputCommandInteraction } from 'discord.js';
 import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
-import {
-  saveFiltersFile,
-  parseSuppressedReactionEmojis,
-  isSuppressedReactionEmoji,
-  filterSuppressedReactions,
-  type DiscordFilters,
-} from './filters.js';
+import { saveFiltersFile, loadFiltersFile, DiscordFiltersState, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -227,6 +221,16 @@ export class DiscordMcplServer {
   private policyAnswered: Promise<void>;
   private resolvePolicyAnswered!: () => void;
 
+  /** The Discord filters plane's desired/effective/status state, shared by
+   *  the whitelists and reaction suppression (issue #21) — which reactions
+   *  may be shown to the model at all, across every surface. The entry
+   *  point drives this instance through the startup/poller lifecycle;
+   *  filtersUpdate() re-applies after its own saves. Public: index.ts
+   *  feeds it. The deprecated DISCORD_SUPPRESS_REACTION_EMOJIS emergency
+   *  env is the process-static compat source while a filters file lacks
+   *  the key (snapshotted at construction; env changes need a restart). */
+  readonly filtersState = new DiscordFiltersState();
+
   /** Channels the agent has explicitly MUTED: no ambient, no mention/reply wake,
    *  and no auto-subscribe-on-mention. Dropped at the top of
    *  handleDiscordMessage. Persisted to a sibling of DISCORD_SUBSCRIPTIONS_FILE
@@ -289,18 +293,6 @@ export class DiscordMcplServer {
     if (!raw) return 80;
     const n = parseInt(raw, 10);
     return Number.isFinite(n) && n > 0 && n <= 10000 ? n : 80;
-  }
-
-  /** Reaction emojis suppressed from agent context entirely: the live
-   *  `[reaction]` push event is dropped (add AND remove, any reactor) and the
-   *  emoji is stripped from fetched-history reaction summaries. Configure via
-   *  DISCORD_SUPPRESS_REACTION_EMOJIS as a comma-separated list of unicode
-   *  emoji or custom-emoji names (with or without colons); VS-16 differences
-   *  are ignored. Unset = nothing suppressed (backward-compatible default).
-   *  Rationale in filters.ts — refusal-marker reacts re-entering context form
-   *  a classifier feedback loop. Read per call so tests/env edits apply. */
-  private get suppressedReactionEmojis(): Set<string> | null {
-    return parseSuppressedReactionEmojis(process.env.DISCORD_SUPPRESS_REACTION_EMOJIS);
   }
 
   /** Inline cap for text attachments on live delivery, in bytes. A text
@@ -773,6 +765,34 @@ export class DiscordMcplServer {
    */
   async serve(conn: McplConnection): Promise<void> {
     this.conn = conn;
+
+    // Reaction suppression is opt-in; say plainly when it isn't on rather
+    // than letting an unset config read as safety. "Configured but empty"
+    // gets the same plain-speaking: the mechanism being wired is not the
+    // same thing as a reaction being suppressed. A legacy-env source works
+    // but is deprecated — one line, counts and digests only, never glyphs.
+    const rs = this.filtersState.suppressionStatus();
+    if (rs.status === 'not-configured') {
+      console.error(
+        '[discord-mcpl] reaction-suppression: not configured (no suppressedReactionEmojis in the filters file, ' +
+          'no DISCORD_SUPPRESS_REACTION_EMOJIS) — reaction suppression NOT active',
+      );
+    } else if (rs.status === 'configured-empty') {
+      console.error(
+        '[discord-mcpl] reaction-suppression: suppressedReactionEmojis is present but EMPTY — mechanism wired, NO reactions suppressed',
+      );
+    } else if (rs.source === 'legacy-env') {
+      console.error(
+        `[discord-mcpl] reaction-suppression: running on DEPRECATED DISCORD_SUPPRESS_REACTION_EMOJIS (${rs.effectiveCount} entries, ` +
+          'process-static — changing it needs a restart) — move the entries into the filters file suppressedReactionEmojis key ' +
+          'and unset the env (alias retires per issue #16)',
+      );
+    } else if (rs.status === 'unavailable') {
+      console.error(
+        '[discord-mcpl] reaction-suppression: filters file is configured but unreadable and no usable set was ever loaded — ' +
+          'ALL model-visible reactions are withheld until the file is repaired',
+      );
+    }
 
     // Set up Discord event forwarding
     this.setupDiscordForwarding();
@@ -1276,7 +1296,7 @@ export class DiscordMcplServer {
         return this.refreshChannels();
 
       case 'fetch_history':
-        return await this.discord.fetchHistory(
+        return this.projectHistoryReactions(await this.discord.fetchHistory(
           args.channelId as string,
           {
             // Per-channel backscroll cap (DISCORD_BACKSCROLL_CHANNELS) also
@@ -1285,14 +1305,14 @@ export class DiscordMcplServer {
             ...(args.before ? { before: args.before as string } : {}),
             ...(args.after ? { after: args.after as string } : {}),
           },
-        );
+        ));
 
       case 'fetch_around':
-        return await this.discord.fetchAround(
+        return this.projectHistoryReactions(await this.discord.fetchAround(
           args.channelId as string,
           args.messageId as string,
           this.capHistoryLimit(args.channelId as string, (args.limit as number) ?? 50),
-        );
+        ));
 
       case 'create_text_channel':
         return await this.discord.createTextChannel(
@@ -1421,6 +1441,19 @@ export class DiscordMcplServer {
           guildIds: f.guildIds ?? null,
           guildChannels: f.guildChannels ?? null,
           dmUsers: f.dmUsers ?? null,
+          plane: this.filtersState.planeStatus(),
+          reactionSuppression: {
+            ...this.filtersState.suppressionStatus(),
+            writable: false,
+            whyNotWritable:
+              'Suppression entries are operator-maintained in the filters file until a host-level ' +
+              'semantic-key facility lands; a referential update surface (suppress-by-key, no literal ' +
+              'markers) arrives with it. The entries are never echoed here by design.',
+            note:
+              'Some reactions on your account are placed by the host, not by you — "me": true on a ' +
+              'reaction is not evidence you authored it. A "stale" status means the last-known-good ' +
+              'set is still enforced but only for this process lifetime; it does not survive a restart.',
+          },
           note:
             'null = unrestricted. These filters gate which Discord events reach you; ' +
             'they are not Discord-side permissions — the bot must also be a member of a guild to see it.' +
@@ -1449,13 +1482,37 @@ export class DiscordMcplServer {
           'Set it in the environment and restart once to enable.',
       );
     }
-    const current = this.discord.getFilters();
+    // The desired state on disk must be readable before any write. A
+    // missing or malformed operator file is never reconstructed from
+    // process memory — that would overwrite whatever the operator had
+    // (including suppression entries the in-memory state may not carry),
+    // bypassing the same protection the startup path gives it. Refusing
+    // loudly is the plane working: repair is hot (the poller picks it up
+    // within seconds), so nothing here needs a restart.
+    if (!existsSync(path)) {
+      throw new Error(
+        `The filters file is MISSING on disk (${path}). Refusing to recreate it from process memory — ` +
+          'an operator should restore the file (or restart to re-seed it); hot reload then applies it within seconds.',
+      );
+    }
+    const current = loadFiltersFile(path);
+    if (!current) {
+      throw new Error(
+        'The filters file exists but cannot be parsed. Refusing to overwrite it — ' +
+          'an operator should repair the JSON (it hot-reloads, no restart needed), then retry this update.',
+      );
+    }
+    // Rebuild from the fresh desired state, so an operator edit made
+    // within the poller's 3s window survives this rewrite — including the
+    // operator-owned suppression key, which rides through untouched (the
+    // tool schema has no parameter that can carry it).
     const next: DiscordFilters = {
       guildIds: current.guildIds ? [...current.guildIds] : undefined,
       guildChannels: current.guildChannels
         ? Object.fromEntries(Object.entries(current.guildChannels).map(([g, c]) => [g, [...c]]))
         : undefined,
       dmUsers: current.dmUsers ? [...current.dmUsers] : undefined,
+      suppressedReactionEmojis: current.suppressedReactionEmojis,
     };
     const notes: string[] = [];
 
@@ -1506,6 +1563,10 @@ export class DiscordMcplServer {
 
     saveFiltersFile(path, next);
     const diff = this.discord.updateFilters(next);
+    // Re-apply the plane from what was just written — the file is
+    // known-good again (we just wrote it atomically), and this keeps the
+    // effective state and digest in sync with disk without waiting a poll.
+    this.filtersState.applyParsed(next);
     const refreshed = diff.addedGuilds.length ? this.refreshChannels() : null;
     console.error(
       `[discord-mcpl] filters updated via tool (guilds +${diff.addedGuilds.length}/-${diff.removedGuilds.length})`,
@@ -1880,6 +1941,32 @@ export class DiscordMcplServer {
     };
   }
 
+  /** Project suppressed reactions out of history messages before they
+   *  become model-visible (fetch_history / fetch_around tool results,
+   *  channel-open backscroll metadata). When suppression is due to a broken
+   *  filters plane the message carries `reactionsUnavailable: true` — an
+   *  empty list that actually means "couldn't project" must not read as
+   *  "none" (Sol's #31 ruling, truthfulness on partial state).
+   *
+   *  Seam note for #31: the reconnect `<missed>` and first-DM transcript
+   *  renderers don't serialize reaction state today, which is the only
+   *  reason they can't leak a suppressed glyph. When #31 adds
+   *  current-reaction snapshots to those renderers, route them through this
+   *  method (or `filtersState.project` directly) rather than
+   *  re-deriving the filtering there. */
+  private projectHistoryReactions<T extends { reactions?: ReactionSummary[] }>(
+    msgs: T[],
+  ): Array<T & { reactionsUnavailable?: true }> {
+    return msgs.map((m) => {
+      const proj = this.filtersState.project(m.reactions);
+      return {
+        ...m,
+        reactions: proj.reactions,
+        ...(proj.unavailable ? { reactionsUnavailable: true as const } : {}),
+      };
+    });
+  }
+
   /** On (re)connect, deliver what arrived while the bot was offline:
    *  mentions + DMs from any known channel, plus the full missed backscroll
    *  for subscribed channels (which already receive ambient delivery). Each
@@ -2221,7 +2308,7 @@ export class DiscordMcplServer {
           : {}),
       });
       messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-      result.history = messages.map((message) => ({
+      result.history = this.projectHistoryReactions(messages).map((message) => ({
         channelId: desc!.id,
         messageId: message.id,
         author: { id: message.authorId, name: message.authorName },
@@ -2230,8 +2317,9 @@ export class DiscordMcplServer {
         metadata: {
           isBot: message.isBot,
           attachments: message.attachments,
-          reactions: filterSuppressedReactions(message.reactions, this.suppressedReactionEmojis),
+          reactions: message.reactions ?? [],
           backscroll: true,
+          ...(message.reactionsUnavailable ? { reactionsUnavailable: true } : {}),
         },
       }));
       result.historyTruncated = requested > limit;
@@ -2426,14 +2514,23 @@ export class DiscordMcplServer {
       // match on. Issue #14.
       this.ensureReactionChannelsLoaded();
       if (!this.reactionChannels.has(ev.channelId)) return;
-      // Suppressed emojis (e.g. host refusal markers) never reach the agent —
-      // see suppressedReactionEmojis. Dropped silently but visible in dbg.
-      if (isSuppressedReactionEmoji(ev.emoji, this.suppressedReactionEmojis)) {
+      // Reaction-suppression projection (issue #21): decided before ANY
+      // model-visible text or the event id exists, so a suppressed reaction
+      // leaves no glyph, name, or token anywhere — the eventId below embeds
+      // the emoji, which is exactly why this guard sits above it. The dbg
+      // line deliberately carries no emoji either. A broken filters plane
+      // with no usable prior set suppresses every reaction event until the
+      // file is repaired. (Subsumes the DISCORD_SUPPRESS_REACTION_EMOJIS
+      // emergency guard — that env var now feeds this same projection as a
+      // compat source.)
+      if (
+        this.filtersState.suppressAll() ||
+        this.filtersState.isSuppressed({ emojiId: ev.emojiId ?? null, emoji: ev.emoji })
+      ) {
         dbg('reaction:suppressed', {
-          emoji: ev.emoji,
           channelId: ev.channelId,
+          messageId: ev.messageId,
           action: ev.action,
-          reactor: ev.userId,
         });
         return;
       }

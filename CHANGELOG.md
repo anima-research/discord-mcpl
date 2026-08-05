@@ -5,6 +5,55 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Added
+
+- **Reaction suppression on the filters plane** (issue #21):
+  `suppressedReactionEmojis` in `DISCORD_FILTERS_FILE` names reaction
+  markers that are filtered out of every model-visible surface — live
+  reaction events (including their event ids), `fetch_history` /
+  `fetch_around` results, and channel-open backscroll metadata — before any
+  text or token is produced. Raw Discord state is untouched: projection, not
+  deletion. The key is **operator-maintained**: `filters_update` has no
+  parameter that can carry it (in either direction — configured markers
+  never transit an agent turn), and resident guild/DM updates round-trip it
+  unchanged. `filters_get` reports redacted state only: status
+  (`not-configured` / `configured-empty` / `active` / `stale` /
+  `unavailable`), entry count, full `sha256:` digest of the normalized set,
+  source, and load time — never the entries. Matching is the emergency
+  filter's semantics (VS-16/colon differences ignored; numeric snowflake
+  entries also match custom emojis by id). A wrong-typed
+  `suppressedReactionEmojis` (anything but a string array) invalidates the
+  whole file load — a typo'd safety field must never silently degrade to
+  "key absent".
+  Desired-vs-effective state is reported for the WHOLE plane, not per key:
+  `filters_get` gains a `plane` block (`live` / `stale` / `unavailable`,
+  `desiredState: ok|invalid|missing`, full `sha256:` digest of the
+  normalized effective filters, load time) because guild/DM whitelists go
+  stale under exactly the same failures as suppression. Failure posture: a
+  bad rewrite or file deletion after a good load keeps enforcing the
+  last-known-good filters (process-lifetime only — a restart into a broken
+  file does not resurrect them); a filters file that is configured but was
+  never readable withholds ALL reactions (`unavailable`, history messages
+  marked `reactionsUnavailable: true`) until repaired. The poller detects
+  real file deletion (one poll of grace for non-atomic editors) and
+  force-reloads a reappearing file even under a preserved mtime. A
+  malformed filters file is never overwritten — not by the env seed at
+  startup, and not by `filters_update`, which refuses to write when the
+  desired state on disk is missing or unparseable instead of
+  reconstructing it from process memory.
+  The `DISCORD_SUPPRESS_REACTION_EMOJIS` emergency containment (2026-08-03)
+  is now a **deprecated compatibility source**: on first materialization of
+  the filters file it seeds the key (its one-time migration into the
+  plane); an existing filters file without the key keeps using the env
+  exactly as shipped — no surprise rewrite; once a file carries the key the
+  env is ignored outright — never merged — with a glyph-free warning. The
+  env is process-static: it is read once at startup and changing it
+  requires a restart (hot reload belongs to the file plane — a running
+  process's environment cannot be edited from outside, so no hot-apply is
+  claimed for it). Migration: write the key (or let first materialization
+  seed it), unset the env, verify `source: "file"`; the alias retires per
+  issue #16 once fleet inventory shows migrated files.
+
 ### Changed
 
 - **Text attachments now inline into context only up to
