@@ -407,3 +407,104 @@ describe('looksLikeExplicitName', () => {
     }
   });
 });
+
+// ── Regression: channel-type classification ─────────────────────────────────
+// The announcement bug lived in mapChannelType, not in the matcher, and every
+// existing candidate test supplies its OWN mapType — so none of them could see
+// it. These drive the real mapping against the real addressability predicate.
+
+import { mapChannelType } from '../src/discord-adapter.js';
+import { isNameAddressableKind, formatChannelLabel } from '../src/channel-names.js';
+import { toDescriptor } from '../src/channels.js';
+
+describe('channel type classification', () => {
+  // Discord's documented channel types, and what each should mean for us.
+  const TYPES: Array<[number, string, boolean]> = [
+    // type, kind, name-addressable?
+    [0,  'text',         true],   // GuildText
+    [2,  'voice',        true],   // GuildVoice — has text chat
+    [4,  'category',     false],  // not sendable
+    [5,  'announcement', true],   // GuildAnnouncement — REGRESSION GUARD
+    [10, 'thread',       false],  // AnnouncementThread — names not unique
+    [11, 'thread',       false],  // PublicThread
+    [12, 'thread',       false],  // PrivateThread
+    [13, 'unknown',      false],  // Stage — not sendable
+    [15, 'forum',        false],  // Forum root — a bare send 400s
+    [16, 'unknown',      false],  // Media — forum-like
+  ];
+
+  for (const [type, kind, addressable] of TYPES) {
+    it(`type ${type} -> '${kind}', name-addressable: ${addressable}`, () => {
+      assert.equal(mapChannelType(type), kind);
+      assert.equal(isNameAddressableKind(mapChannelType(type)), addressable);
+    });
+  }
+
+  it('an ANNOUNCEMENT channel is reachable by name', () => {
+    // The regression: #announcements is about as common a channel name as
+    // exists, and it silently fell out of name addressing while list_channels
+    // kept printing a pasteable label for it.
+    const guild: GuildLike = {
+      id: 'g1', name: 'Separatrix',
+      channels: [
+        { id: '100000000000000001', name: 'general', type: 0, parentId: null },
+        { id: '100000000000000002', name: 'announcements', type: 5, parentId: null },
+      ],
+    };
+    const cands = buildCandidates([guild], { mapType: mapChannelType, allowed: () => true });
+    const r = resolveChannelName({ name: 'announcements' }, cands);
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(r.id, '100000000000000002');
+  });
+
+  it('tie-breaks an announcement channel against a same-named voice channel', () => {
+    // Same stock-layout collision as text-vs-voice; announcement is textlike.
+    const guild: GuildLike = {
+      id: 'g1', name: 'Separatrix',
+      channels: [
+        { id: '100000000000000001', name: 'updates', type: 5, parentId: null },
+        { id: '100000000000000002', name: 'Updates', type: 2, parentId: null },
+      ],
+    };
+    const cands = buildCandidates([guild], { mapType: mapChannelType, allowed: () => true });
+    const r = resolveChannelName({ name: 'updates' }, cands);
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(r.id, '100000000000000001', 'the announcement channel must win');
+  });
+
+  it('an unclassified future type defaults to id-only, not to sendable', () => {
+    // SENDABLE is an allowlist of named kinds on purpose: failing closed costs
+    // a bounce, failing open costs a send to something that cannot receive it.
+    assert.equal(mapChannelType(9999), 'unknown');
+    assert.equal(isNameAddressableKind('unknown'), false);
+  });
+});
+
+// ── The invariant, across module boundaries ─────────────────────────────────
+
+describe('display form == address form', () => {
+  it("toDescriptor's label parses back as a channel ref", () => {
+    // The claim the whole feature rests on. These live in different modules
+    // (channels.ts vs channel-names.ts) and previously built the string
+    // independently, so nothing stopped them drifting apart.
+    const desc = toDescriptor('g1', 'Separatrix', {
+      id: '100000000000000001', name: 'kitchen-table', type: 'text',
+      label: formatChannelLabel('kitchen-table', 'Separatrix'),
+    });
+    assert.deepEqual(parseChannelRef(desc.label!), {
+      kind: 'name', name: 'kitchen-table', guild: 'Separatrix',
+    });
+  });
+
+  it('every label a listing can emit is a parseable address', () => {
+    for (const [name, guildName] of [
+      ['general', 'Separatrix'],
+      ['kitchen-table', 'Anima Mundi'],
+      ['general', "Jai's Lab — v2"],
+    ]) {
+      const parsed = parseChannelRef(formatChannelLabel(name, guildName));
+      assert.deepEqual(parsed, { kind: 'name', name, guild: guildName },
+        formatChannelLabel(name, guildName));
+    }
+  });
+});
