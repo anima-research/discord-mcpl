@@ -2,15 +2,19 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 
 import {
+  buildCandidates,
   channelLabel,
   isSnowflake,
   parseChannelRef,
   resolveChannelName,
   type ChannelCandidate,
+  type GuildLike,
 } from '../src/channel-names.js';
 
-const ch = (id: string, name: string, guildId: string, guildName: string): ChannelCandidate =>
-  ({ id, name, guildId, guildName });
+const ch = (
+  id: string, name: string, guildId: string, guildName: string,
+  type: ChannelCandidate['type'] = 'text',
+): ChannelCandidate => ({ id, name, guildId, guildName, type });
 
 // Two guilds that both have #general — the case this feature exists for.
 const SEPARATRIX_GENERAL = ch('100000000000000001', 'general', 'g1', 'Separatrix');
@@ -96,14 +100,16 @@ describe('resolveChannelName', () => {
     assert.equal(r.reason, 'ambiguous');
   });
 
-  it('offers qualified LABELS in the ambiguity error, not snowflakes', () => {
-    // The whole point: the error must hand back usable addresses, or the agent
-    // falls back to regenerating ids, which is the bug we are fixing.
+  it('offers qualified labels when labels alone disambiguate', () => {
+    // Cross-guild: the labels differ, so they are sufficient and the message
+    // stays short. (Earlier this test also asserted the message contained NO
+    // ids at all. That was wrong -- it encoded "ids are shameful" as an
+    // invariant, when the problem was ids being the ONLY form. It also would
+    // have blocked the fix below.)
     const r = resolveChannelName({ name: 'general' }, CANDIDATES);
     assert.ok(!r.ok);
     assert.match(r.message, /#general \(Separatrix\)/);
     assert.match(r.message, /#general \(Anima Mundi\)/);
-    assert.doesNotMatch(r.message, /\d{17,}/, 'must not fall back to raw ids');
   });
 
   it('resolves a collision when the guild is supplied', () => {
@@ -149,13 +155,51 @@ describe('resolveChannelName', () => {
     assert.equal(r.id, SEPARATRIX_GENERAL.id);
   });
 
-  it('handles duplicate names within a single guild', () => {
-    // Discord permits two channels with the same name in different categories.
+  it('handles duplicate names within a single guild -- ACTIONABLY', () => {
+    // Discord permits two same-named channels in different categories. The
+    // earlier version of this test asserted only reason === 'ambiguous', which
+    // passed while the message was a DEAD END: both suggestions rendered
+    // identically, so re-sending either returned the same error and the agent
+    // had no way forward but a regenerated snowflake. Classification is not
+    // usefulness; assert the suggestions can actually be told apart.
     const dupe = ch('100000000000000004', 'general', 'g1', 'Separatrix');
     const r = resolveChannelName({ name: 'general', guild: 'Separatrix' },
       [SEPARATRIX_GENERAL, dupe]);
     assert.ok(!r.ok);
     assert.equal(r.reason, 'ambiguous');
+    assert.match(r.message, /100000000000000001/);
+    assert.match(r.message, /100000000000000004/);
+  });
+
+  it('TIE-BREAKS text over voice -- the stock-Discord collision', () => {
+    // Nearly every server ships a VOICE channel named "General" beside text
+    // #general, and matching is case-insensitive, so this is the DEFAULT state
+    // of an ordinary server -- not an edge case. Without the tie-break the most
+    // common configuration on Discord is unaddressable by name.
+    const voice = ch('100000000000000005', 'General', 'g1', 'Separatrix', 'voice');
+    const r = resolveChannelName({ name: 'general', guild: 'Separatrix' },
+      [SEPARATRIX_GENERAL, voice]);
+    assert.ok(r.ok, 'text should win over voice');
+    assert.equal(r.id, SEPARATRIX_GENERAL.id);
+  });
+
+  it('does NOT tie-break when two sendable text channels collide', () => {
+    // The tie-break resolves type ambiguity only. Two text channels are a real
+    // ambiguity and must still hard-error -- with ids, since labels match.
+    const dupe = ch('100000000000000006', 'general', 'g1', 'Separatrix', 'text');
+    const r = resolveChannelName({ name: 'general', guild: 'Separatrix' },
+      [SEPARATRIX_GENERAL, dupe]);
+    assert.ok(!r.ok);
+    assert.equal(r.reason, 'ambiguous');
+    assert.match(r.message, /id 1000000000000000/);
+  });
+
+  it('ambiguity message marks the type when labels collide', () => {
+    const voice1 = ch('100000000000000007', 'lounge', 'g1', 'Separatrix', 'voice');
+    const voice2 = ch('100000000000000008', 'lounge', 'g1', 'Separatrix', 'voice');
+    const r = resolveChannelName({ name: 'lounge' }, [voice1, voice2]);
+    assert.ok(!r.ok);
+    assert.match(r.message, /\[voice\]/);
   });
 });
 
@@ -169,5 +213,79 @@ describe('channelLabel', () => {
       assert.ok(r.ok, channelLabel(c));
       assert.equal(r.id, c.id);
     }
+  });
+});
+
+
+// ── buildCandidates: the filter that decides what is addressable at all ──────
+// Previously untested, which the review correctly called out as coverage
+// inverted relative to risk: the pure matcher is the part least likely to
+// break, while THIS is where the allowlist is enforced.
+
+const TYPES: Record<number, string> = {
+  0: 'text', 2: 'voice', 4: 'category', 11: 'thread', 12: 'thread',
+  13: 'unknown', 15: 'forum', 16: 'unknown',
+};
+const mapType = (t: number | undefined) => TYPES[t ?? -1] ?? 'unknown';
+const chan = (id: string, name: string, type: number, parentId: string | null = null) =>
+  ({ id, name, type, parentId });
+const guild = (id: string, name: string, channels: ReturnType<typeof chan>[]): GuildLike =>
+  ({ id, name, channels });
+const allowAll = () => true;
+
+describe('buildCandidates', () => {
+  it('keeps only sendable kinds', () => {
+    const g = guild('g1', 'Separatrix', [
+      chan('1', 'text-room', 0), chan('2', 'voice-room', 2),
+      chan('3', 'a-category', 4), chan('4', 'a-thread', 11),
+      chan('5', 'a-forum', 15), chan('6', 'a-stage', 13), chan('7', 'media', 16),
+    ]);
+    const got = buildCandidates([g], { mapType, allowed: allowAll });
+    assert.deepEqual(got.map((c) => c.name).sort(), ['text-room', 'voice-room']);
+    // Forums 400 on a bare send; stage/media land in 'unknown'. All still
+    // reachable by id -- excluded from NAME addressing only.
+  });
+
+  it('carries the type through, so the tie-break has something to work with', () => {
+    const g = guild('g1', 'S', [chan('1', 'general', 0), chan('2', 'General', 2)]);
+    const got = buildCandidates([g], { mapType, allowed: allowAll });
+    assert.deepEqual(got.map((c) => c.type).sort(), ['text', 'voice']);
+  });
+
+  it('APPLIES THE ALLOWLIST -- an excluded channel is not addressable by name', () => {
+    const g = guild('g1', 'S', [chan('1', 'public', 0), chan('2', 'secret', 0)]);
+    const got = buildCandidates([g], {
+      mapType, allowed: (_gid, cid) => cid !== '2',
+    });
+    assert.deepEqual(got.map((c) => c.name), ['public']);
+    const r = resolveChannelName({ name: 'secret' }, got);
+    assert.ok(!r.ok, 'an excluded channel must not resolve by name');
+  });
+
+  it('an excluded channel cannot manufacture a spurious collision', () => {
+    // Two #general, one forbidden. The permitted one must resolve cleanly
+    // rather than being blocked by a collision with a channel the caller is
+    // not allowed to reach -- which is why filtering precedes matching.
+    const g = guild('g1', 'S', [chan('1', 'general', 0), chan('2', 'general', 0)]);
+    const got = buildCandidates([g], { mapType, allowed: (_g, cid) => cid === '1' });
+    const r = resolveChannelName({ name: 'general' }, got);
+    assert.ok(r.ok);
+    assert.equal(r.id, '1');
+  });
+
+  it('honours the guild allowlist', () => {
+    const gs = [guild('g1', 'A', [chan('1', 'x', 0)]), guild('g2', 'B', [chan('2', 'x', 0)])];
+    const all = buildCandidates(gs, { mapType, allowed: allowAll });
+    assert.equal(all.length, 2);
+    const one = buildCandidates(gs, { mapType, allowed: allowAll, guildIds: ['g2'] });
+    assert.deepEqual(one.map((c) => c.guildName), ['B']);
+  });
+
+  it('spans guilds and survives null channel entries', () => {
+    const gs: GuildLike[] = [
+      { id: 'g1', name: 'A', channels: [chan('1', 'x', 0), null] },
+      guild('g2', 'B', [chan('2', 'y', 0)]),
+    ];
+    assert.equal(buildCandidates(gs, { mapType, allowed: allowAll }).length, 2);
   });
 });

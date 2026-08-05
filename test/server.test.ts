@@ -146,8 +146,8 @@ class MockDiscordAdapter {
 
   async listChannels(): Promise<DiscordChannelInfo[]> {
     return [
-      { id: 'c1', name: 'general', type: 'text' },
-      { id: 'c2', name: 'dev', type: 'text' },
+      { id: 'c1', name: 'general', type: 'text', label: '#general (TestGuild)' },
+      { id: 'c2', name: 'dev', type: 'text', label: '#dev (TestGuild)' },
     ];
   }
 
@@ -170,15 +170,15 @@ class MockDiscordAdapter {
   }
 
   async createTextChannel(): Promise<DiscordChannelInfo> {
-    return { id: 'c_new', name: 'new-channel', type: 'text' };
+    return { id: 'c_new', name: 'new-channel', type: 'text', label: '#new-channel (TestGuild)' };
   }
 
   async deleteChannel(): Promise<void> {}
 
   getTextChannels(): Array<{ guildId: string; guildName: string; channel: DiscordChannelInfo }> {
     return [
-      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c1', name: 'general', type: 'text' } },
-      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c2', name: 'dev', type: 'text' } },
+      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c1', name: 'general', type: 'text', label: '#general (TestGuild)' } },
+      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c2', name: 'dev', type: 'text', label: '#dev (TestGuild)' } },
     ];
   }
 
@@ -735,8 +735,8 @@ describe('DiscordMcplServer', () => {
 
     // Bot joins a new guild after startup.
     discord.simulateGuildCreate('g2', 'Second Guild', [
-      { id: 'c10', name: 'lobby', type: 'text' },
-      { id: 'c11', name: 'random', type: 'text' },
+      { id: 'c10', name: 'lobby', type: 'text', label: '#lobby (TestGuild)' },
+      { id: 'c11', name: 'random', type: 'text', label: '#random (TestGuild)' },
     ]);
 
     const changed = await client.nextMessage();
@@ -764,7 +764,7 @@ describe('DiscordMcplServer', () => {
     if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
 
     // Bot granted access to a pre-existing private channel in g1.
-    discord.simulateChannelAvailable('g1', { id: 'c-private', name: 'secret', type: 'text' });
+    discord.simulateChannelAvailable('g1', { id: 'c-private', name: 'secret', type: 'text', label: '#secret (TestGuild)' });
 
     const changed = await client.nextMessage();
     assert.equal(changed.type, 'notification');
@@ -791,9 +791,9 @@ describe('DiscordMcplServer', () => {
 
     // The bot's view now includes a channel not present at boot.
     discord.getTextChannels = () => [
-      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c1', name: 'general', type: 'text' } },
-      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c2', name: 'dev', type: 'text' } },
-      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c3', name: 'new-room', type: 'text' } },
+      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c1', name: 'general', type: 'text', label: '#general (TestGuild)' } },
+      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c2', name: 'dev', type: 'text', label: '#dev (TestGuild)' } },
+      { guildId: 'g1', guildName: 'Test Guild', channel: { id: 'c3', name: 'new-room', type: 'text', label: '#new-room (TestGuild)' } },
     ];
 
     const callP = client.sendRequest('tools/call', {

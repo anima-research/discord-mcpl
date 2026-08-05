@@ -32,6 +32,13 @@
  * "did you mean" would reintroduce silent wrong-room delivery in friendlier
  * packaging, which is failure mode 3 with better manners.
  *
+ * IDS ARE A CO-EQUAL ADDRESS FORM, NOT A FAILURE STATE. The problem this
+ * solves is MONOCULTURE — ids being the only thing to paste — not ids being
+ * bad. An id is stable across renames, unambiguous by construction, and the
+ * only way to reach the threads and categories this resolver excludes. So the
+ * ambiguity error quotes ids alongside labels whenever labels alone cannot
+ * separate the candidates, which is exactly the voice/text case.
+ *
  * This module is deliberately free of discord.js so it can be unit-tested
  * without a gateway connection; the adapter supplies live candidates.
  */
@@ -48,6 +55,10 @@ export interface ChannelCandidate {
   name: string;
   guildId: string;
   guildName: string;
+  /** Needed for tie-breaking: a stock Discord server ships a VOICE channel
+   *  named "General" beside text #general, and matching is case-insensitive,
+   *  so a name collision across types is the DEFAULT state, not an edge case. */
+  type: 'text' | 'voice' | 'forum' | 'unknown';
 }
 
 /** `#name (GuildName)` — the same string `toDescriptor` produces. */
@@ -102,7 +113,11 @@ function stripHash(value: string): string {
 }
 
 export type ResolveResult =
-  | { ok: true; id: string; matched: ChannelCandidate }
+  /** `matched` is absent when the input was already an id (nothing was looked
+   *  up), present when a name resolved. Optional-on-the-success-arm rather
+   *  than a union with a `matched?: undefined` member, which said the same
+   *  thing less legibly. */
+  | { ok: true; id: string; matched?: ChannelCandidate }
   | { ok: false; reason: 'not-found' | 'ambiguous'; message: string };
 
 /**
@@ -123,6 +138,15 @@ export function resolveChannelName(
   let matches = candidates.filter((c) => c.name.toLowerCase() === wantName);
   if (wantGuild) {
     matches = matches.filter((c) => c.guildName.toLowerCase() === wantGuild);
+  }
+
+  // TIE-BREAK BY TYPE before declaring ambiguity. "General" the voice channel
+  // sitting beside #general the text channel is the stock Discord layout, so
+  // without this the most ordinary server on earth is unaddressable by name.
+  // Only applied when it fully disambiguates; two text channels still collide.
+  if (matches.length > 1) {
+    const sendable = matches.filter((c) => c.type === 'text');
+    if (sendable.length === 1) matches = sendable;
   }
 
   if (matches.length === 1) return { ok: true, id: matches[0].id, matched: matches[0] };
@@ -151,18 +175,95 @@ export function resolveChannelName(
     };
   }
 
-  // Ambiguous. Quote the QUALIFIED LABELS rather than raw ids: those are
-  // themselves valid addresses, so the error hands back something usable
-  // instead of forcing a fall back to snowflakes.
+  // Ambiguous. Quote qualified LABELS, because those are themselves valid
+  // addresses and hand the caller something pasteable. But when two matches
+  // share a label — same name, same guild, different type or category — the
+  // label cannot separate them and a label-only message is a DEAD END: every
+  // suggestion is identical and re-sending any of them returns this same
+  // error, forcing the fall back to a regenerated snowflake that this whole
+  // feature exists to prevent. In that case the id is the only distinguishing
+  // fact, so include it. Ids are a co-equal address form, not a shameful one.
+  const labels = matches.map(channelLabel);
+  const labelsDistinguish = new Set(labels).size === matches.length;
+  const options = matches
+    .map((c) => (labelsDistinguish
+      ? `"${channelLabel(c)}"`
+      : `"${channelLabel(c)}" [${c.type}] (id ${c.id})`))
+    .join(', ');
   return {
     ok: false,
     reason: 'ambiguous',
-    message:
-      `#${ref.name} is ambiguous — ${matches.length} channels match. ` +
-      `Re-send with one of: ${matches.map((c) => `"${channelLabel(c)}"`).join(', ')}`,
+    message: `#${ref.name} is ambiguous — ${matches.length} channels match. Re-send with one of: ${options}`,
   };
 }
 
-/** How a send was addressed. Logged so drift incidents have receipts rather
- *  than being reconstructed from memory after the fact. */
-export type AddressingPath = 'explicit-id' | 'name-resolved' | 'default-aim';
+/** How a send was addressed, for the send log. Only the paths this module can
+ *  actually observe: a tool call either carried an id or carried a name.
+ *
+ *  Deliberately NOT including 'default-aim'. Failure mode 2 (an id-less send
+ *  falling through to most-recent-channel) is real and is the reason the
+ *  original feature request asked for three-way telemetry — but this change
+ *  does not touch that path, so a variant here would be permanently unassigned
+ *  and would imply coverage that does not exist. Wiring it belongs with
+ *  whatever addresses the default-aim path itself. */
+export type AddressingPath = 'explicit-id' | 'name-resolved';
+
+
+// ── Candidate building ───────────────────────────────────────────────────────
+// Extracted from DiscordAdapter so the security-relevant step — applying the
+// allowlist BEFORE matching — is testable without a gateway connection. Review
+// note that prompted this: coverage was inverted relative to risk, all of it on
+// the pure matcher and none on the filter that decides what is addressable.
+
+/** Structural shape of a discord.js channel, narrowed to what we need. */
+export interface ChannelLike {
+  id: string;
+  name: string;
+  type: number | undefined;
+  parentId: string | null;
+}
+
+/** Structural shape of a discord.js guild, narrowed to what we need. */
+export interface GuildLike {
+  id: string;
+  name: string;
+  channels: Iterable<ChannelLike | null | undefined>;
+}
+
+/** Channel kinds that can actually receive a message. Everything else stays
+ *  addressable by id: categories and forum roots are not sendable, thread names
+ *  are not unique even within one channel, and 'unknown' is where stage (13)
+ *  and media (16) land. */
+const SENDABLE: ReadonlySet<string> = new Set(['text', 'voice']);
+
+export function buildCandidates(
+  guilds: Iterable<GuildLike>,
+  opts: {
+    /** Guild allowlist. Empty/undefined = all guilds. */
+    guildIds?: string[];
+    mapType: (type: number | undefined) => string;
+    /** MUST be the same predicate the listing surfaces use. Applied before
+     *  matching so a name can never reach an excluded channel, and an excluded
+     *  channel cannot manufacture a spurious collision with a permitted one. */
+    allowed: (guildId: string, channelId: string, parentId: string | null) => boolean;
+  },
+): ChannelCandidate[] {
+  const out: ChannelCandidate[] = [];
+  for (const guild of guilds) {
+    if (opts.guildIds?.length && !opts.guildIds.includes(guild.id)) continue;
+    for (const c of guild.channels) {
+      if (!c) continue;
+      const kind = opts.mapType(c.type);
+      if (!SENDABLE.has(kind)) continue;
+      if (!opts.allowed(guild.id, c.id, c.parentId)) continue;
+      out.push({
+        id: c.id,
+        name: c.name,
+        guildId: guild.id,
+        guildName: guild.name,
+        type: kind as ChannelCandidate['type'],
+      });
+    }
+  }
+  return out;
+}

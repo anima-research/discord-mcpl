@@ -50,7 +50,11 @@ const CHANNEL_ID_DESC =
   '  • `123456789012345678` — raw Discord snowflake, still accepted.\n' +
   'Names are matched exactly (case-insensitive, leading # optional); there is ' +
   'no fuzzy matching, so a near-miss fails loudly instead of delivering to the ' +
-  'wrong room. Threads and categories are addressable by id only. Surface ' +
+  'wrong room. If two channels share a name the error lists them with ids, ' +
+  'which are always a valid address. Threads, categories and forum roots are ' +
+  'addressable by id only. A channel whose own name ends in parentheses ' +
+  '(e.g. `#standup (weekly)`) must use the qualified form, since bare parens ' +
+  'read as a guild. Surface ' +
   'marker: discord-mcpl namespaces its MCPL channels as ' +
   '`discord:<guildId>:<channelId>` — a different id space from the portal ' +
   'surface (`portal:<channelId>`).';
@@ -187,7 +191,7 @@ export const toolDefinitions: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        channelId: { type: 'string', description: 'Discord channel ID' },
+        channelId: { type: 'string', description: CHANNEL_ID_DESC },
       },
       required: ['channelId'],
     },
