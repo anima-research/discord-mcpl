@@ -880,4 +880,51 @@ describe('server integration', () => {
     );
     assert.equal(existsSync(path), false, 'no file was recreated from process memory');
   });
+
+  // Shared line-transcript renderer (issue #31): the missed sweep and the
+  // first-interaction backscroll render current NET state through the same
+  // projection as every other surface.
+
+  function renderer(server: DiscordMcplServer): (r?: ReactionSummary[]) => string {
+    const s = server as unknown as { renderReactionState(r?: ReactionSummary[]): string };
+    return s.renderReactionState.bind(s);
+  }
+
+  it('line renderer shows net state and filters suppressed reactions', () => {
+    const server = makeServer();
+    server.filtersState.applyParsed(withKey());
+    const out = renderer(server)([
+      summary(SUPPRESSED_UNICODE),
+      { ...summary(HARMLESS), me: true },
+      summary(':sus:', SUPPRESSED_CUSTOM_ID),
+    ]);
+    assert.equal(out, ` [reactions: ${HARMLESS} x2 (incl. me)]`);
+    assert.ok(
+      !out.includes(SUPPRESSED_UNICODE) && !out.includes(SUPPRESSED_CUSTOM_ID),
+      'no suppressed glyph or id in the suffix',
+    );
+  });
+
+  it('line renderer: all-suppressed renders as no suffix, same as none', () => {
+    const server = makeServer();
+    server.filtersState.applyParsed(withKey());
+    const render = renderer(server);
+    // Projection policy: the model must not learn these exist — indistinguishable from "no reactions".
+    assert.equal(render([summary(SUPPRESSED_UNICODE)]), '');
+    assert.equal(render([]), '');
+  });
+
+  it('line renderer: unknown state and withhold-everything posture both render the unavailable marker', () => {
+    const server = makeServer();
+    server.filtersState.applyParsed(withKey());
+    assert.equal(renderer(server)(undefined), ' [reactions: unavailable]');
+
+    const broken = makeServer();
+    broken.filtersState.markBroken('invalid');
+    assert.equal(
+      renderer(broken)([summary(HARMLESS)]),
+      ' [reactions: unavailable]',
+      'may not show what we have; may not claim none',
+    );
+  });
 });
