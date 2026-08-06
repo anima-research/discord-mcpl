@@ -3123,7 +3123,17 @@ export class DiscordMcplServer {
         dbg('handleDiscordMessage:send-failed', { method: 'channels/incoming', error: (err as Error).message });
       }
     } else {
-      // Otherwise, use push/event
+      // Otherwise, use push/event.
+      //
+      // Closed channel: attach the missed-ambient tally (when tracked) so the
+      // host's closed-channel invitation can show what staying out has cost —
+      // "reply without joining" is only an informed choice when the invisible
+      // traffic is visible as a number (2026-08-05: Sol answered four
+      // #architecture mentions over four days while the follow-ups to her own
+      // replies fell into the tally, with nothing surfacing that fact).
+      // Counts exclude this (addressed) message and all prior mentions/DMs —
+      // those were delivered.
+      const missed = this.missedTally.get(msg.channelId);
       const pushParams: PushEventParams = {
         featureSet: 'discord.messaging',
         eventId: `discord_msg_${msg.id}`,
@@ -3150,6 +3160,9 @@ export class DiscordMcplServer {
           isReplyToBot,
           isBot,
           isDM,
+          ...(missed
+            ? { missedMessages: missed.messages, missedCharacters: missed.characters }
+            : {}),
         } as Record<string, unknown>,
         tags: eventTags, // MCPL RFC-001 — the host routes/gates on these
         payload: {
