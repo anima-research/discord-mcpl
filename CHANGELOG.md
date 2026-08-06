@@ -7,6 +7,29 @@ in the git log and PR descriptions.
 
 ### Added
 
+- **Host-injectable protective baseline for reaction suppression**
+  (`DISCORD_SUPPRESSED_REACTIONS_BASELINE`): new deployments and
+  never-configured installations default to the house classifier markers
+  when host composition injects them. Precedence is strict and never
+  unioned: a filters-file key (including an explicit `[]` = operator chose
+  none) beats everything; the deprecated operator env beats the baseline;
+  the baseline applies only when no operator configuration exists. The
+  legacy env's PRESENCE wins even when its parsed list is empty or
+  separator-only — the emergency filter treated an explicitly-empty env as
+  OFF, and the baseline never reappears underneath an operator's off
+  switch. This is a stated choice: the alternative (only a file `[]` can
+  express none) would have changed existing emergency deployments'
+  semantics.
+  First materialization of the filters file writes the winning seed
+  durably — including a present-but-empty legacy env, which is written as
+  an explicit `[]` key so the operator's off survives env cleanup and
+  future baseline injection. Lost configuration keeps the reviewed stale-LKG / fail-closed
+  postures and never silently degrades back to the baseline — it is for
+  never-configured, not for lost configuration. `filters_get` reports
+  `source: "baseline-default"` (count/digest only, not deprecated). The
+  Agent Framework owns the refusal-category→reaction map; host composition
+  derives and injects the concrete set below the model line — standalone
+  Discord deployments inject nothing and honestly report no protection.
 - **Current reaction state on line-formatted transcripts** (issue #31): the
   reconnect `<missed>` sweep and the first-interaction backscroll now append
   a compact suffix — `[reactions: 😀 x2 (incl. me)]` — showing each

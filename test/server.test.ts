@@ -980,6 +980,29 @@ describe('DiscordMcplServer', () => {
     assert.equal(missed.guildName, 'Test Guild');
     assert.equal(missed.metadataResolved, true);
 
+    // A mention while closed+tracked: the push/event origin must carry the
+    // tally, so the host's closed-channel invitation can show the agent what
+    // staying out has cost (2026-08-05 — informed reply-without-joining).
+    discord.simulateMessage({
+      id: 'm101', content: '<@bot_123> you there?', cleanContent: '@bot you there?',
+      authorId: 'u1', authorName: 'Alice', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+      mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+    } as DiscordMessageData);
+    const mentionPush = await client.nextMessage();
+    assert.equal(mentionPush.type, 'request');
+    if (mentionPush.type === 'request') {
+      assert.equal(mentionPush.request.method, 'push/event');
+      const p = mentionPush.request.params as PushEventParams;
+      const origin = p.origin as Record<string, unknown>;
+      assert.equal(origin.missedMessages, 1);
+      assert.equal(origin.missedCharacters, 'hello world'.length);
+      client.sendResponse(mentionPush.request.id, { accepted: true });
+    }
+    // The mention itself is delivered, never "missed" — tally unchanged.
+    const still = await call('channel_missed', { channelId: 'c1' });
+    assert.equal(still.missedMessages, 1);
+
     // Reopening clears the tally.
     await client.sendRequest('channels/open', {
       channelId: 'discord:g1:c1', type: 'discord', address: { guildId: 'g1', channelId: 'c1' },
