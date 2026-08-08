@@ -1869,7 +1869,7 @@ export class DiscordAdapter {
       // explicitly enabled the reply-ping). We capture it so reply-to-bot
       // can be treated as direct address regardless of the ping toggle.
       replyToUserId: message.mentions.repliedUser?.id ?? null,
-      replyToUserName: message.mentions.repliedUser?.username ?? null,
+      replyToUserName: message.mentions.repliedUser?.globalName ?? message.mentions.repliedUser?.username ?? null,
       mentions: message.mentions.users.map((u) => u.id),
       mentionsBotRole: message.mentions.roles.some(
         (r) => (r as { tags?: { botId?: string } }).tags?.botId === this.client.user?.id,
