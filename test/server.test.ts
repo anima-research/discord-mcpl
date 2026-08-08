@@ -516,7 +516,7 @@ describe('DiscordMcplServer', () => {
       assert.ok(p.payload.content[0].type === 'text');
       const rendered = (p.payload.content[0] as { text?: string }).text ?? '';
       assert.ok(!rendered.includes('<backscroll'), 'a closed-channel mention must not auto-fetch history');
-      assert.ok(rendered.includes('[replying to @Fable; message parent-closed-42]'));
+      assert.ok(rendered.includes('[replying to @Fable]'));
       const origin = p.origin as Record<string, unknown>;
       assert.equal(origin.replyTo, 'parent-closed-42');
       assert.equal(origin.replyToAuthorId, 'u_fable');
@@ -722,7 +722,7 @@ describe('DiscordMcplServer', () => {
       const p = incoming.request.params as ChannelsIncomingParams;
       const msg = p.messages[0];
       const text = (msg.content[0] as { text?: string }).text ?? '';
-      assert.ok(text.includes('[replying to @Fable; message parent42]'));
+      assert.ok(text.includes('[replying to @Fable]'));
       assert.ok(text.includes('Antra: go ahead'));
       const metadata = (msg.metadata ?? {}) as Record<string, unknown>;
       assert.equal(metadata.replyTo, 'parent42');

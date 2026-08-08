@@ -3063,7 +3063,7 @@ export class DiscordMcplServer {
     // "go ahead" cannot be mistaken for authorization addressed to the agent.
     // Keep the parent id even when Discord could not supply the author.
     const replyMarker = msg.replyToId
-      ? `[replying to ${msg.replyToUserName ? `@${msg.replyToUserName}` : 'unknown author'}; message ${msg.replyToId}]\n`
+      ? `[replying to ${msg.replyToUserName ? `@${msg.replyToUserName}` : 'unknown author'}]\n`
       : '';
     const renderedContent = `${prefixBlock}${replyMarker}${location}${msg.authorName}: ${msg.cleanContent}`;
     // Advance the watermark so future backscroll on this channel doesn't
