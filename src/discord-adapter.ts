@@ -143,6 +143,8 @@ export interface DiscordMessageData {
    *  Used by the gate to treat reply-to-bot as direct address even when
    *  the bot isn't explicitly @-mentioned. */
   replyToUserId?: string | null;
+  /** Username of the replied-to author when Discord includes the referenced user. */
+  replyToUserName?: string | null;
   mentions: string[];
   /** True when the message mentions the bot's own managed role (@BotName the
    *  ROLE — Discord renders it identically to a user ping and most humans
@@ -1867,6 +1869,7 @@ export class DiscordAdapter {
       // explicitly enabled the reply-ping). We capture it so reply-to-bot
       // can be treated as direct address regardless of the ping toggle.
       replyToUserId: message.mentions.repliedUser?.id ?? null,
+      replyToUserName: message.mentions.repliedUser?.username ?? null,
       mentions: message.mentions.users.map((u) => u.id),
       mentionsBotRole: message.mentions.roles.some(
         (r) => (r as { tags?: { botId?: string } }).tags?.botId === this.client.user?.id,

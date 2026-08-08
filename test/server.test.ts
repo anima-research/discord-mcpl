@@ -499,6 +499,9 @@ describe('DiscordMcplServer', () => {
       guildId: 'g1',
       guildName: 'Test Server',
       mentions: ['bot_123'],
+      replyToId: 'parent-closed-42',
+      replyToUserId: 'u_fable',
+      replyToUserName: 'Fable',
       attachments: [],
       timestamp: new Date(),
     });
@@ -513,6 +516,11 @@ describe('DiscordMcplServer', () => {
       assert.ok(p.payload.content[0].type === 'text');
       const rendered = (p.payload.content[0] as { text?: string }).text ?? '';
       assert.ok(!rendered.includes('<backscroll'), 'a closed-channel mention must not auto-fetch history');
+      assert.ok(rendered.includes('[replying to @Fable (user u_fable); message parent-closed-42]'));
+      const origin = p.origin as Record<string, unknown>;
+      assert.equal(origin.replyTo, 'parent-closed-42');
+      assert.equal(origin.replyToAuthorId, 'u_fable');
+      assert.equal(origin.replyToAuthorName, 'Fable');
       client.sendResponse(pushMsg.request.id, { accepted: true });
     }
 
@@ -681,6 +689,46 @@ describe('DiscordMcplServer', () => {
       assert.equal(p.messages.length, 1);
       assert.equal(p.messages[0].author.name, 'Bob');
       client.sendResponse(inMsg.request.id, { results: [{ messageId: 'dm2', accepted: true }] });
+    }
+
+    client.close();
+    await serverPromise;
+  });
+
+  it('renders reply target visibly and carries standard metadata on open channels', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    await client.sendRequest(method.CHANNELS_OPEN, {
+      type: 'discord',
+      address: { guildId: 'g1', channelId: 'c1' },
+    });
+
+    discord.simulateMessage({
+      id: 'reply1', content: 'go ahead', cleanContent: 'go ahead',
+      authorId: 'u_antra', authorName: 'Antra', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+      replyToId: 'parent42', replyToUserId: 'u_fable', replyToUserName: 'Fable',
+      mentions: [], attachments: [], timestamp: new Date(),
+    });
+
+    const incoming = await client.nextMessage();
+    assert.equal(incoming.type, 'request');
+    if (incoming.type === 'request') {
+      const p = incoming.request.params as ChannelsIncomingParams;
+      const msg = p.messages[0];
+      const text = (msg.content[0] as { text?: string }).text ?? '';
+      assert.ok(text.includes('[replying to @Fable (user u_fable); message parent42]'));
+      assert.ok(text.includes('Antra: go ahead'));
+      const metadata = (msg.metadata ?? {}) as Record<string, unknown>;
+      assert.equal(metadata.replyTo, 'parent42');
+      assert.equal(metadata.replyToAuthorId, 'u_fable');
+      assert.equal(metadata.replyToAuthorName, 'Fable');
+      client.sendResponse(incoming.request.id, { results: [{ messageId: 'reply1', accepted: true }] });
     }
 
     client.close();

@@ -3058,7 +3058,14 @@ export class DiscordMcplServer {
       else if (msg.guildId === null) locationParts.push('DM');
       if (locationParts.length > 0) location = `[${locationParts.join(' ')}] `;
     }
-    const renderedContent = `${prefixBlock}${location}${msg.authorName}: ${msg.cleanContent}`;
+    // A reply edge is part of the message's meaning, not hidden routing metadata.
+    // Render a bounded structural marker into model-visible content so a nearby
+    // "go ahead" cannot be mistaken for authorization addressed to the agent.
+    // Keep the parent id even when Discord could not supply the author.
+    const replyMarker = msg.replyToId
+      ? `[replying to ${msg.replyToUserName ? `@${msg.replyToUserName}${msg.replyToUserId ? ` (user ${msg.replyToUserId})` : ''}` : (msg.replyToUserId ? `user ${msg.replyToUserId}` : 'unknown author')}; message ${msg.replyToId}]\n`
+      : '';
+    const renderedContent = `${prefixBlock}${replyMarker}${location}${msg.authorName}: ${msg.cleanContent}`;
     // Advance the watermark so future backscroll on this channel doesn't
     // re-include this message. Set regardless of which forwarding path we
     // take below (channels/incoming vs push/event) — what matters is that
@@ -3125,6 +3132,8 @@ export class DiscordMcplServer {
           metadata: {
             mentions: msg.mentions,
             replyTo: msg.replyToId,
+            replyToAuthorId: msg.replyToUserId ?? undefined,
+            replyToAuthorName: msg.replyToUserName ?? undefined,
             channelName: msg.channelName,
             guildName: msg.guildName,
             threadName: msg.threadName,
@@ -3179,6 +3188,9 @@ export class DiscordMcplServer {
           threadName: msg.threadName,
           authorId: msg.authorId,
           authorName: msg.authorName,
+          replyTo: msg.replyToId,
+          replyToAuthorId: msg.replyToUserId ?? undefined,
+          replyToAuthorName: msg.replyToUserName ?? undefined,
           isMention,
           isExplicitMention,
           isReplyToBot,
