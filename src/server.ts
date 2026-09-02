@@ -420,6 +420,7 @@ export class DiscordMcplServer {
     if (!this.conn || !this.mcplEnabled) return;
     if (r.status === 'spoken' && r.unvoicedText.length === 0) return;
     const interrupted = r.status === 'interrupted';
+    const expired = r.status === 'expired';
     const secs = (r.playedMs / 1000).toFixed(1);
     const who = r.interruptedBy
       ? `@${r.interruptedBy.username ?? r.interruptedBy.userId}${r.interruptedBy.bot ? ' (bot)' : ''}`
@@ -429,11 +430,14 @@ export class DiscordMcplServer {
     const tail = r.voicedText.length > 120 ? `…${r.voicedText.slice(-120)}` : r.voicedText;
     const head = r.unvoicedText.length > 400 ? `${r.unvoicedText.slice(0, 400)}…` : r.unvoicedText;
     const approx = r.estimated ? ' (boundary approximate)' : '';
-    const line = interrupted
-      ? `[voice] Your spoken message was interrupted by ${who} after ${secs}s${approx}.\n` +
-        `Heard up to: "${tail}"\nNOT heard: "${head}"`
-      : `[voice] Your spoken message was cut short by a synthesis error after ${secs}s${approx}.\n` +
-        `Heard up to: "${tail}"\nNOT heard: "${head}"\n(The text was still delivered in the text channel as usual.)`;
+    const line = expired
+      ? `[voice] Your spoken message waited ${(r.queuedMs / 1000).toFixed(0)}s for the channel to clear and was dropped UNSPOKEN — nothing was heard (and nothing was billed).\n` +
+        `Not said: "${head}"\n(The text was still delivered in the text channel as usual. Say it again — possibly shorter — only if it still needs saying.)`
+      : interrupted
+        ? `[voice] Your spoken message was interrupted by ${who} after ${secs}s${approx}.\n` +
+          `Heard up to: "${tail}"\nNOT heard: "${head}"`
+        : `[voice] Your spoken message was cut short by a synthesis error after ${secs}s${approx}.\n` +
+          `Heard up to: "${tail}"\nNOT heard: "${head}"\n(The text was still delivered in the text channel as usual.)`;
     this.conn.sendRequest(method.PUSH_EVENT, {
       featureSet: 'discord.messaging',
       eventId: `discord_voice_${r.status}_${r.inferenceId}`,
@@ -443,6 +447,8 @@ export class DiscordMcplServer {
         mcplChannelId: r.channelId,
         inferenceId: r.inferenceId,
         playedMs: r.playedMs,
+        queuedMs: r.queuedMs,
+        billedChars: r.billedChars,
         estimated: r.estimated,
         ...(r.interruptedBy ? {
           interruptedById: r.interruptedBy.userId,
@@ -450,10 +456,15 @@ export class DiscordMcplServer {
           interruptedByBot: r.interruptedBy.bot,
         } : {}),
       } as Record<string, unknown>,
-      // RFC-001 tags: hosts route/gate on these. Interruption by a human is
-      // usually wake-worthy (they grabbed the floor mid-sentence — what they
-      // say next relates to what was/wasn't heard); truncation is context.
-      tags: [interrupted ? 'voice:interrupted' : 'voice:truncated'],
+      // RFC-001 tags: hosts route/gate on these. The wake rule is
+      // ball-in-your-court: 'voice:interrupted' and 'voice:expired' both
+      // leave the model with a decision only it can make (someone grabbed
+      // the floor mid-sentence / your words were never said — re-decide),
+      // so hosts should gate them WAKING, like a reply. 'voice:truncated'
+      // is context: the text landed in the text channel, nothing to decide.
+      // Third-party speech while recently-engaged (the engagement-window
+      // rule) is the floor/gate layer's job, not this transport's.
+      tags: [expired ? 'voice:expired' : interrupted ? 'voice:interrupted' : 'voice:truncated'],
       payload: { content: [textContent(line)] },
     } satisfies PushEventParams).catch(() => {});
   }

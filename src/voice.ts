@@ -17,6 +17,14 @@
  *    speaking. On silence, wait a random hold-off (150–500 ms), re-check,
  *    then emit. Implemented via the connection receiver's speaking events
  *    (events only — we stay deaf to CONTENT; STT is portal-relay's job).
+ *  - ZERO-COST-LOSER (convergence review, Sol 8/5): carrier-clear before
+ *    synthesis. The provider SOCKET pre-opens at first delta (free — only
+ *    characters bill), but text banks locally and flushes into synthesis
+ *    only on the sink's 'cleared' event. An utterance dropped while queued
+ *    (interruption of the queue via stop(), or maxHoldMs expiry) bills zero
+ *    characters and never re-runs inference: the banked text simply waits,
+ *    and on expiry the model gets an 'expired' receipt and decides for
+ *    itself whether re-saying is worth a turn.
  *  - HUMAN BARGE-IN: a human speaking mid-utterance aborts playback AND
  *    upstream synthesis immediately. Humans are above the protocol (I1).
  *    Unknown speakers are treated as human — physics yields when unsure.
@@ -80,6 +88,12 @@ const FULLY_PLAYED_SLACK_MS = 250;
 export interface VoiceOutputConfig {
   /** Raw text-channel snowflakes whose streamed prose is voiced. Null = all. */
   textChannels: string[] | null;
+  /** Longest an utterance may wait for the floor before it is dropped
+   *  UNSPOKEN with an 'expired' receipt (the model then decides whether
+   *  re-saying is worth an inference — the transport never re-runs one).
+   *  Null/absent = wait indefinitely; words are patient and cost nothing
+   *  while queued. */
+  maxHoldMs?: number | null;
 }
 
 // ── Speakers, sink contract ─────────────────────────────────────────────────
@@ -99,6 +113,11 @@ export interface SinkItem {
 }
 
 export type SinkEvent =
+  /** The item passed carrier-clear + hold-off and is about to play. THE
+   *  BILLING GATE: VoiceOutput flushes buffered text to the TTS provider on
+   *  this event and not before (zero-cost-loser — an utterance that never
+   *  clears never bills a character). */
+  | { type: 'cleared'; id: string }
   | { type: 'started'; id: string }
   | { type: 'finished'; id: string; playedMs: number }
   | { type: 'interrupted'; id: string; playedMs: number; by: SpeakerInfo };
@@ -107,6 +126,10 @@ export type SinkEvent =
  *  rules, reports what actually happened to each. */
 export interface PcmSink {
   play(item: SinkItem): void;
+  /** Drop a STILL-QUEUED item (max-hold expiry). Returns false when the item
+   *  is unknown or already cleared/playing — the caller treats that as
+   *  losing the race and does nothing. Never touches the current item. */
+  cancel(id: string): boolean;
   onEvent(fn: (ev: SinkEvent) => void): void;
 }
 
@@ -211,9 +234,17 @@ export interface UtteranceReport {
   inferenceId: string;
   /** MCPL channel id the prose was streaming to. */
   channelId: string;
-  status: 'spoken' | 'interrupted';
+  /** 'expired' = dropped unspoken after maxHoldMs in the queue: nothing was
+   *  billed, nothing was heard, and the model decides whether to re-say. */
+  status: 'spoken' | 'interrupted' | 'expired';
   /** Audio actually played into the channel, ms. */
   playedMs: number;
+  /** Time spent queued behind the carrier before clearance (or before
+   *  expiry, for status 'expired'). Staleness signal for the model. */
+  queuedMs: number;
+  /** Characters actually sent to the TTS provider — the zero-cost-loser
+   *  receipt: 0 for anything dropped before clearance. */
+  billedChars: number;
   /** The prefix of the sent text that was actually heard. */
   voicedText: string;
   /** The remainder that was NOT heard (interruption, TTS truncation). */
@@ -226,10 +257,27 @@ export interface UtteranceReport {
 }
 
 interface ActiveUtterance {
-  tts: TtsStream;
+  /** Live provider stream. Pre-opened at first delta (a socket is free; only
+   *  characters bill) so clearance pays synthesis latency, not connection
+   *  latency. Null when pre-open failed; replaced if it dies while queued. */
+  tts: TtsStream | null;
+  /** The pre-opened stream died (idle timeout, error) before clearance —
+   *  flush must open a fresh one. */
+  ttsDead: boolean;
   out: PassThrough;
   channelId: string;
+  /** All prose received from the host for this inference. */
   sentText: string;
+  /** Received but not yet billed: accumulates until clearance, then flushes
+   *  to the provider in one send. Empty once cleared. */
+  pendingText: string;
+  /** Characters actually sent to the provider (the billing receipt). */
+  billedChars: number;
+  /** Sink reported carrier-clear; deltas now stream to the provider live. */
+  cleared: boolean;
+  queuedAt: number;
+  clearedAt: number | null;
+  holdTimer: ReturnType<typeof setTimeout> | null;
   /** Flattened provider alignment, stream-absolute ms (voice-kit contract). */
   aChars: string[];
   aStartMs: number[];
@@ -274,7 +322,15 @@ export class VoiceOutput {
     }
     if (utt.done) return; // chunks after complete: host bug, drop
     utt.sentText += delta;
-    utt.tts.sendText(delta);
+    // BILLING GATE (zero-cost-loser): before clearance, text banks locally —
+    // the inference already ran, the words wait for free. Only a cleared
+    // utterance streams characters to the provider.
+    if (utt.cleared && utt.tts && !utt.ttsDead) {
+      utt.tts.sendText(delta);
+      utt.billedChars += delta.length;
+    } else {
+      utt.pendingText += delta;
+    }
   }
 
   handleComplete(inferenceId: string): void {
@@ -282,66 +338,162 @@ export class VoiceOutput {
     const utt = this.active.get(inferenceId);
     if (!utt || utt.done) return;
     utt.done = true;
-    utt.tts.end(); // audio keeps draining into the queued stream; onEnd closes it
+    // Cleared → end the provider stream; audio keeps draining into the
+    // queued stream and onEnd closes it. Still queued → nothing to end yet:
+    // handleCleared ends the stream after the flush.
+    if (utt.cleared && utt.tts && !utt.ttsDead) utt.tts.end();
     // The active entry survives until the sink reports what happened —
     // accounting needs sentText/alignment at finished/interrupted time.
   }
 
   stop(): void {
-    for (const [, utt] of this.active) { utt.tts.abort(); utt.out.end(); }
+    for (const [, utt] of this.active) {
+      if (utt.holdTimer) clearTimeout(utt.holdTimer);
+      utt.tts?.abort();
+      utt.out.end();
+    }
     this.active.clear();
     this.skipped.clear();
   }
 
   private open(inferenceId: string, channelId: string): ActiveUtterance | null {
+    const out = new PassThrough();
+    const utt: ActiveUtterance = {
+      tts: null, ttsDead: false, out, channelId,
+      sentText: '', pendingText: '', billedChars: 0,
+      cleared: false, queuedAt: Date.now(), clearedAt: null, holdTimer: null,
+      aChars: [], aStartMs: [], aDurMs: [], audioMs: 0, done: false,
+    };
+    // Pre-open the provider socket (free — only characters bill) so that at
+    // clearance we pay synthesis latency, not connection latency. Failure is
+    // not fatal here: handleCleared retries once before going text-only.
+    this.openProviderStream(utt);
+    // Queue for playback immediately. The sink's 'cleared' event — after
+    // carrier-clear + hold-off, right before play — is what flushes banked
+    // text into synthesis.
+    this.sink.play({ id: inferenceId, stream: out });
+    const maxHold = this.cfg.maxHoldMs;
+    if (maxHold != null && maxHold > 0) {
+      utt.holdTimer = setTimeout(() => this.expire(inferenceId), maxHold);
+      utt.holdTimer.unref?.();
+    }
+    this.active.set(inferenceId, utt);
+    return utt;
+  }
+
+  /** Open (or replace) the provider stream for an utterance and wire its
+   *  events. Callbacks guard on stream identity so a replaced stream's late
+   *  events can't touch the utterance. */
+  private openProviderStream(utt: ActiveUtterance): boolean {
     let tts: TtsStream;
     try {
       tts = this.tts.openStream(this.voice);
     } catch (err) {
-      this.log(`TTS open failed: ${(err as Error).message} — line stays text-only`);
-      return null;
+      this.log(`TTS open failed: ${(err as Error).message}`);
+      utt.tts = null;
+      utt.ttsDead = true;
+      return false;
     }
-    const out = new PassThrough();
-    const utt: ActiveUtterance = {
-      tts, out, channelId, sentText: '',
-      aChars: [], aStartMs: [], aDurMs: [], audioMs: 0, done: false,
-    };
+    utt.tts = tts;
+    utt.ttsDead = false;
     const rate = this.tts.outputRateHz;
     tts.onAlignment((a: TtsAlignment) => {
+      if (utt.tts !== tts) return;
       utt.aChars.push(...a.chars);
       utt.aStartMs.push(...a.startMs);
       utt.aDurMs.push(...a.durationMs);
     });
     tts.onAudio((pcm) => {
+      if (utt.tts !== tts) return;
       utt.audioMs += pcm.length / 2 / (rate / 1000); // PCM16 mono
-      out.write(monoTo48kStereo(pcm, rate));
+      utt.out.write(monoTo48kStereo(pcm, rate));
     });
-    tts.onEnd(() => out.end());
-    tts.onError((e) => { this.log(`TTS stream error: ${e.message}`); out.end(); });
-    // Queue for playback immediately: audio starts the moment the provider
-    // produces it, while later deltas are still being generated upstream.
-    this.sink.play({ id: inferenceId, stream: out });
-    this.active.set(inferenceId, utt);
-    return utt;
+    tts.onEnd(() => {
+      if (utt.tts !== tts) return;
+      // Post-clearance this is normal completion. Pre-clearance nothing was
+      // ever sent, so an end is the provider hanging up (idle timeout) —
+      // mark dead; handleCleared reopens.
+      if (utt.cleared) utt.out.end();
+      else utt.ttsDead = true;
+    });
+    tts.onError((e) => {
+      if (utt.tts !== tts) return;
+      if (utt.cleared) {
+        this.log(`TTS stream error: ${e.message}`);
+        utt.out.end();
+      } else {
+        // Queued utterances survive a dying socket: reopen at clearance.
+        this.log(`TTS stream error while queued (will reopen at clearance): ${e.message}`);
+        utt.ttsDead = true;
+      }
+    });
+    return true;
+  }
+
+  /** The sink cleared this utterance to play: flush banked text into
+   *  synthesis (opening a fresh stream if the pre-opened one died). This is
+   *  the only place characters start billing. */
+  private handleCleared(inferenceId: string): void {
+    const utt = this.active.get(inferenceId);
+    if (!utt || utt.cleared) return;
+    utt.cleared = true;
+    utt.clearedAt = Date.now();
+    if (utt.holdTimer) { clearTimeout(utt.holdTimer); utt.holdTimer = null; }
+    if ((!utt.tts || utt.ttsDead) && !this.openProviderStream(utt)) {
+      // No provider stream and the reopen failed: the line stays text-only.
+      // Ending the (empty) audio stream lets the sink finish it at 0 ms and
+      // the report goes up as a truncation with billedChars 0.
+      this.log('TTS unavailable at clearance — line stays text-only');
+      utt.out.end();
+      return;
+    }
+    if (utt.pendingText.length > 0) {
+      utt.tts!.sendText(utt.pendingText);
+      utt.billedChars += utt.pendingText.length;
+      utt.pendingText = '';
+    }
+    if (utt.done) utt.tts!.end();
+  }
+
+  /** Max-hold expiry: the floor never opened. Drop the utterance UNSPOKEN
+   *  with a receipt — zero characters billed, the model decides whether
+   *  re-saying is worth an inference. */
+  private expire(inferenceId: string): void {
+    const utt = this.active.get(inferenceId);
+    if (!utt || utt.cleared) return; // cleared won the race
+    if (!this.sink.cancel(inferenceId)) return; // dequeuing raced us; let it play
+    this.active.delete(inferenceId);
+    if (!utt.done) this.skipped.add(inferenceId); // drop trailing chunks
+    utt.tts?.abort();
+    utt.out.end();
+    this.report({
+      inferenceId, channelId: utt.channelId, status: 'expired',
+      playedMs: 0, queuedMs: Date.now() - utt.queuedAt, billedChars: utt.billedChars,
+      voicedText: '', unvoicedText: utt.sentText, estimated: false,
+    });
   }
 
   private handleSinkEvent(ev: SinkEvent): void {
+    if (ev.type === 'cleared') { this.handleCleared(ev.id); return; }
     if (ev.type === 'started') return;
     const utt = this.active.get(ev.id);
     if (!utt) return;
     this.active.delete(ev.id);
+    if (utt.holdTimer) { clearTimeout(utt.holdTimer); utt.holdTimer = null; }
+    const queuedMs = Math.max(0, (utt.clearedAt ?? utt.queuedAt) - utt.queuedAt);
 
     if (ev.type === 'interrupted') {
       // Kill synthesis and drop any not-yet-arrived prose for this inference:
       // the utterance is dead, resuming mid-thought as audio would be worse
       // than the model re-deciding what (and whether) to say.
-      utt.tts.abort();
+      utt.tts?.abort();
       utt.out.end();
       if (!utt.done) this.skipped.add(ev.id);
       const split = this.split(utt, ev.playedMs);
       this.report({
         inferenceId: ev.id, channelId: utt.channelId, status: 'interrupted',
-        playedMs: ev.playedMs, ...split, interruptedBy: ev.by,
+        playedMs: ev.playedMs, queuedMs, billedChars: utt.billedChars,
+        ...split, interruptedBy: ev.by,
       });
       return;
     }
@@ -355,7 +507,8 @@ export class VoiceOutput {
       : this.split(utt, ev.playedMs);
     this.report({
       inferenceId: ev.id, channelId: utt.channelId, status: 'spoken',
-      playedMs: ev.playedMs, ...split,
+      playedMs: ev.playedMs, queuedMs, billedChars: utt.billedChars,
+      ...split,
     });
   }
 
@@ -399,6 +552,9 @@ export interface VoiceEnv {
   elevenKey: string;
   /** Voiced threshold (dBFS) for the carrier VAD; default -45. */
   vadThresholdDb: number;
+  /** Max queue wait before an utterance is dropped unspoken with an
+   *  'expired' receipt (DISCORD_VOICE_MAX_HOLD_MS). Null = wait forever. */
+  maxHoldMs: number | null;
 }
 
 /** Read voice config from env; null = voice not configured (the common case). */
@@ -421,10 +577,12 @@ export function voiceEnv(): VoiceEnv | null {
   }
   const channels = (process.env.DISCORD_VOICE_TEXT_CHANNELS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const vadDb = Number(process.env.DISCORD_VOICE_VAD_DB);
+  const maxHold = Number(process.env.DISCORD_VOICE_MAX_HOLD_MS);
   return {
     guildId: guildId!, voiceChannelId, registryPath: registryPath!, voiceName: voiceName!,
     textChannels: channels.length ? channels : null, elevenKey: elevenKey!,
     vadThresholdDb: Number.isFinite(vadDb) ? vadDb : VAD_THRESHOLD_DB,
+    maxHoldMs: Number.isFinite(maxHold) && maxHold > 0 ? maxHold : null,
   };
 }
 
@@ -438,7 +596,7 @@ export async function createVoiceOutput(env: VoiceEnv, client: unknown): Promise
   const provider = new ElevenLabsTtsProvider(env.elevenKey);
   const sink = new DiscordVoiceSink(env.vadThresholdDb);
   await sink.connect(client, env.guildId, env.voiceChannelId);
-  return new VoiceOutput({ textChannels: env.textChannels }, provider, voice, sink);
+  return new VoiceOutput({ textChannels: env.textChannels, maxHoldMs: env.maxHoldMs }, provider, voice, sink);
 }
 
 /** Plays 48k stereo raw PCM utterances sequentially in a Discord voice
@@ -593,6 +751,13 @@ export class DiscordVoiceSink implements PcmSink {
     void this.pump();
   }
 
+  cancel(id: string): boolean {
+    const i = this.queue.findIndex((item) => item.id === id);
+    if (i < 0) return false; // unknown, or already dequeued for play
+    this.queue.splice(i, 1);
+    return true;
+  }
+
   onEvent(fn: (ev: SinkEvent) => void): void { this.eventFns.push(fn); }
 
   /** Physics: humans always win; bots yield deterministically inside the
@@ -620,6 +785,9 @@ export class DiscordVoiceSink implements PcmSink {
         // Carrier-sense: emit only into hold-off-verified silence.
         await this.gate.waitClear();
         const item = this.queue.shift()!;
+        // Billing gate: VoiceOutput flushes banked text into synthesis on
+        // this event — audio starts flowing into item.stream from here.
+        this.emit({ type: 'cleared', id: item.id });
         const resource = createAudioResource(item.stream, { inputType: StreamType.Raw });
         this.current = { id: item.id, resource, startedAt: Date.now(), interruptedBy: null };
         this.player.play(resource);

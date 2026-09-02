@@ -19,15 +19,17 @@ class FakeStream implements TtsStream {
   private audioFns: Array<(b: Buffer) => void> = [];
   private alignFns: Array<(a: TtsAlignment) => void> = [];
   private endFns: Array<() => void> = [];
+  private errorFns: Array<(e: Error) => void> = [];
   sendText(d: string): void { this.sent.push(d); }
   end(): void { this.ended = true; for (const f of this.endFns) f(); }
   abort(): void { this.aborted = true; }
   onAudio(f: (b: Buffer) => void): void { this.audioFns.push(f); }
   onAlignment(f: (a: TtsAlignment) => void): void { this.alignFns.push(f); }
   onEnd(f: () => void): void { this.endFns.push(f); }
-  onError(): void {}
+  onError(f: (e: Error) => void): void { this.errorFns.push(f); }
   emitAudio(b: Buffer): void { for (const f of this.audioFns) f(b); }
   emitAlignment(a: TtsAlignment): void { for (const f of this.alignFns) f(a); }
+  emitError(e: Error): void { for (const f of this.errorFns) f(e); }
 }
 
 class FakeProvider implements TtsProvider {
@@ -43,10 +45,24 @@ class FakeProvider implements TtsProvider {
 
 class FakeSink implements PcmSink {
   played: SinkItem[] = [];
+  cancelled: string[] = [];
+  private clearedIds = new Set<string>();
   private fns: Array<(ev: SinkEvent) => void> = [];
   play(item: SinkItem): void { this.played.push(item); }
+  cancel(id: string): boolean {
+    // Mirrors DiscordVoiceSink: only still-queued (never-cleared) items can
+    // be cancelled; a cleared/unknown id loses the race.
+    if (this.clearedIds.has(id) || !this.played.some((p) => p.id === id)) return false;
+    this.cancelled.push(id);
+    return true;
+  }
   onEvent(fn: (ev: SinkEvent) => void): void { this.fns.push(fn); }
-  emit(ev: SinkEvent): void { for (const f of this.fns) f(ev); }
+  emit(ev: SinkEvent): void {
+    if (ev.type === 'cleared') this.clearedIds.add(ev.id);
+    for (const f of this.fns) f(ev);
+  }
+  /** Carrier cleared this item — the billing gate. */
+  clear(id: string): void { this.emit({ type: 'cleared', id }); }
 }
 
 const VOICE: TtsVoice = { voiceId: 'v1' };
@@ -70,26 +86,41 @@ function evenAlignment(text: string, msPerChar = 100): TtsAlignment {
   };
 }
 
-test('deltas stream into one lazy TTS stream per inference; complete ends it', () => {
+test('billing gate: socket pre-opens free, text banks until cleared, then streams live', () => {
   const { provider, sink, out } = setup();
   out.handleChunk('inf1', 'discord:g:100', 'Hello ');
   out.handleChunk('inf1', 'discord:g:100', 'there.');
-  assert.equal(provider.streams.length, 1);
-  assert.equal(sink.played.length, 1); // queued for playback at open, not at end
+  assert.equal(provider.streams.length, 1);        // socket pre-opened (free)
+  assert.equal(sink.played.length, 1);             // queued for playback at open
   assert.equal(sink.played[0]!.id, 'inf1');
-  assert.deepEqual(provider.streams[0]!.sent, ['Hello ', 'there.']);
+  assert.deepEqual(provider.streams[0]!.sent, []); // zero characters billed while queued
+  sink.clear('inf1');
+  assert.deepEqual(provider.streams[0]!.sent, ['Hello there.']); // one flush
+  out.handleChunk('inf1', 'discord:g:100', ' More.');
+  assert.deepEqual(provider.streams[0]!.sent, ['Hello there.', ' More.']); // live now
   assert.equal(provider.streams[0]!.ended, false);
   out.handleComplete('inf1');
   assert.equal(provider.streams[0]!.ended, true);
 });
 
+test('complete while queued: end is deferred to the flush', () => {
+  const { provider, sink, out } = setup();
+  out.handleChunk('inf1', 'discord:g:100', 'Whole thing.');
+  out.handleComplete('inf1');
+  assert.equal(provider.streams[0]!.ended, false); // nothing sent yet — nothing to end
+  sink.clear('inf1');
+  assert.deepEqual(provider.streams[0]!.sent, ['Whole thing.']);
+  assert.equal(provider.streams[0]!.ended, true);
+});
+
 test('channel filter: non-voiced channels are skipped for the whole inference', () => {
-  const { provider, out } = setup(['777']);
+  const { provider, sink, out } = setup(['777']);
   out.handleChunk('inf1', 'discord:g:999', 'not voiced ');
   out.handleChunk('inf1', 'discord:g:999', 'still not');
   assert.equal(provider.streams.length, 0);
   out.handleChunk('inf2', 'discord:g:777', 'voiced');
   assert.equal(provider.streams.length, 1);
+  sink.clear('inf2');
   assert.deepEqual(provider.streams[0]!.sent, ['voiced']);
 });
 
@@ -201,6 +232,83 @@ test('truncated finish (TTS died early) reports the unvoiced tail', () => {
   assert.equal(r.voicedText, text.slice(0, 20)); // midpoints ≤2000ms → 20 chars
   assert.equal(r.unvoicedText, text.slice(20));
   assert.equal(r.estimated, false);
+});
+
+// ── Zero-cost-loser (convergence review, Sol 8/5) ───────────────────────────
+
+test('zero-cost-loser pin: stopped while queued → provider received zero characters', () => {
+  const { provider, out } = setup();
+  out.handleChunk('inf1', 'discord:g:100', 'never billed');
+  out.stop();
+  assert.deepEqual(provider.streams[0]!.sent, []);
+  assert.equal(provider.streams[0]!.aborted, true);
+});
+
+test('interrupted while never cleared: report carries billedChars 0', () => {
+  const { sink, out, reports } = setup();
+  out.handleChunk('inf1', 'discord:g:100', 'unbilled words');
+  sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 0, by: { userId: 'u1', bot: true } });
+  assert.equal(reports[0]!.billedChars, 0);
+  assert.equal(reports[0]!.unvoicedText, 'unbilled words');
+});
+
+test('billedChars receipt: cleared-then-interrupted bills exactly the flushed text', () => {
+  const { provider, sink, out, reports } = setup();
+  const text = 'Hello there, friend.';
+  out.handleChunk('inf1', 'discord:g:100', text);
+  sink.clear('inf1');
+  provider.streams[0]!.emitAlignment(evenAlignment(text));
+  sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 550, by: { userId: 'u9', bot: false } });
+  assert.equal(reports[0]!.billedChars, text.length);
+  assert.ok(reports[0]!.queuedMs >= 0);
+});
+
+test('socket died while queued: flush reopens a fresh stream and resends the bank', () => {
+  const { provider, sink, out } = setup();
+  out.handleChunk('inf1', 'discord:g:100', 'resent ');
+  provider.streams[0]!.emitError(new Error('idle timeout')); // provider hung up pre-clearance
+  out.handleChunk('inf1', 'discord:g:100', 'text');          // keeps banking
+  sink.clear('inf1');
+  assert.equal(provider.streams.length, 2);
+  assert.deepEqual(provider.streams[0]!.sent, []);           // dead socket billed nothing
+  assert.deepEqual(provider.streams[1]!.sent, ['resent text']);
+});
+
+test('maxHold expiry: dropped unspoken with an expired receipt, zero billed', async () => {
+  const provider = new FakeProvider();
+  const sink = new FakeSink();
+  const out = new VoiceOutput({ textChannels: null, maxHoldMs: 20 }, provider, VOICE, sink, () => {});
+  const reports: UtteranceReport[] = [];
+  out.onReport((r) => reports.push(r));
+  out.handleChunk('inf1', 'discord:g:100', 'too late');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(sink.cancelled, ['inf1']);
+  assert.equal(reports.length, 1);
+  const r = reports[0]!;
+  assert.equal(r.status, 'expired');
+  assert.equal(r.billedChars, 0);
+  assert.equal(r.playedMs, 0);
+  assert.equal(r.unvoicedText, 'too late');
+  assert.ok(r.queuedMs >= 20);
+  assert.deepEqual(provider.streams[0]!.sent, []);
+  assert.equal(provider.streams[0]!.aborted, true);
+  // The inference is dead: post-expiry chunks must not reopen anything.
+  out.handleChunk('inf1', 'discord:g:100', 'late delta');
+  assert.equal(provider.streams.length, 1);
+});
+
+test('cleared beats expiry: a cleared utterance is never expired', async () => {
+  const provider = new FakeProvider();
+  const sink = new FakeSink();
+  const out = new VoiceOutput({ textChannels: null, maxHoldMs: 20 }, provider, VOICE, sink, () => {});
+  const reports: UtteranceReport[] = [];
+  out.onReport((r) => reports.push(r));
+  out.handleChunk('inf1', 'discord:g:100', 'quick');
+  sink.clear('inf1');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(sink.cancelled, []);
+  assert.equal(reports.length, 0); // still active, awaiting playback outcome
+  assert.deepEqual(provider.streams[0]!.sent, ['quick']);
 });
 
 // ── CarrierGate ─────────────────────────────────────────────────────────────
