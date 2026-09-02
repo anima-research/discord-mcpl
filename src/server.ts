@@ -847,6 +847,11 @@ export class DiscordMcplServer {
           'process-static — changing it needs a restart) — move the entries into the filters file suppressedReactionEmojis key ' +
           'and unset the env (alias retires per issue #16)',
       );
+    } else if (rs.source === 'baseline-default') {
+      console.error(
+        `[discord-mcpl] reaction-suppression: host-injected protective baseline in force (${rs.effectiveCount} entries, ` +
+          'no operator configuration present) — an explicit suppressedReactionEmojis key in the filters file overrides it',
+      );
     } else if (rs.status === 'unavailable') {
       console.error(
         '[discord-mcpl] reaction-suppression: filters file is configured but unreadable and no usable set was ever loaded — ' +
@@ -2064,12 +2069,9 @@ export class DiscordMcplServer {
    *  empty list that actually means "couldn't project" must not read as
    *  "none" (Sol's #31 ruling, truthfulness on partial state).
    *
-   *  Seam note for #31: the reconnect `<missed>` and first-DM transcript
-   *  renderers don't serialize reaction state today, which is the only
-   *  reason they can't leak a suppressed glyph. When #31 adds
-   *  current-reaction snapshots to those renderers, route them through this
-   *  method (or `filtersState.project` directly) rather than
-   *  re-deriving the filtering there. */
+   *  Line-formatted transcripts (the reconnect `<missed>` sweep, the
+   *  first-interaction backscroll) get the same projection through
+   *  renderReactionState below — one filter, every surface. */
   private projectHistoryReactions<T extends { reactions?: ReactionSummary[] }>(
     msgs: T[],
   ): Array<T & { reactionsUnavailable?: true }> {
@@ -2081,6 +2083,28 @@ export class DiscordMcplServer {
         ...(proj.unavailable ? { reactionsUnavailable: true as const } : {}),
       };
     });
+  }
+
+  /** Render current NET reaction state as a line suffix for text transcripts
+   *  — the reconnect `<missed>` sweep and the first-interaction backscroll
+   *  (issue #31). One shared renderer so every historical path shows the same
+   *  message the same way: the current aggregate after the suppression
+   *  projection, independent of the live set_reaction_visibility toggle
+   *  (that opt-in governs ambient add/remove events; historical rendering is
+   *  a current-state snapshot, never a replay of the event sequence).
+   *
+   *  Truthfulness on partial state: no suffix means "no visible reactions".
+   *  State we don't actually have — the resolver gave us nothing, or a
+   *  failed-closed policy forbids showing what we do have — renders as an
+   *  explicit unavailable marker instead, with no hint of which case it was. */
+  private renderReactionState(reactions: ReactionSummary[] | undefined): string {
+    const proj = this.filtersState.project(reactions);
+    if (reactions === undefined || proj.unavailable) return ' [reactions: unavailable]';
+    if (proj.reactions.length === 0) return '';
+    const parts = proj.reactions.map(
+      (r) => `${r.emoji} x${r.count}${r.me ? ' (incl. me)' : ''}`,
+    );
+    return ` [reactions: ${parts.join(', ')}]`;
   }
 
   /** On (re)connect, deliver what arrived while the bot was offline:
@@ -2202,7 +2226,7 @@ export class DiscordMcplServer {
         // Lead each line with the message id so the agent can
         // fetch_around(channelId, id) to read the surrounding conversation.
         // (ts is empty under AGENT_TIMESTAMP_STYLE=none — the id stays.)
-        return `[${ts ? `${ts} ` : ''}id=${m.id}] ${m.authorName}${mark}: ${m.cleanContent}${att}`;
+        return `[${ts ? `${ts} ` : ''}id=${m.id}] ${m.authorName}${mark}: ${m.cleanContent}${att}${this.renderReactionState(m.reactions)}`;
       });
       const block = [
         `<missed ${attrs.join(' ')}>`,
@@ -3052,7 +3076,7 @@ export class DiscordMcplServer {
           const att = m.attachments && m.attachments.length > 0
             ? ` [attachments: ${m.attachments.map((a) => a.name).join(', ')}]`
             : '';
-          return `${ts ? `[${ts}] ` : ''}${m.authorName}: ${m.cleanContent}${att}`;
+          return `${ts ? `[${ts}] ` : ''}${m.authorName}: ${m.cleanContent}${att}${this.renderReactionState(m.reactions)}`;
         });
         blocks.push([open, ...lines, '</backscroll>'].join('\n'));
       }
@@ -3095,7 +3119,14 @@ export class DiscordMcplServer {
       else if (msg.guildId === null) locationParts.push('DM');
       if (locationParts.length > 0) location = `[${locationParts.join(' ')}] `;
     }
-    const renderedContent = `${prefixBlock}${location}${msg.authorName}: ${msg.cleanContent}`;
+    // A reply edge is part of the message's meaning, not hidden routing metadata.
+    // Render a bounded structural marker into model-visible content so a nearby
+    // "go ahead" cannot be mistaken for authorization addressed to the agent.
+    // Keep the parent id even when Discord could not supply the author.
+    const replyMarker = msg.replyToId
+      ? `[replying to ${msg.replyToUserName ? `@${msg.replyToUserName}` : 'unknown author'}]\n`
+      : '';
+    const renderedContent = `${prefixBlock}${replyMarker}${location}${msg.authorName}: ${msg.cleanContent}`;
     // Advance the watermark so future backscroll on this channel doesn't
     // re-include this message. Set regardless of which forwarding path we
     // take below (channels/incoming vs push/event) — what matters is that
@@ -3162,6 +3193,8 @@ export class DiscordMcplServer {
           metadata: {
             mentions: msg.mentions,
             replyTo: msg.replyToId,
+            replyToAuthorId: msg.replyToUserId ?? undefined,
+            replyToAuthorName: msg.replyToUserName ?? undefined,
             channelName: msg.channelName,
             guildName: msg.guildName,
             threadName: msg.threadName,
@@ -3184,7 +3217,17 @@ export class DiscordMcplServer {
         dbg('handleDiscordMessage:send-failed', { method: 'channels/incoming', error: (err as Error).message });
       }
     } else {
-      // Otherwise, use push/event
+      // Otherwise, use push/event.
+      //
+      // Closed channel: attach the missed-ambient tally (when tracked) so the
+      // host's closed-channel invitation can show what staying out has cost —
+      // "reply without joining" is only an informed choice when the invisible
+      // traffic is visible as a number (2026-08-05: Sol answered four
+      // #architecture mentions over four days while the follow-ups to her own
+      // replies fell into the tally, with nothing surfacing that fact).
+      // Counts exclude this (addressed) message and all prior mentions/DMs —
+      // those were delivered.
+      const missed = this.missedTally.get(msg.channelId);
       const pushParams: PushEventParams = {
         featureSet: 'discord.messaging',
         eventId: `discord_msg_${msg.id}`,
@@ -3206,11 +3249,17 @@ export class DiscordMcplServer {
           threadName: msg.threadName,
           authorId: msg.authorId,
           authorName: msg.authorName,
+          replyTo: msg.replyToId,
+          replyToAuthorId: msg.replyToUserId ?? undefined,
+          replyToAuthorName: msg.replyToUserName ?? undefined,
           isMention,
           isExplicitMention,
           isReplyToBot,
           isBot,
           isDM,
+          ...(missed
+            ? { missedMessages: missed.messages, missedCharacters: missed.characters }
+            : {}),
         } as Record<string, unknown>,
         tags: eventTags, // MCPL RFC-001 — the host routes/gates on these
         payload: {

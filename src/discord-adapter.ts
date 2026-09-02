@@ -33,6 +33,7 @@ import { dbg } from './debug-log.js';
 
 import {
   buildCandidates,
+  formatChannelLabel,
   parseChannelRef,
   resolveChannelName,
   type ResolveResult,
@@ -142,6 +143,8 @@ export interface DiscordMessageData {
    *  Used by the gate to treat reply-to-bot as direct address even when
    *  the bot isn't explicitly @-mentioned. */
   replyToUserId?: string | null;
+  /** Username of the replied-to author when Discord includes the referenced user. */
+  replyToUserName?: string | null;
   mentions: string[];
   /** True when the message mentions the bot's own managed role (@BotName the
    *  ROLE — Discord renders it identically to a user ping and most humans
@@ -165,7 +168,7 @@ export interface DiscordGuildInfo {
 export interface DiscordChannelInfo {
   id: string;
   name: string;
-  type: 'text' | 'voice' | 'category' | 'thread' | 'forum' | 'unknown';
+  type: 'text' | 'announcement' | 'voice' | 'category' | 'thread' | 'forum' | 'unknown';
   parentId?: string;
   /** Guild-qualified display label, `#name (GuildName)` — the same string
    *  `toDescriptor` produces and the same string the channelId argument
@@ -1297,7 +1300,7 @@ export class DiscordAdapter {
           name: c.name,
           type: mapChannelType(c.type),
           parentId: c.parentId ?? undefined,
-          label: `#${c.name} (${guild.name})`,
+          label: formatChannelLabel(c.name, guild.name),
         });
       }
     });
@@ -1512,7 +1515,7 @@ export class DiscordAdapter {
       name: channel.name,
       type: 'text',
       parentId: channel.parentId ?? undefined,
-      label: `#${channel.name} (${guild.name})`,
+      label: formatChannelLabel(channel.name, guild.name),
     };
   }
 
@@ -1542,7 +1545,7 @@ export class DiscordAdapter {
               name: channel.name,
               type: 'text',
               parentId: channel.parentId ?? undefined,
-              label: `#${channel.name} (${guild.name})`,
+              label: formatChannelLabel(channel.name, guild.name),
             },
           });
         }
@@ -1564,7 +1567,7 @@ export class DiscordAdapter {
           name: channel.name,
           type: 'text',
           parentId: channel.parentId ?? undefined,
-          label: `#${channel.name} (${guild.name})`,
+          label: formatChannelLabel(channel.name, guild.name),
         });
       }
     }
@@ -1639,10 +1642,20 @@ export class DiscordAdapter {
       if ('guildId' in channel && channel.guildId) {
         const parentId = 'parentId' in channel ? (channel.parentId ?? null) : null;
         if (!this.channelAllowed(channel.guildId, channel.id, parentId)) return;
+        // A label must be an ADDRESS. The previous fallback substituted the
+        // guild *id* for its name, producing `#foo (1234…)` — which parses as a
+        // guild-qualified ref, matches nothing (resolution compares against
+        // guild NAMES), and so can never resolve. On this path especially: it
+        // announces a brand-new channel, which is exactly when an agent is
+        // likeliest to paste the label straight back. Prefer the cache, and if
+        // the name is genuinely unavailable emit the bare `#name` form, which
+        // is a real (if possibly ambiguous) address rather than a broken one.
+        const guildName =
+          channel.guild?.name ?? this.client.guilds.cache.get(channel.guildId)?.name;
         this.channelCreateHandler?.(channel.guildId, {
           id: channel.id,
           name: channel.name,
-          label: `#${channel.name} (${channel.guild?.name ?? channel.guildId})`,
+          label: guildName ? formatChannelLabel(channel.name, guildName) : `#${channel.name}`,
           type: mapChannelType(channel.type),
           parentId: 'parentId' in channel ? (channel.parentId ?? undefined) : undefined,
         });
@@ -1720,7 +1733,7 @@ export class DiscordAdapter {
       this.channelAvailableHandler?.(guild.id, {
         id: newChannel.id,
         name: newChannel.name,
-        label: `#${newChannel.name} (${guild.name})`,
+        label: formatChannelLabel(newChannel.name, guild.name),
         type: 'text',
         parentId: newChannel.parentId ?? undefined,
       });
@@ -1866,6 +1879,7 @@ export class DiscordAdapter {
       // explicitly enabled the reply-ping). We capture it so reply-to-bot
       // can be treated as direct address regardless of the ping toggle.
       replyToUserId: message.mentions.repliedUser?.id ?? null,
+      replyToUserName: message.mentions.repliedUser?.username ?? null,
       mentions: message.mentions.users.map((u) => u.id),
       mentionsBotRole: message.mentions.roles.some(
         (r) => (r as { tags?: { botId?: string } }).tags?.botId === this.client.user?.id,
@@ -1959,14 +1973,28 @@ export function mapAllAttachments(m: {
   return out;
 }
 
-function mapChannelType(type: number | undefined): DiscordChannelInfo['type'] {
+/**
+ * Discord channel type number -> the kind we expose.
+ *
+ * Name resolution keys off this (see SENDABLE in channel-names.ts), so an
+ * unclassified type is not cosmetic: it silently drops out of name addressing.
+ * GuildAnnouncement (5) did exactly that — an ordinary sendable text channel
+ * that fell to 'unknown' and so could not be reached as `#announcements`, while
+ * `list_channels` happily printed a pasteable label for it.
+ */
+export function mapChannelType(type: number | undefined): DiscordChannelInfo['type'] {
   switch (type) {
     case 0: return 'text';
     case 2: return 'voice';
     case 4: return 'category';
+    // 5 = GuildAnnouncement ("news"). A normal message channel that can also
+    // crosspost — sendable, and commonly named #announcements / #updates.
+    case 5: return 'announcement';
+    case 10: // AnnouncementThread — a thread, whatever its parent is.
     case 11:
     case 12: return 'thread';
     case 15: return 'forum';
+    // 13 (stage) and 16 (media) land here on purpose: not sendable, id-only.
     default: return 'unknown';
   }
 }

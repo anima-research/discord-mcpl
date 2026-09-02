@@ -117,6 +117,7 @@ class MockDiscordAdapter {
   historyToReturn: Array<{
     id: string; authorId: string; authorName: string; isBot: boolean;
     content: string; cleanContent: string; attachments: never[]; mentionsBot: boolean; timestamp: Date;
+    reactions?: Array<{ emoji: string; emojiId: string | null; token: string; count: number; me: boolean }>;
   }> = [];
   channelMeta = { name: 'general', guildId: 'g1', guildName: 'Test Guild', isDM: false };
 
@@ -498,6 +499,9 @@ describe('DiscordMcplServer', () => {
       guildId: 'g1',
       guildName: 'Test Server',
       mentions: ['bot_123'],
+      replyToId: 'parent-closed-42',
+      replyToUserId: 'u_fable',
+      replyToUserName: 'Fable',
       attachments: [],
       timestamp: new Date(),
     });
@@ -512,6 +516,11 @@ describe('DiscordMcplServer', () => {
       assert.ok(p.payload.content[0].type === 'text');
       const rendered = (p.payload.content[0] as { text?: string }).text ?? '';
       assert.ok(!rendered.includes('<backscroll'), 'a closed-channel mention must not auto-fetch history');
+      assert.ok(rendered.includes('[replying to @Fable]'));
+      const origin = p.origin as Record<string, unknown>;
+      assert.equal(origin.replyTo, 'parent-closed-42');
+      assert.equal(origin.replyToAuthorId, 'u_fable');
+      assert.equal(origin.replyToAuthorName, 'Fable');
       client.sendResponse(pushMsg.request.id, { accepted: true });
     }
 
@@ -587,6 +596,53 @@ describe('DiscordMcplServer', () => {
     await serverPromise;
   });
 
+  it('first-DM backscroll lines carry current reaction state (issue #31)', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    // One earlier message in the DM, with a live reaction on it.
+    discord.historyToReturn = [
+      {
+        id: 'old1', authorId: 'u_bob', authorName: 'Bob', isBot: false,
+        content: 'earlier note', cleanContent: 'earlier note', attachments: [],
+        mentionsBot: false, timestamp: new Date(1700000000000),
+        reactions: [{ emoji: '😀', emojiId: null, token: '😀', count: 3, me: false }],
+      },
+    ];
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    discord.simulateMessage({
+      id: 'dmmsg2', content: 'hi again', cleanContent: 'hi again',
+      authorId: 'u_bob', authorName: 'Bob', isBot: false,
+      channelId: 'dmchan2', channelName: undefined, guildId: null, guildName: undefined,
+      mentions: [], attachments: [], timestamp: new Date(),
+    } as unknown as DiscordMessageData);
+
+    const changed = await client.nextMessage();
+    assert.equal(changed.type, 'notification');
+
+    const pushMsg = await client.nextMessage();
+    assert.equal(pushMsg.type, 'request');
+    if (pushMsg.type === 'request') {
+      const p = pushMsg.request.params as PushEventParams;
+      const text = (p.payload.content[0] as { text?: string }).text ?? '';
+      assert.ok(text.includes('<backscroll'), 'first DM renders backscroll');
+      const line = text.split('\n').find((l) => l.includes('earlier note'));
+      assert.ok(line?.includes('[reactions: 😀 x3]'), `backscroll line shows current reaction state: ${line}`);
+      // The triggering message itself has no fetched reaction state and no
+      // suffix — absence must honestly mean "none", not "unknown".
+      const trigger = text.split('\n').find((l) => l.includes('hi again'));
+      assert.ok(trigger && !trigger.includes('[reactions:'), 'no suffix on the live triggering message');
+      client.sendResponse(pushMsg.request.id, { accepted: true });
+    }
+
+    client.close();
+    await serverPromise;
+  });
+
   it('channels/incoming from Discord message (open channel)', async () => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
@@ -633,6 +689,46 @@ describe('DiscordMcplServer', () => {
       assert.equal(p.messages.length, 1);
       assert.equal(p.messages[0].author.name, 'Bob');
       client.sendResponse(inMsg.request.id, { results: [{ messageId: 'dm2', accepted: true }] });
+    }
+
+    client.close();
+    await serverPromise;
+  });
+
+  it('renders reply target visibly and carries standard metadata on open channels', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    await client.sendRequest(method.CHANNELS_OPEN, {
+      type: 'discord',
+      address: { guildId: 'g1', channelId: 'c1' },
+    });
+
+    discord.simulateMessage({
+      id: 'reply1', content: 'go ahead', cleanContent: 'go ahead',
+      authorId: 'u_antra', authorName: 'Antra', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+      replyToId: 'parent42', replyToUserId: 'u_fable', replyToUserName: 'Fable',
+      mentions: [], attachments: [], timestamp: new Date(),
+    });
+
+    const incoming = await client.nextMessage();
+    assert.equal(incoming.type, 'request');
+    if (incoming.type === 'request') {
+      const p = incoming.request.params as ChannelsIncomingParams;
+      const msg = p.messages[0];
+      const text = (msg.content[0] as { text?: string }).text ?? '';
+      assert.ok(text.includes('[replying to @Fable]'));
+      assert.ok(text.includes('Antra: go ahead'));
+      const metadata = (msg.metadata ?? {}) as Record<string, unknown>;
+      assert.equal(metadata.replyTo, 'parent42');
+      assert.equal(metadata.replyToAuthorId, 'u_fable');
+      assert.equal(metadata.replyToAuthorName, 'Fable');
+      client.sendResponse(incoming.request.id, { results: [{ messageId: 'reply1', accepted: true }] });
     }
 
     client.close();
@@ -832,8 +928,11 @@ describe('DiscordMcplServer', () => {
       // should be delivered, while the mention count remains one.
       const t = new Date();
       discord.historyToReturn = [
-        { id: '101', authorId: 'u1', authorName: 'Alice', isBot: false, content: 'just chatting', cleanContent: 'just chatting', attachments: [], mentionsBot: false, timestamp: t },
-        { id: '102', authorId: 'u2', authorName: 'Bob', isBot: false, content: '<@bot_123> ping', cleanContent: '@bot ping', attachments: [], mentionsBot: true, timestamp: t },
+        { id: '101', authorId: 'u1', authorName: 'Alice', isBot: false, content: 'just chatting', cleanContent: 'just chatting', attachments: [], mentionsBot: false, timestamp: t, reactions: [] },
+        { id: '102', authorId: 'u2', authorName: 'Bob', isBot: false, content: '<@bot_123> ping', cleanContent: '@bot ping', attachments: [], mentionsBot: true, timestamp: t, reactions: [
+          { emoji: '👍', emojiId: null, token: '👍', count: 2, me: true },
+          { emoji: ':blob:', emojiId: '333444555666777888', token: '<:blob:333444555666777888>', count: 1, me: false },
+        ] },
       ];
       const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
       const serverPromise = server.serve(serverConn);
@@ -861,6 +960,11 @@ describe('DiscordMcplServer', () => {
         assert.ok(text.includes('reason="mention"'));
         assert.ok(text.includes('Bob'), 'mention author present');
         assert.ok(text.includes('just chatting'), 'nearby non-mention context included');
+        // Current NET reaction state rides along on missed lines (issue #31):
+        // aggregate + count (+ bot-self), never an add/remove event replay.
+        assert.ok(text.includes('[reactions: 👍 x2 (incl. me), :blob: x1]'), 'current reaction state on the mention line');
+        const contextLine = text.split('\n').find((l) => l.includes('just chatting'));
+        assert.ok(contextLine && !contextLine.includes('[reactions:'), 'no suffix on a reaction-less message — absence means none');
         client.sendResponse(missed.request.id, {});
       }
 
@@ -923,6 +1027,29 @@ describe('DiscordMcplServer', () => {
     assert.equal(missed.channelName, 'general');
     assert.equal(missed.guildName, 'Test Guild');
     assert.equal(missed.metadataResolved, true);
+
+    // A mention while closed+tracked: the push/event origin must carry the
+    // tally, so the host's closed-channel invitation can show the agent what
+    // staying out has cost (2026-08-05 — informed reply-without-joining).
+    discord.simulateMessage({
+      id: 'm101', content: '<@bot_123> you there?', cleanContent: '@bot you there?',
+      authorId: 'u1', authorName: 'Alice', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+      mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+    } as DiscordMessageData);
+    const mentionPush = await client.nextMessage();
+    assert.equal(mentionPush.type, 'request');
+    if (mentionPush.type === 'request') {
+      assert.equal(mentionPush.request.method, 'push/event');
+      const p = mentionPush.request.params as PushEventParams;
+      const origin = p.origin as Record<string, unknown>;
+      assert.equal(origin.missedMessages, 1);
+      assert.equal(origin.missedCharacters, 'hello world'.length);
+      client.sendResponse(mentionPush.request.id, { accepted: true });
+    }
+    // The mention itself is delivered, never "missed" — tally unchanged.
+    const still = await call('channel_missed', { channelId: 'c1' });
+    assert.equal(still.missedMessages, 1);
 
     // Reopening clears the tally.
     await client.sendRequest('channels/open', {

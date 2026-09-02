@@ -59,12 +59,29 @@ export interface ChannelCandidate {
   /** Needed for tie-breaking: a stock Discord server ships a VOICE channel
    *  named "General" beside text #general, and matching is case-insensitive,
    *  so a name collision across types is the DEFAULT state, not an edge case. */
-  type: 'text' | 'voice' | 'forum' | 'unknown';
+  type: 'text' | 'announcement' | 'voice' | 'forum' | 'unknown';
 }
 
-/** `#name (GuildName)` — the same string `toDescriptor` produces. */
+/**
+ * THE canonical `#name (GuildName)` formatter. Display form == address form is
+ * the load-bearing claim of this whole module: the string a listing prints must
+ * be the string a send accepts. That invariant cannot survive being reimplemented
+ * per call site — a divergence anywhere silently makes labels unpasteable, and no
+ * test would catch it because each side would agree with itself. So every
+ * producer of this string (toDescriptor, the adapter's listing and event paths)
+ * routes through here.
+ *
+ * Takes the two fields rather than a ChannelCandidate so callers holding a
+ * discord.js channel, a DiscordChannelInfo, or nothing but two strings can all
+ * use it.
+ */
+export function formatChannelLabel(name: string, guildName: string): string {
+  return `#${name} (${guildName})`;
+}
+
+/** `#name (GuildName)` for a resolver candidate. */
 export function channelLabel(c: ChannelCandidate): string {
-  return `#${c.name} (${c.guildName})`;
+  return formatChannelLabel(c.name, c.guildName);
 }
 
 export type ChannelRef =
@@ -166,8 +183,12 @@ export function resolveChannelName(
   // sitting beside #general the text channel is the stock Discord layout, so
   // without this the most ordinary server on earth is unaddressable by name.
   // Only applied when it fully disambiguates; two text channels still collide.
+  //
+  // Announcement channels count as text here: they are ordinary message
+  // channels that happen to support crossposting, so `#announcements` beside a
+  // voice channel of the same name should tie-break exactly as text would.
   if (matches.length > 1) {
-    const sendable = matches.filter((c) => c.type === 'text');
+    const sendable = matches.filter((c) => TEXTLIKE.has(c.type));
     if (sendable.length === 1) matches = sendable;
   }
 
@@ -252,11 +273,32 @@ export interface GuildLike {
   channels: Iterable<ChannelLike | null | undefined>;
 }
 
+/** Ordinary message channels. Separate from SENDABLE because these are also
+ *  what the ambiguity tie-break prefers over a same-named voice channel. */
+const TEXTLIKE: ReadonlySet<string> = new Set(['text', 'announcement']);
+
 /** Channel kinds that can actually receive a message. Everything else stays
- *  addressable by id: categories and forum roots are not sendable, thread names
- *  are not unique even within one channel, and 'unknown' is where stage (13)
- *  and media (16) land. */
-const SENDABLE: ReadonlySet<string> = new Set(['text', 'voice']);
+ *  addressable by id: categories and forum roots are not sendable, and thread
+ *  names are not unique even within one channel.
+ *
+ *  This is an ALLOWLIST OF NAMED KINDS, deliberately not "everything except the
+ *  few we exclude". It used to admit `'unknown'`, which was wrong in one
+ *  direction (stage/media are not sendable); excluding `'unknown'` wholesale was
+ *  then wrong in the other, because GuildAnnouncement (5) also landed in that
+ *  bucket and `#announcements` is about as common a channel name as exists. An
+ *  overloaded catch-all cannot be right either way — so kinds are named, and a
+ *  new Discord channel type defaults to id-only addressing until someone
+ *  deliberately classifies it. Failing closed here costs a bounce; failing open
+ *  costs a send to something that cannot receive it. */
+const SENDABLE: ReadonlySet<string> = new Set([...TEXTLIKE, 'voice']);
+
+/** Whether a channel kind can be addressed by NAME. Exported so the mapping
+ *  from Discord's type numbers to addressability is testable end to end —
+ *  the announcement regression lived in that mapping, not in the matcher, and
+ *  a test over a locally-reimplemented mapType would not have caught it. */
+export function isNameAddressableKind(kind: string): boolean {
+  return SENDABLE.has(kind);
+}
 
 export function buildCandidates(
   guilds: Iterable<GuildLike>,
