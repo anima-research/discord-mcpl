@@ -396,7 +396,6 @@ export class DiscordMcplServer {
   private channelManager = new ChannelManager();
   private stateTracker = new StateTracker();
   /** Buffers for channels/outgoing/chunk streams, keyed by inferenceId */
-  private outgoingBuffers = new Map<string, { channelId: string; chunks: string[] }>();
 
   constructor(
     private discord: DiscordAdapter,
@@ -1203,7 +1202,6 @@ export class DiscordMcplServer {
         // signal. It was dormant only because the 0.4 boolean `channels`
         // capability made `channels.streaming` undeclarable. Issue #14.
         const p = notif.params as ChannelsOutgoingCompleteParams;
-        this.outgoingBuffers.delete(p.inferenceId);
         dbg('outgoing/complete:finalized', { inferenceId: p.inferenceId, channelId: p.channelId });
         this.voice?.handleComplete(p.inferenceId);
         break;

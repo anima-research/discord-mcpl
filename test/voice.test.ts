@@ -263,6 +263,15 @@ test('billedChars receipt: cleared-then-interrupted bills exactly the flushed te
   assert.ok(reports[0]!.queuedMs >= 0);
 });
 
+test('socket pre-open is capped: deep-queue items open at clearance instead', () => {
+  const { provider, sink, out } = setup();
+  for (let i = 0; i < 5; i++) out.handleChunk('inf' + i, 'discord:g:100', 'text ' + i);
+  assert.equal(provider.streams.length, 3); // PRE_OPEN_MAX sockets, not 5
+  sink.clear('inf4');                       // deep item clears → opens now
+  assert.equal(provider.streams.length, 4);
+  assert.deepEqual(provider.streams[3]!.sent, ['text 4']);
+});
+
 test('socket died while queued: flush reopens a fresh stream and resends the bank', () => {
   const { provider, sink, out } = setup();
   out.handleChunk('inf1', 'discord:g:100', 'resent ');

@@ -97,12 +97,18 @@ async function main(): Promise<void> {
 
   // Voice output (optional): DISCORD_VOICE_CHANNEL_ID gates the whole leg.
   // Built BEFORE the server so the initialize handshake can declare
-  // channels.streaming. Failures degrade to text-only, never fatal.
-  const { voiceEnv, createVoiceOutput } = await import('./voice.js');
+  // channels.streaming. Failures degrade to text-only, never fatal — which
+  // is why ./voice.js is imported only AFTER the env check and inside the
+  // try: it pulls @animalabs/voice-kit at top level, and a box that never
+  // configured voice must not hard-require that package to boot (fleet
+  // deploys are pull + tsc; ../voice-kit may simply not exist there).
+  // voice-env.js is dependency-free by contract.
+  const { voiceEnv } = await import('./voice-env.js');
   let voice = null as import('./voice.js').VoiceOutput | null;
   const vEnv = voiceEnv();
   if (vEnv) {
     try {
+      const { createVoiceOutput } = await import('./voice.js');
       voice = await createVoiceOutput(vEnv, discord.rawClient);
     } catch (err) {
       console.error('[discord-mcpl] voice setup failed:', (err as Error).message, '— continuing text-only');

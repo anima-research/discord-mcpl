@@ -57,20 +57,12 @@ import {
   type TtsVoice,
 } from '@animalabs/voice-kit';
 import { parseMcplChannelId } from './channels.js';
+import { VAD_THRESHOLD_DB, type VoiceEnv } from './voice-env.js';
 
 // Physics constants (floor-control.md: seed-tunable within safe bounds).
 const HOLDOFF_MIN_MS = 150;
 const HOLDOFF_MAX_MS = 500;
 const COLLISION_WINDOW_MS = 250;
-/** Default voiced threshold for the energy VAD (dBFS). Live finding: a
- *  client with noise suppression off transmits CONTINUOUSLY — packet
- *  presence reads as "speaking" forever, muting the agent and
- *  false-triggering barge-in on unmute. So the carrier is defined by
- *  acoustic ENERGY, not packet presence: the sink decodes each speaker
- *  just enough to measure loudness (RMS → discarded immediately; no STT,
- *  no content — the sink stays meaning-deaf, it stops being energy-deaf).
- *  Override per deployment with DISCORD_VOICE_VAD_DB. */
-const VAD_THRESHOLD_DB = -45;
 /** Human speech must be SUSTAINED this long before it counts as barge-in.
  *  A single packet burst is not speech: Discord clients emit ~100 ms blips
  *  on unmute (mic pop) and on VAD false-triggers (keyboard, cough), and
@@ -84,6 +76,12 @@ const BARGE_IN_SUSTAIN_MS = 250;
 /** Played-vs-synthesized slack under which a completed utterance counts as
  *  fully voiced (avoids alignment-jitter noise in the common happy path). */
 const FULLY_PLAYED_SLACK_MS = 250;
+/** Provider sockets pre-opened at once. Sockets are billing-free but not
+ *  limit-free (providers cap concurrent connections); a deep queue would
+ *  hold one idle socket per waiting utterance. Deeper items open at
+ *  clearance instead — their connection latency hides inside a queue wait
+ *  that is already long (#28 review, nonblocking 1). */
+const PRE_OPEN_MAX = 3;
 
 export interface VoiceOutputConfig {
   /** Raw text-channel snowflakes whose streamed prose is voiced. Null = all. */
@@ -365,9 +363,11 @@ export class VoiceOutput {
       aChars: [], aStartMs: [], aDurMs: [], audioMs: 0, done: false,
     };
     // Pre-open the provider socket (free — only characters bill) so that at
-    // clearance we pay synthesis latency, not connection latency. Failure is
-    // not fatal here: handleCleared retries once before going text-only.
-    this.openProviderStream(utt);
+    // clearance we pay synthesis latency, not connection latency. Capped:
+    // past PRE_OPEN_MAX concurrent utterances the socket opens at clearance
+    // via the same path that revives a dead one. Failure is not fatal here:
+    // handleCleared retries once before going text-only.
+    if (this.active.size < PRE_OPEN_MAX) this.openProviderStream(utt);
     // Queue for playback immediately. The sink's 'cleared' event — after
     // carrier-clear + hold-off, right before play — is what flushes banked
     // text into synthesis.
@@ -543,49 +543,6 @@ export class VoiceOutput {
 
 // ── Discord sink + env wiring ────────────────────────────────────────────────
 
-export interface VoiceEnv {
-  guildId: string;
-  voiceChannelId: string;
-  registryPath: string;
-  voiceName: string;
-  textChannels: string[] | null;
-  elevenKey: string;
-  /** Voiced threshold (dBFS) for the carrier VAD; default -45. */
-  vadThresholdDb: number;
-  /** Max queue wait before an utterance is dropped unspoken with an
-   *  'expired' receipt (DISCORD_VOICE_MAX_HOLD_MS). Null = wait forever. */
-  maxHoldMs: number | null;
-}
-
-/** Read voice config from env; null = voice not configured (the common case). */
-export function voiceEnv(): VoiceEnv | null {
-  const voiceChannelId = process.env.DISCORD_VOICE_CHANNEL_ID;
-  if (!voiceChannelId) return null;
-  const guildId = process.env.DISCORD_VOICE_GUILD_ID;
-  const registryPath = process.env.DISCORD_VOICE_REGISTRY_FILE;
-  const voiceName = process.env.DISCORD_VOICE_NAME;
-  const elevenKey = process.env.ELEVENLABS_API_KEY;
-  const missing = [
-    !guildId && 'DISCORD_VOICE_GUILD_ID',
-    !registryPath && 'DISCORD_VOICE_REGISTRY_FILE',
-    !voiceName && 'DISCORD_VOICE_NAME',
-    !elevenKey && 'ELEVENLABS_API_KEY',
-  ].filter(Boolean);
-  if (missing.length) {
-    console.error(`[discord-mcpl voice] DISCORD_VOICE_CHANNEL_ID set but missing: ${missing.join(', ')} — voice disabled`);
-    return null;
-  }
-  const channels = (process.env.DISCORD_VOICE_TEXT_CHANNELS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  const vadDb = Number(process.env.DISCORD_VOICE_VAD_DB);
-  const maxHold = Number(process.env.DISCORD_VOICE_MAX_HOLD_MS);
-  return {
-    guildId: guildId!, voiceChannelId, registryPath: registryPath!, voiceName: voiceName!,
-    textChannels: channels.length ? channels : null, elevenKey: elevenKey!,
-    vadThresholdDb: Number.isFinite(vadDb) ? vadDb : VAD_THRESHOLD_DB,
-    maxHoldMs: Number.isFinite(maxHold) && maxHold > 0 ? maxHold : null,
-  };
-}
-
 /** Build a VoiceOutput from env + a discord.js client. Throws on bad registry
  *  or missing voice; caller treats voice as optional and logs. */
 export async function createVoiceOutput(env: VoiceEnv, client: unknown): Promise<VoiceOutput> {
@@ -657,6 +614,9 @@ export class DiscordVoiceSink implements PcmSink {
       // loudness — RMS per 20 ms frame, discarded immediately. No STT, no
       // content, nothing stored or forwarded: meaning-deaf, not
       // energy-deaf. (Hearing-as-listening is portal-relay's job.)
+      // Consequence: the Discord UI shows this bot as listening
+      // (undeafened) — which is honest, it does receive audio; anyone
+      // auditing what it retains should be pointed at this comment.
       selfDeaf: false,
     });
     await entersState(conn, VoiceConnectionStatus.Ready, 15_000);
@@ -784,7 +744,12 @@ export class DiscordVoiceSink implements PcmSink {
       while (this.queue.length) {
         // Carrier-sense: emit only into hold-off-verified silence.
         await this.gate.waitClear();
-        const item = this.queue.shift()!;
+        // The queue can empty DURING the wait (max-hold expiry cancelling
+        // every queued item while a human talks past the hold) — an
+        // unguarded shift here was an unhandled rejection that took the
+        // whole child down (#28 review, blocker 2).
+        const item = this.queue.shift();
+        if (!item) break;
         // Billing gate: VoiceOutput flushes banked text into synthesis on
         // this event — audio starts flowing into item.stream from here.
         this.emit({ type: 'cleared', id: item.id });
