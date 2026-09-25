@@ -356,6 +356,55 @@ export function buildForwardedContent(
  *  so neither forwards nor system messages can regress to empty on
  *  backscroll or the reconnect catch-up sweep — history replays missed
  *  messages through fetchHistory, not the live path. */
+/** Author/location context forwarded with an edit or delete event. */
+export interface MessageEventInfo {
+  /** Guild id, or null for a DM. */
+  guildId: string | null;
+  authorId?: string;
+  /** Discord username — the same handle the create path renders. */
+  authorName?: string;
+}
+
+/** Why an incoming `messageUpdate` is (not) forwarded as an edit. */
+export type EditForwardDecision =
+  | 'forward'
+  | 'no-content'
+  | 'self'
+  | 'not-an-edit'
+  | 'unchanged'
+  | 'dm-not-allowed';
+
+/**
+ * Decide whether a discord.js `messageUpdate` is a real content edit worth
+ * forwarding. Discord emits MESSAGE_UPDATE for more than edits: link-preview /
+ * embed refreshes re-send old messages with `edited_timestamp` still null, and
+ * forwarding those surfaced weeks-old, never-edited messages to the agent as
+ * fresh "[message edited]" events. A DM whose author can't be identified is
+ * dropped when a DM whitelist is set — fail closed, as creates already are.
+ */
+export function editForwardDecision(
+  oldMsg: { partial?: boolean; content?: string | null } | null | undefined,
+  newMsg: {
+    content?: string | null;
+    editedTimestamp?: number | null;
+    guildId?: string | null;
+    author?: { id: string } | null;
+  },
+  opts: { selfId?: string | null; dmUsers?: ReadonlySet<string> },
+): EditForwardDecision {
+  if (!newMsg.content) return 'no-content';
+  // Our own edits (e.g. deferred slash-command replies arrive as edits).
+  if (opts.selfId && newMsg.author?.id === opts.selfId) return 'self';
+  if (!newMsg.editedTimestamp) return 'not-an-edit';
+  if (oldMsg && !oldMsg.partial && typeof oldMsg.content === 'string' && oldMsg.content === newMsg.content) {
+    return 'unchanged';
+  }
+  if (!newMsg.guildId && opts.dmUsers && (!newMsg.author || !opts.dmUsers.has(newMsg.author.id))) {
+    return 'dm-not-allowed';
+  }
+  return 'forward';
+}
+
 export function resolveVisibleContent(m: {
   content: string;
   cleanContent?: string | null;
@@ -451,8 +500,10 @@ export class DiscordAdapter {
   private guildCommandDefs?: ApplicationCommandDataResolvable[];
 
   private messageHandler?: (msg: DiscordMessageData) => void;
-  private editHandler?: (channelId: string, messageId: string, newContent: string, isDM: boolean) => void;
-  private deleteHandler?: (channelId: string, messageId: string, isDM: boolean) => void;
+  private editHandler?: (
+    channelId: string, messageId: string, newContent: string, isDM: boolean, info?: MessageEventInfo,
+  ) => void;
+  private deleteHandler?: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void;
   private reactionHandler?: (ev: ReactionEvent) => void;
   private readyHandler?: () => void;
   private channelCreateHandler?: (guildId: string, channel: DiscordChannelInfo) => void;
@@ -538,11 +589,13 @@ export class DiscordAdapter {
     this.messageHandler = handler;
   }
 
-  onMessageEdit(handler: (channelId: string, messageId: string, newContent: string, isDM: boolean) => void): void {
+  onMessageEdit(
+    handler: (channelId: string, messageId: string, newContent: string, isDM: boolean, info?: MessageEventInfo) => void,
+  ): void {
     this.editHandler = handler;
   }
 
-  onMessageDelete(handler: (channelId: string, messageId: string, isDM: boolean) => void): void {
+  onMessageDelete(handler: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void): void {
     this.deleteHandler = handler;
   }
 
@@ -1605,20 +1658,27 @@ export class DiscordAdapter {
       }
     });
 
-    this.client.on('messageUpdate', (_old, newMsg) => {
-      if (!newMsg.content) return;
-      // Skip our own edits (e.g. deferred slash-command replies arrive as
-      // edits) — mirrors the self-author check in shouldHandle.
-      if (newMsg.author?.id === this.client.user?.id) return;
+    this.client.on('messageUpdate', (oldMsg, newMsg) => {
+      const decision = editForwardDecision(oldMsg, newMsg, {
+        selfId: this.client.user?.id,
+        dmUsers: this.dmUsers,
+      });
+      if (decision !== 'forward') {
+        if (decision !== 'no-content' && decision !== 'self') {
+          dbg('messageUpdate:drop', { msgId: newMsg.id, channelId: newMsg.channelId, reason: decision });
+        }
+        return;
+      }
       const editParent =
         newMsg.channel && 'parentId' in newMsg.channel
           ? ((newMsg.channel as { parentId?: string | null }).parentId ?? null)
           : null;
       if (!this.channelAllowed(newMsg.guildId, newMsg.channelId, editParent)) return;
-      if (!newMsg.guildId && this.dmUsers && newMsg.author && !this.dmUsers.has(newMsg.author.id)) {
-        return;
-      }
-      this.editHandler?.(newMsg.channelId, newMsg.id, newMsg.content, !newMsg.guildId);
+      this.editHandler?.(newMsg.channelId, newMsg.id, newMsg.content!, !newMsg.guildId, {
+        guildId: newMsg.guildId ?? null,
+        authorId: newMsg.author?.id,
+        authorName: newMsg.author?.username,
+      });
     });
 
     this.client.on('messageDelete', (message) => {
@@ -1627,7 +1687,11 @@ export class DiscordAdapter {
           ? ((message.channel as { parentId?: string | null }).parentId ?? null)
           : null;
       if (!this.channelAllowed(message.guildId, message.channelId, delParent)) return;
-      this.deleteHandler?.(message.channelId, message.id, !message.guildId);
+      this.deleteHandler?.(message.channelId, message.id, !message.guildId, {
+        guildId: message.guildId ?? null,
+        authorId: message.author?.id,
+        authorName: message.author?.username,
+      });
     });
 
     this.client.on('messageReactionAdd', (reaction, user) => {
