@@ -27,6 +27,7 @@ import {
   type ChatInputCommandInteraction,
   type ApplicationCommandDataResolvable,
 } from 'discord.js';
+import { lateMarker, nonceFor, snowflakeAt, stripLateMarker, type DelayReason } from './late-delivery.js';
 import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { dbg } from './debug-log.js';
@@ -314,6 +315,75 @@ interface ForwardSnapshot {
   content?: string | null;
   attachments?: { size: number; values?(): IterableIterator<unknown> } | null;
   embeds?: { length: number } | null;
+}
+
+/** How long one sendMessage may take before reporting a partial send. Kept
+ *  under the host's 60 s MCPL request timeout so the report reaches the agent. */
+export const SEND_DEADLINE_MS = 45_000;
+
+/** Resolve with the promise's value, or null if the deadline passes first. */
+async function raceDeadline<T>(promise: Promise<T>, deadline: number): Promise<T | null> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), remaining); });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Errors that mean a request never reached Discord — no TCP/TLS connection,
+ *  or no DNS answer — so resending it cannot post a duplicate. */
+export function isPreConnectError(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string }; message?: string } | null;
+  const codes = new Set([
+    'UND_ERR_CONNECT_TIMEOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH',
+  ]);
+  if ((e?.code && codes.has(e.code)) || (e?.cause?.code && codes.has(e.cause.code))) return true;
+  return /Connect Timeout Error|getaddrinfo (ENOTFOUND|EAI_AGAIN)|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH/
+    .test(String(e?.message ?? ''));
+}
+
+/** A multi-part send that ran out of time partway. The message says exactly
+ *  what reached Discord — and quotes where each part starts and ends, since
+ *  the agent can't see where its text was split — so it can send only the
+ *  remainder instead of duplicating what already posted. */
+export class PartialSendError extends Error {
+  readonly unsentText: string;
+  constructor(
+    readonly sentIds: string[],
+    chunks: string[],
+    readonly stalledIndex: number,
+  ) {
+    const total = chunks.length;
+    const q = (t: string) => JSON.stringify(t.replace(/\s+/g, ' ').trim());
+    const head = (t: string) => q(t.slice(0, 60)) + (t.length > 60 ? '…' : '');
+    const tail = (t: string) => (t.length > 60 ? '…' : '') + q(t.slice(-60));
+    const lines = ['Send partially completed — Discord was too slow to finish.'];
+    if (sentIds.length) {
+      const range = sentIds.length === 1 ? 'part 1' : `parts 1-${sentIds.length}`;
+      lines.push(
+        `POSTED: ${range} of ${total} (message id${sentIds.length === 1 ? '' : 's'} ${sentIds.join(', ')}), ` +
+          `ending with ${tail(chunks[sentIds.length - 1])}.`,
+      );
+    } else {
+      lines.push('POSTED: nothing.');
+    }
+    lines.push(
+      `IN FLIGHT: part ${stalledIndex + 1} of ${total}, starting ${head(chunks[stalledIndex])} — ` +
+        'it may still appear; check the channel before resending it.',
+    );
+    const unsent = chunks.slice(stalledIndex + 1);
+    if (unsent.length) {
+      lines.push(`NOT SENT: the remaining ${unsent.length} part${unsent.length === 1 ? '' : 's'}, starting ${head(unsent[0])}.`);
+    }
+    lines.push('Do not resend what was posted.');
+    super(lines.join('\n'));
+    this.name = 'PartialSendError';
+    this.unsentText = unsent.join('\n');
+  }
 }
 
 /** Render a forwarded message's snapshots into visible text. Discord forwards
@@ -692,8 +762,23 @@ export class DiscordAdapter {
   async sendMessage(
     channelId: string,
     content: string,
-    options?: { replyTo?: string; files?: OutgoingFile[] },
-  ): Promise<{ messageId: string }> {
+    options?: {
+      replyTo?: string;
+      files?: OutgoingFile[];
+      deadlineMs?: number;
+      /** Host idempotencyKey: each part carries a derived nonce with
+       *  enforce_nonce, so Discord returns the original on a repeat. */
+      idempotencyKey?: string;
+      /** A retry after a possible restart: first look in the channel's
+       *  history (since this time) for parts this bot already posted, and
+       *  send only the rest. */
+      resumeSince?: number;
+      /** Prefix the first part with a late-delivery marker for this time. */
+      lateWrittenAt?: number;
+      /** Why it is late, for the marker. */
+      lateReason?: DelayReason;
+    },
+  ): Promise<{ messageId: string; messageIds: string[]; resumed: number }> {
     const channel = await this.client.channels.fetch(channelId);
     if (!channel || !('send' in channel)) {
       throw new Error(`Channel ${channelId} not found or not a text channel`);
@@ -703,18 +788,95 @@ export class DiscordAdapter {
     const chunks = this.splitForDiscord(resolved);
     // Files-only message (no text): still send one message carrying the files.
     if (chunks.length === 0 && attachments.length > 0) chunks.push('');
-    let lastId = '';
-    for (let i = 0; i < chunks.length; i++) {
+    const key = options?.idempotencyKey;
+    // Parts already in the channel from an earlier attempt of this same
+    // speech (split identically: the marker never changes where text splits).
+    const alreadyPosted = key && options?.resumeSince !== undefined && chunks.length > 0
+      ? await this.findPostedParts(channel as TextChannel | DMChannel, chunks, options.resumeSince)
+      : [];
+    if (alreadyPosted.length === chunks.length && chunks.length > 0) {
+      return { messageId: alreadyPosted[alreadyPosted.length - 1]!, messageIds: alreadyPosted, resumed: alreadyPosted.length };
+    }
+    // Stop waiting before the host's MCPL request timeout (60 s) fires, so a
+    // slow Discord API produces an honest partial report instead of a bare
+    // "timed out" that reads as "nothing was sent" and invites a duplicate.
+    const deadline = Date.now() + (options?.deadlineMs ?? SEND_DEADLINE_MS);
+    const sentIds: string[] = [...alreadyPosted];
+    for (let i = alreadyPosted.length; i < chunks.length; i++) {
       // Attach files to the LAST chunk so they render after the full text.
       const isLast = i === chunks.length - 1;
-      const sent = await (channel as TextChannel | DMChannel).send({
-        content: chunks[i] || undefined,
-        reply: i === 0 && options?.replyTo ? { messageReference: options.replyTo } : undefined,
-        files: isLast && attachments.length > 0 ? attachments : undefined,
-      });
-      lastId = sent.id;
+      // The marker rides on the first part only; splitting leaves 100 chars
+      // of headroom under Discord's 2000, so it always fits.
+      const body = i === 0 && options?.lateWrittenAt !== undefined
+        ? lateMarker(options.lateWrittenAt, options.lateReason) + chunks[i]
+        : chunks[i];
+      let sent: { id: string } | null = null;
+      for (let attempt = 0; ; attempt++) {
+        const send: Promise<{ id: string }> = (channel as TextChannel | DMChannel).send({
+          content: body || undefined,
+          reply: i === 0 && options?.replyTo ? { messageReference: options.replyTo } : undefined,
+          files: isLast && attachments.length > 0 ? attachments : undefined,
+          ...(key ? { nonce: nonceFor(key, i), enforceNonce: true } : {}),
+        });
+        try {
+          sent = await raceDeadline(send, deadline);
+        } catch (err) {
+          // Retry only failures that prove the request never reached Discord
+          // (no connection / no DNS answer): resending those cannot duplicate.
+          const wait = Math.min(2000 * 2 ** attempt, 8000);
+          if (isPreConnectError(err) && Date.now() + wait < deadline) {
+            console.error(
+              `[discord-mcpl] send part ${i + 1}/${chunks.length} could not reach Discord ` +
+                `(${(err as Error).message.slice(0, 120)}); retrying in ${wait / 1000}s`,
+            );
+            await new Promise((resolve) => setTimeout(resolve, wait));
+            continue;
+          }
+          if (sentIds.length > 0) throw new PartialSendError(sentIds, chunks, i);
+          throw err;
+        }
+        if (!sent) {
+          send.catch(() => {}); // still in flight; can't be cancelled
+          throw new PartialSendError(sentIds, chunks, i);
+        }
+        break;
+      }
+      sentIds.push(sent.id);
     }
-    return { messageId: lastId };
+    return { messageId: sentIds[sentIds.length - 1] ?? '', messageIds: sentIds, resumed: alreadyPosted.length };
+  }
+
+  /**
+   * The leading parts of `chunks` that this bot already posted in the
+   * channel since `sinceMs` (consecutive own messages, late marker ignored).
+   * Best effort: a history fetch failure returns [] and the nonces remain
+   * the guard.
+   */
+  private async findPostedParts(
+    channel: TextChannel | DMChannel,
+    chunks: string[],
+    sinceMs: number,
+  ): Promise<string[]> {
+    const botId = this.botUserId;
+    if (!botId) return [];
+    try {
+      const page = await channel.messages.fetch({ after: snowflakeAt(sinceMs - 60_000), limit: 100 });
+      const own = [...page.values()]
+        .filter((m) => m.author?.id === botId)
+        .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+      const start = own.findIndex((m) => stripLateMarker(m.content) === chunks[0]);
+      if (start < 0) return [];
+      const ids: string[] = [];
+      for (let i = 0; i < chunks.length && start + i < own.length; i++) {
+        const m = own[start + i]!;
+        if ((i === 0 ? stripLateMarker(m.content) : m.content) !== chunks[i]) break;
+        ids.push(m.id);
+      }
+      return ids;
+    } catch (err) {
+      console.error(`[discord-mcpl] history check before resend failed (${(err as Error).message}); relying on nonces`);
+      return [];
+    }
   }
 
   /** Resolve a DM recipient that may be a numeric user ID **or** a
