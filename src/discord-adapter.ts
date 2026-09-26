@@ -26,6 +26,8 @@ import {
   type User,
   type ChatInputCommandInteraction,
   type ApplicationCommandDataResolvable,
+  REST,
+  Routes,
 } from 'discord.js';
 import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
@@ -94,6 +96,11 @@ export interface DiscordAdapterConfig {
   /** DM user whitelist. When set, incoming DMs are only handled from these
    *  user ids; DMs from anyone else are dropped. Unset = all DMs allowed. */
   dmUsers?: string[];
+  /** Test seam: builds the discord.js client (default: the real one). */
+  clientFactory?: () => Client;
+  /** Test seam: resolves when Discord's gateway endpoint answers, throws
+   *  when it can't be reached (default: GET /gateway/bot). */
+  probeGateway?: () => Promise<void>;
 }
 
 /** A file attached to a Discord message (image, text file, etc.). */
@@ -437,6 +444,11 @@ export function applyMentionCandidates(
 
 export class DiscordAdapter {
   private client: Client;
+  private readonly clientFactory: () => Client;
+  private readonly probeGatewayFn: () => Promise<void>;
+  /** whenReady() callers. Owned here, not by a client, so they survive a
+   *  client replacement (see connectWithRetry). */
+  private readyWaiters: Array<() => void> = [];
 
   /** The underlying discord.js client, for subsystems needing gateway-adjacent
    *  state this facade doesn't wrap (voice adapters). */
@@ -455,6 +467,8 @@ export class DiscordAdapter {
   private deleteHandler?: (channelId: string, messageId: string, isDM: boolean) => void;
   private reactionHandler?: (ev: ReactionEvent) => void;
   private readyHandler?: () => void;
+  private sessionRestoredHandler?: () => void;
+  private sessionsStarted = 0;
   private channelCreateHandler?: (guildId: string, channel: DiscordChannelInfo) => void;
   private channelDeleteHandler?: (guildId: string, channelId: string) => void;
   private guildCreateHandler?: (
@@ -476,7 +490,7 @@ export class DiscordAdapter {
       this.dmUsers = new Set(config.dmUsers);
     }
 
-    this.client = new Client({
+    this.clientFactory = config.clientFactory ?? (() => new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
@@ -503,8 +517,9 @@ export class DiscordAdapter {
         GatewayIntentBits.GuildVoiceStates,
       ],
       partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
-    });
-
+    }));
+    this.probeGatewayFn = config.probeGateway ?? (() => this.defaultProbeGateway());
+    this.client = this.clientFactory();
     this.setupEvents();
   }
 
@@ -526,6 +541,73 @@ export class DiscordAdapter {
 
   get isConnected(): boolean {
     return this.client.isReady();
+  }
+
+  /** Log in, retrying with backoff until the gateway is READY. Never rejects:
+   *  an unreachable network (sleep, VPN, captive wifi) is a wait, not a crash.
+   *
+   *  discord.js destroys a client whose login() fails, and never clears that:
+   *  a later successful login on the same client receives messages but
+   *  reports isReady() false forever (every send then fails "not connected"),
+   *  won't reconnect after a later drop, and has its cache sweepers stopped
+   *  (2026-09-25 and 2026-09-26, connectors booted while DNS was down). So:
+   *  probe the gateway endpoint first, leaving the client untouched while the
+   *  network is down, and if a login fails anyway, replace the client. */
+  async connectWithRetry(opts: { initialDelayMs?: number; maxDelayMs?: number } = {}): Promise<void> {
+    let delay = opts.initialDelayMs ?? 5_000;
+    const maxDelay = opts.maxDelayMs ?? 60_000;
+    const wait = async () => {
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, maxDelay);
+    };
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.probeGatewayFn();
+      } catch (err) {
+        console.error(
+          `[discord-mcpl] Discord unreachable (attempt ${attempt}): ${(err as Error).message} — retrying in ${Math.round(delay / 1000)}s`,
+        );
+        await wait();
+        continue;
+      }
+      try {
+        await this.connect();
+        return;
+      } catch (err) {
+        console.error(
+          `[discord-mcpl] Discord login failed (attempt ${attempt}): ${(err as Error).message} — ` +
+            `starting a fresh client, retrying in ${Math.round(delay / 1000)}s`,
+        );
+        this.replaceClient();
+        await wait();
+      }
+    }
+  }
+
+  /** A failed login leaves the client destroyed for good: build a new one
+   *  with the same handlers. Callers holding `rawClient` from before keep the
+   *  old one (voice output takes it at startup), so this is the fallback;
+   *  the probe keeps it rare. */
+  private replaceClient(): void {
+    const old = this.client;
+    old.removeAllListeners();
+    void Promise.resolve(old.destroy()).catch(() => {});
+    this.client = this.clientFactory();
+    this.setupEvents();
+    dbg('gateway:client-replaced', {});
+  }
+
+  /** GET /gateway/bot with a standalone REST client, so a failure can't
+   *  touch the gateway client. Throws when Discord can't be reached. */
+  private async defaultProbeGateway(): Promise<void> {
+    const rest = new REST({ version: '10', retries: 0, timeout: 15_000 }).setToken(this.token);
+    await rest.get(Routes.gatewayBot());
+  }
+
+  /** Resolves once the gateway is READY (immediately if it already is). */
+  whenReady(): Promise<void> {
+    if (this.client.isReady()) return Promise.resolve();
+    return new Promise((resolve) => this.readyWaiters.push(resolve));
   }
 
   get botUserId(): string | null {
@@ -554,6 +636,13 @@ export class DiscordAdapter {
 
   onReady(handler: () => void): void {
     this.readyHandler = handler;
+  }
+
+  /** Called when the gateway starts a NEW session after the first one (a
+   *  RESUME was impossible, e.g. after sleep or a long network drop). Discord
+   *  does not replay events from the gap, so the caller should catch up. */
+  onSessionRestored(handler: () => void): void {
+    this.sessionRestoredHandler = handler;
   }
 
   /** Handler for slash-command (chat input) interactions. */
@@ -1669,6 +1758,9 @@ export class DiscordAdapter {
     });
 
     this.client.on('ready', () => {
+      const waiters = this.readyWaiters;
+      this.readyWaiters = [];
+      for (const w of waiters) w();
       this.readyHandler?.();
       // Eagerly warm the member cache for every guild we're in so
       // @name → <@id> resolution in outbound sends works for inactive
@@ -1755,6 +1847,11 @@ export class DiscordAdapter {
         status: this.client.ws.status,
         pingMs: this.client.ws.ping,
       });
+      // shardReady fires for every fresh session (a successful RESUME emits
+      // shardResume instead). Every session after the first means a gap whose
+      // events were never delivered.
+      this.sessionsStarted++;
+      if (this.sessionsStarted > 1) this.sessionRestoredHandler?.();
     });
 
     this.client.on('shardDisconnect', (event, shardId) => {
