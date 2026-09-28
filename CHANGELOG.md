@@ -123,3 +123,21 @@ in the git log and PR descriptions.
   Raising the cap intentionally restores the prior always-inline behavior.
   Images are unaffected: they inline as native image blocks under their own
   ceilings. (issue #30, PR #12)
+
+### Fixed
+
+- **Ghost "[message edited]" events.** Discord emits `messageUpdate` for more
+  than content edits: link-preview / embed refreshes re-send old messages with
+  `edited_timestamp` still null. Those reached the agent as fresh edits of
+  weeks-old, never-edited messages. Updates are now forwarded only when
+  `editedTimestamp` is set and the content actually changed (when the old
+  message is cached). Real edits are unaffected.
+- **Edits and deletes carry their author and location.** The push-event
+  origin now includes `guildId`, the composite `mcplChannelId`, `messageId`
+  and (when known) `authorId`/`authorName`, and an edit reads
+  `[message edited] <username>: <text>` like a create. Previously the host
+  reconstructed a guild channel's edit as `discord:dm:<channelId>` and the
+  agent could only guess who had edited.
+- **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
+  edit whose author is unknown (uncached message) was forwarded because the
+  check required an author; it is now dropped, like creates.
