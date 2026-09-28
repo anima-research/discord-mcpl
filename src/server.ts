@@ -46,7 +46,7 @@ import type {
   ChannelsOutgoingCompleteParams,
 } from '@animalabs/mcpl-core';
 
-import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile, ReactionSummary } from './discord-adapter.js';
+import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile, ReactionSummary, MessageEventInfo } from './discord-adapter.js';
 import type { ChatInputCommandInteraction } from 'discord.js';
 import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
@@ -2809,6 +2809,22 @@ export class DiscordMcplServer {
 
   // ── Discord Event Forwarding ──
 
+  /** Push-event origin for an edit/delete. Carries the guild (and the composite
+   *  channel id) so the host places the event in the right channel — without
+   *  it a guild channel's edit was reconstructed as `discord:dm:<channelId>` —
+   *  plus the message and author ids when the adapter knows them. */
+  private messageEventOrigin(channelId: string, messageId: string, info?: MessageEventInfo): Record<string, unknown> {
+    const guildId = info?.guildId ?? null;
+    return {
+      source: 'discord',
+      channelId,
+      ...(guildId ? { guildId, mcplChannelId: mcplChannelId(guildId, channelId) } : {}),
+      messageId,
+      ...(info?.authorId ? { authorId: info.authorId } : {}),
+      ...(info?.authorName ? { authorName: info.authorName } : {}),
+    };
+  }
+
   private setupDiscordForwarding(): void {
     this.discord.onMessage((msg) => {
       this.handleDiscordMessage(msg).catch((err) => {
@@ -2816,7 +2832,7 @@ export class DiscordMcplServer {
       });
     });
 
-    this.discord.onMessageEdit((channelId, messageId, newContent, isDM) => {
+    this.discord.onMessageEdit((channelId, messageId, newContent, isDM, info) => {
       if (!this.conn || !this.mcplEnabled) return;
       if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
       // Same ingestion gate as a create: an edit in a channel we don't ingest
@@ -2826,16 +2842,19 @@ export class DiscordMcplServer {
         dbg('handleMessageEdit:drop', { channelId, messageId, reason: 'not-subscribed' });
         return;
       }
+      // Name the author the way a create does (`username: text`) so the agent
+      // doesn't attribute the edit to whoever it was last talking to.
+      const who = info?.authorName ? `${info.authorName}: ` : '';
       this.conn.sendRequest(method.PUSH_EVENT, {
         featureSet: 'discord.messaging',
         eventId: `discord_edit_${messageId}`,
         timestamp: new Date().toISOString(),
-        origin: { source: 'discord', channelId },
-        payload: { content: [textContent(`[message edited] ${newContent}`)] },
+        origin: this.messageEventOrigin(channelId, messageId, info),
+        payload: { content: [textContent(`[message edited] ${who}${newContent}`)] },
       } satisfies PushEventParams).catch(() => {});
     });
 
-    this.discord.onMessageDelete((channelId, messageId, isDM) => {
+    this.discord.onMessageDelete((channelId, messageId, isDM, info) => {
       if (!this.conn || !this.mcplEnabled) return;
       if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
       if (!this.shouldEnterContext(channelId, { isDM })) {
@@ -2846,7 +2865,7 @@ export class DiscordMcplServer {
         featureSet: 'discord.messaging',
         eventId: `discord_delete_${messageId}`,
         timestamp: new Date().toISOString(),
-        origin: { source: 'discord', channelId },
+        origin: this.messageEventOrigin(channelId, messageId, info),
         payload: { content: [textContent(`[message deleted] ${messageId}`)] },
       } satisfies PushEventParams).catch(() => {});
     });
