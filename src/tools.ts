@@ -41,7 +41,7 @@ const MESSAGE_ID_KIND =
 export const toolDefinitions: ToolDefinition[] = [
   {
     name: 'send_message',
-    description: "Send a message to an explicit Discord channel, optionally with local file attachments. Use reply_message to reply to a particular message. An explicit send also updates this server’s reply-routing state.",
+    description: "Send a message to an explicit Discord channel, optionally with local file attachments. Use reply_message to reply to a particular message.",
     inputSchema: {
       type: 'object',
       properties: {
