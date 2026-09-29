@@ -306,6 +306,30 @@ test('maxHold expiry: dropped unspoken with an expired receipt, zero billed', as
   assert.equal(provider.streams.length, 1);
 });
 
+test('expired receipt never claims less hold than it expired under (early-firing timer)', async () => {
+  // Node's timer wheel runs on the monotonic clock and can fire up to ~1ms
+  // early as measured by Date.now(); pin the wall clock 1ms short of the hold
+  // at fire time and the receipt must still report the full hold.
+  const provider = new FakeProvider();
+  const sink = new FakeSink();
+  const out = new VoiceOutput({ textChannels: null, maxHoldMs: 20 }, provider, VOICE, sink, () => {});
+  const reports: UtteranceReport[] = [];
+  out.onReport((r) => reports.push(r));
+  const realNow = Date.now;
+  try {
+    const t0 = realNow();
+    Date.now = () => t0; // queuedAt pinned at t0
+    out.handleChunk('inf1', 'discord:g:100', 'too late');
+    Date.now = () => t0 + 19; // expiry callback sees the wall clock 1ms short
+    await new Promise((r) => setTimeout(r, 50));
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0]!.status, 'expired');
+  assert.ok(reports[0]!.queuedMs >= 20);
+});
+
 test('cleared beats expiry: a cleared utterance is never expired', async () => {
   const provider = new FakeProvider();
   const sink = new FakeSink();
