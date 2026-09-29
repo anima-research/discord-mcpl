@@ -320,9 +320,13 @@ export class VoiceOutput {
     if (!utt.done) this.skipped.add(inferenceId);
     utt.tts?.abort();
     utt.out.end();
+    // Node's timer wheel runs on the monotonic clock and can fire early as
+    // measured by Date.now(); the floor keeps an expired receipt from claiming
+    // less hold than it expired under.
+    const heldMs = Math.max(this.cfg.maxHoldMs ?? 0, Date.now() - utt.queuedAt);
     this.report({
       inferenceId, channelId: utt.channelId, status: 'expired',
-      playedMs: 0, queuedMs: Date.now() - utt.queuedAt, billedChars: utt.billedChars,
+      playedMs: 0, queuedMs: heldMs, billedChars: utt.billedChars,
       voicedText: '', unvoicedText: utt.sentText, estimated: false,
     });
   }
