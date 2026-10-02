@@ -76,6 +76,7 @@ describe('edit/delete push events', () => {
     let del: DeleteHandler | undefined;
     const noop = () => {};
     s.discord = {
+      botUserId: 'bot',
       onMessage: noop, onReaction: noop,
       onChannelCreate: noop, onChannelDelete: noop, onGuildCreate: noop, onChannelAvailable: noop,
       onMessageEdit: (h: EditHandler) => { edit = h; },
@@ -110,21 +111,40 @@ describe('edit/delete push events', () => {
     ]);
   });
 
-  it('muting an open channel excludes mutations until it is unmuted', async () => {
+  it('muting requires an explicit reopen before ambient creates and mutations resume', async () => {
     const { server, edit, del, sent } = wire();
     const manager = open(server);
     await (server as any).executeToolCall('mute_channel', { channelId: 'chan1' });
-    assert.equal(manager.isOpen('discord:g1:chan1'), true);
+    assert.equal(manager.isOpen('discord:g1:chan1'), false);
     assert.equal((server as any).subscribedChannels.has('chan1'), false);
     edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
     del('chan1', 'm1', false, { guildId: 'g1' });
-    assert.deepEqual(sent, []);
+    assert.equal(sent.length, 0);
     assert.equal((server as any).shouldEnterContext('chan1', { isMention: true, guildId: 'g1' }), false);
 
-    await (server as any).executeToolCall('unmute_channel', { channelId: 'chan1' });
+    const unmuted = await (server as any).executeToolCall('unmute_channel', { channelId: 'chan1' });
+    assert.match(unmuted, /channel_close.*channel_open/);
+    assert.match(unmuted, /discord:g1:chan1/);
     edit('chan1', 'm2', 'updated', false, { guildId: 'g1' });
     del('chan1', 'm2', false, { guildId: 'g1' });
-    assert.equal(sent.length, 2);
+    const ambient = {
+      id: 'm3', content: 'hello', cleanContent: 'hello', authorId: 'u1', authorName: 'someone',
+      isBot: false, channelId: 'chan1', guildId: 'g1', mentions: [], attachments: [], timestamp: new Date(),
+    };
+    await (server as any).handleDiscordMessage(ambient);
+    assert.equal(sent.length, 0);
+    assert.equal((server as any).shouldEnterContext('chan1', { isMention: true, guildId: 'g1' }), true);
+    await (server as any).handleDiscordMessage({ ...ambient, id: 'invitation', mentionsBotRole: true });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].method, 'push/event');
+    sent.length = 0;
+
+    (server as any).handleChannelClose({ channelId: 'discord:g1:chan1' });
+    await (server as any).handleChannelOpen({ channelId: 'discord:g1:chan1', type: 'discord' });
+    edit('chan1', 'm4', 'updated', false, { guildId: 'g1' });
+    del('chan1', 'm4', false, { guildId: 'g1' });
+    await (server as any).handleDiscordMessage({ ...ambient, id: 'm5' });
+    assert.deepEqual(sent.map((e) => e.method), ['push/event', 'push/event', 'channels/incoming']);
   });
 
   it('muting also takes precedence over DM delivery', async () => {

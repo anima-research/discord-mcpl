@@ -1480,6 +1480,9 @@ export class DiscordMcplServer {
         // stops delivering; it also won't auto-subscribe back in while muted.
         this.ensureSubscriptionsLoaded();
         this.subscribedChannels.delete(channelId);
+        for (const channel of this.channelManager.getOpen()) {
+          if (parseMcplChannelId(channel.id)?.channelId === channelId) this.channelManager.close(channel.id);
+        }
         return wasNew
           ? `Muted channel ${channelId}: no ambient, no wake on mention/reply, and it will not auto-subscribe you back in. Reverse with unmute_channel("${channelId}").`
           : `Channel ${channelId} was already muted.`;
@@ -1493,8 +1496,11 @@ export class DiscordMcplServer {
         this.ensureMutedLoaded();
         const removed = this.mutedChannels.delete(channelId);
         if (removed) this.saveMuted();
+        const compositeId = this.channelManager.getAll()
+          .find((channel) => parseMcplChannelId(channel.id)?.channelId === channelId)?.id;
+        const target = compositeId ? `channelId "${compositeId}"` : 'its MCPL channel id';
         return removed
-          ? `Unmuted channel ${channelId}. Direct addresses will reach you again; use channel_open with its MCPL id for ordinary traffic.`
+          ? `Unmuted channel ${channelId}. Direct addresses will reach you again. Ordinary traffic requires channel_open with ${target}. If the host still shows it as open, use channel_close then channel_open with the same id to reconcile.`
           : `Channel ${channelId} was not muted.`;
       }
 
@@ -2636,6 +2642,7 @@ export class DiscordMcplServer {
       });
     });
 
+    const acceptMutation = (channelId: string) => !this.isChannelMuted(channelId);
     this.discord.onMessageEdit((channelId, messageId, newContent, isDM, info) => {
       if (!this.conn || !this.mcplEnabled) return;
       if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
@@ -2656,7 +2663,7 @@ export class DiscordMcplServer {
         origin: this.messageEventOrigin(channelId, messageId, info),
         payload: { content: [textContent(`[message edited] ${who}${newContent}`)] },
       } satisfies PushEventParams).catch(() => {});
-    });
+    }, acceptMutation);
 
     this.discord.onMessageDelete((channelId, messageId, isDM, info) => {
       if (!this.conn || !this.mcplEnabled) return;
@@ -2672,7 +2679,7 @@ export class DiscordMcplServer {
         origin: this.messageEventOrigin(channelId, messageId, info),
         payload: { content: [textContent(`[message deleted] ${messageId}`)] },
       } satisfies PushEventParams).catch(() => {});
-    });
+    }, acceptMutation);
 
     this.discord.onReaction((ev) => {
       if (!this.conn || !this.mcplEnabled) return;

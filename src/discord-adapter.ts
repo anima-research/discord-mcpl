@@ -508,6 +508,8 @@ export class DiscordAdapter {
     channelId: string, messageId: string, newContent: string, isDM: boolean, info?: MessageEventInfo,
   ) => void;
   private deleteHandler?: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void;
+  private editAccept?: (channelId: string) => boolean;
+  private deleteAccept?: (channelId: string) => boolean;
   private reactionHandler?: (ev: ReactionEvent) => void;
   private readyHandler?: () => void;
   private channelCreateHandler?: (guildId: string, channel: DiscordChannelInfo) => void;
@@ -593,14 +595,23 @@ export class DiscordAdapter {
     this.messageHandler = handler;
   }
 
+  /** Optional acceptance predicates run synchronously at gateway receipt,
+   *  before mutation lookup/ordering. The server owns the policy; omitting
+   *  a predicate preserves the adapter's usual delivery behavior. */
   onMessageEdit(
     handler: (channelId: string, messageId: string, newContent: string, isDM: boolean, info?: MessageEventInfo) => void,
+    accept?: (channelId: string) => boolean,
   ): void {
     this.editHandler = handler;
+    this.editAccept = accept;
   }
 
-  onMessageDelete(handler: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void): void {
+  onMessageDelete(
+    handler: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void,
+    accept?: (channelId: string) => boolean,
+  ): void {
     this.deleteHandler = handler;
+    this.deleteAccept = accept;
   }
 
   /** Register a handler for incoming Discord reactions (add/remove). The server
@@ -1698,6 +1709,10 @@ export class DiscordAdapter {
       }
       return;
     }
+    if (this.editAccept && !this.editAccept(newMsg.channelId)) {
+      dbg('messageUpdate:drop', { msgId: newMsg.id, channelId: newMsg.channelId, reason: 'ingress-filtered' });
+      return;
+    }
     const content = newMsg.content!;
     const { channelId, id: messageId } = newMsg;
     await this.forwardMessageEvent(newMsg, (info) => {
@@ -1710,6 +1725,10 @@ export class DiscordAdapter {
   }
 
   private async handleMessageDelete(message: Message | PartialMessage): Promise<void> {
+    if (this.deleteAccept && !this.deleteAccept(message.channelId)) {
+      dbg('messageDelete:drop', { msgId: message.id, channelId: message.channelId, reason: 'ingress-filtered' });
+      return;
+    }
     const { channelId, id: messageId } = message;
     await this.forwardMessageEvent(message, (info) => {
       this.deleteHandler?.(channelId, messageId, !info.guildId, info);
