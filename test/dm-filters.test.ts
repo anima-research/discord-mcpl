@@ -100,7 +100,8 @@ describe('DM contacts through the existing filters file and tool', () => {
     f.send('user-1');
 
     writeFileSync(path, JSON.stringify({ dmUsers: ['user-2'] }));
-    // The poller applies successfully parsed files through updateFilters.
+    // Exercise the poller's load/apply components directly, rather than
+    // the index.ts interval timer. The adapter stays live throughout.
     const next = loadFiltersFile(path);
     assert.ok(next);
     f.adapter.updateFilters(next);
