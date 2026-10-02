@@ -65,6 +65,12 @@ import { dirname } from 'node:path';
 import sharp from 'sharp';
 import { dbg } from './debug-log.js';
 
+// TypeScript copies the manifest into dist. The module-relative path works
+// in both source and built layouts, independently of the working directory.
+const packageJson: typeof import('../package.json') = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+);
+
 type ChannelOpenRequest = ChannelsOpenParams & {
   channelId?: string;
   history?: { limit: number; beforeMessageId?: string; sinceLastSeen?: boolean };
@@ -996,7 +1002,7 @@ export class DiscordMcplServer {
     const result: McplInitializeResult = {
       protocolVersion: '2024-11-05',
       capabilities,
-      serverInfo: { name: 'discord-mcpl', version: '0.1.0' },
+      serverInfo: { name: 'discord-mcpl', version: packageJson.version },
     };
 
     conn.sendResponse(msg.request.id, result);

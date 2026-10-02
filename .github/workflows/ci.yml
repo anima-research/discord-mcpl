@@ -76,3 +76,9 @@ jobs:
       - name: Test
         if: matrix.os == 'ubuntu-latest'
         run: npm test
+
+      # Exercise the package manifest import in emitted JavaScript as well
+      # as the source/tsx path, including both MCP and MCPL handshakes.
+      - name: Test built server
+        if: matrix.os == 'ubuntu-latest'
+        run: node --test dist/test/server.test.js
