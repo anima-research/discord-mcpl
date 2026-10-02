@@ -32,6 +32,7 @@ import type {
 
 import { DiscordMcplServer } from '../src/server.js';
 import { applyMentionCandidates } from '../src/discord-adapter.js';
+import { TOOL_CLASSES } from '../src/tool-classes.js';
 import type {
   DiscordAdapter,
   DiscordMessageData,
@@ -346,6 +347,30 @@ describe('DiscordMcplServer', () => {
     assert.ok(names.includes('send_message'));
     assert.ok(names.includes('list_channels'));
     assert.ok(names.includes('fetch_history'));
+
+    client.close();
+    await serverPromise;
+  });
+
+  it('tools/list carries MCPL RFC-008 classes in _meta on every classed tool', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+
+    await mcpHandshake(client);
+
+    const result = (await client.sendRequest('tools/list', {})) as {
+      tools: Array<{ name: string; _meta?: Record<string, unknown> }>;
+    };
+    for (const tool of result.tools) {
+      if (Object.hasOwn(TOOL_CLASSES, tool.name)) {
+        assert.deepEqual(tool._meta?.['mcpl/class'], [...TOOL_CLASSES[tool.name]], tool.name);
+      } else {
+        assert.equal(tool._meta?.['mcpl/class'], undefined, tool.name);
+      }
+    }
+    const send = result.tools.find((t) => t.name === 'send_message');
+    assert.deepEqual(send?._meta?.['mcpl/class'], ['comms', 'files']);
 
     client.close();
     await serverPromise;

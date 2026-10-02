@@ -11,6 +11,9 @@ export interface ToolDefinition {
     properties: Record<string, unknown>;
     required?: string[];
   };
+  /** MCP `_meta` extension slot. tools/list adds the MCPL RFC-008
+   *  `mcpl/class` key here (see tool-classes.ts), merged with any others. */
+  _meta?: Record<string, unknown>;
 }
 
 /** Reusable schema for the optional `files` attachment parameter on send tools. */
