@@ -12,7 +12,7 @@
  *                       is `guildId` (all channels) or `guildId:chanId+chanId`
  *                       (whitelist those channels + their threads only)
  *   DISCORD_DM_USERS  - Optional: Comma-separated user ID whitelist for DMs.
- *                       When set, DMs from anyone else are dropped.
+ *                       Nonempty = only listed users; empty/unset = anyone.
  *   DISCORD_ADMIN_USERS - Optional: Comma-separated user IDs allowed to use
  *                       admin slash commands (/undo). Unset = nobody.
  *   DISCORD_FILTERS_FILE - Optional: path to a JSON file holding the guild/
