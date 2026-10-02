@@ -50,6 +50,7 @@ import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFil
 import type { ChatInputCommandInteraction } from 'discord.js';
 import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
+import { withToolClasses } from './tool-classes.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
 import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
 import {
@@ -1024,7 +1025,8 @@ export class DiscordMcplServer {
     try {
       switch (req.method) {
         case 'tools/list': {
-          conn.sendResponse(req.id, { tools: toolDefinitions });
+          // Each tool carries its MCPL RFC-008 classes in _meta["mcpl/class"].
+          conn.sendResponse(req.id, { tools: toolDefinitions.map(withToolClasses) });
           break;
         }
 

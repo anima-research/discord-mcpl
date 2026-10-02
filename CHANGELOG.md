@@ -7,6 +7,13 @@ in the git log and PR descriptions.
 
 ### Added
 
+- **MCPL RFC-008 tool classes.** Every tool in `tools/list` now carries
+  `_meta["mcpl/class"]`, e.g. `["comms", "files"]` on the send tools, so
+  hosts can decide what tool-lifecycle observers may see; `comms` arguments
+  (people's messages) are never shared. Classes live in
+  `src/tool-classes.ts` and are merged into any existing `_meta` keys. A test
+  fails until any new tool, listed or merely callable, is classed or
+  deliberately left unclassed (which hosts treat as most restrictive).
 - **Voice zero-cost-loser: TTS billing gated on carrier-clear.** The
   provider socket still pre-opens at first prose delta (a connection is
   free — only characters bill), but text now banks locally and flushes
