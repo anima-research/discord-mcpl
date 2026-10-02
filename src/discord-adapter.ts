@@ -498,6 +498,8 @@ export class DiscordAdapter {
   private guildIds?: string[];
   private guildChannels?: Map<string, Set<string>>;
   private dmUsers?: Set<string>;
+  /** In-flight mutation deliveries, ordered per Discord message. */
+  private messageEventDeliveries = new Map<string, Promise<void>>();
   private slashCommandHandler?: (interaction: ChatInputCommandInteraction) => void;
   private guildCommandDefs?: ApplicationCommandDataResolvable[];
 
@@ -1636,6 +1638,8 @@ export class DiscordAdapter {
    *  lack it too. Fetch the channel (never the deleted message) only when the
    *  message and cache cannot establish its location. */
   private async messageEventInfo(message: Message | PartialMessage): Promise<MessageEventInfo | null> {
+    const authorId = message.author?.id;
+    const authorName = message.author?.username;
     let channel: Channel | null | undefined = message.channel ?? this.client.channels.cache.get(message.channelId);
     let guildId = message.guildId ?? (channel && 'guildId' in channel ? channel.guildId : null);
     if (!guildId && !channel?.isDMBased()) {
@@ -1651,9 +1655,30 @@ export class DiscordAdapter {
     if (!this.channelAllowed(guildId, message.channelId, parentId)) return null;
     return {
       guildId: guildId ?? null,
-      authorId: message.author?.id,
-      authorName: message.author?.username,
+      authorId,
+      authorName,
     };
+  }
+
+  /** Resolve locations concurrently, but let earlier mutations finish before
+   *  delivering later ones for the same message. A slow edit lookup must not
+   *  arrive after its deletion. Failure releases the next delivery as well. */
+  private forwardMessageEvent(
+    message: Message | PartialMessage,
+    forward: (info: MessageEventInfo) => void,
+  ): Promise<void> {
+    const messageId = message.id;
+    const previous = this.messageEventDeliveries.get(messageId) ?? Promise.resolve();
+    const pending = Promise.allSettled([previous, this.messageEventInfo(message)]).then(([, result]) => {
+      if (result.status === 'rejected') throw result.reason;
+      if (result.value) forward(result.value);
+    });
+    const settled = pending.catch(() => {});
+    this.messageEventDeliveries.set(messageId, settled);
+    void settled.then(() => {
+      if (this.messageEventDeliveries.get(messageId) === settled) this.messageEventDeliveries.delete(messageId);
+    });
+    return pending;
   }
 
   private async handleMessageUpdate(oldMsg: Message | PartialMessage, newMsg: Message | PartialMessage): Promise<void> {
@@ -1666,19 +1691,21 @@ export class DiscordAdapter {
       return;
     }
     const content = newMsg.content!;
-    const info = await this.messageEventInfo(newMsg);
-    if (!info) return;
-    if (!info.guildId && this.dmUsers && (!info.authorId || !this.dmUsers.has(info.authorId))) {
-      dbg('messageUpdate:drop', { msgId: newMsg.id, channelId: newMsg.channelId, reason: 'dm-not-allowed' });
-      return;
-    }
-    this.editHandler?.(newMsg.channelId, newMsg.id, content, !info.guildId, info);
+    const { channelId, id: messageId } = newMsg;
+    await this.forwardMessageEvent(newMsg, (info) => {
+      if (!info.guildId && this.dmUsers && (!info.authorId || !this.dmUsers.has(info.authorId))) {
+        dbg('messageUpdate:drop', { msgId: messageId, channelId, reason: 'dm-not-allowed' });
+        return;
+      }
+      this.editHandler?.(channelId, messageId, content, !info.guildId, info);
+    });
   }
 
   private async handleMessageDelete(message: Message | PartialMessage): Promise<void> {
-    const info = await this.messageEventInfo(message);
-    if (!info) return;
-    this.deleteHandler?.(message.channelId, message.id, !info.guildId, info);
+    const { channelId, id: messageId } = message;
+    await this.forwardMessageEvent(message, (info) => {
+      this.deleteHandler?.(channelId, messageId, !info.guildId, info);
+    });
   }
 
   private setupEvents(): void {

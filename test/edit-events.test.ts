@@ -251,6 +251,35 @@ describe('sparse gateway edit/delete locations', () => {
     assert.equal(f.sent.length, 2);
   });
 
+  it('keeps a slow edit before its later deletion without blocking another message', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    let resolveChannel!: (channel: any) => void;
+    t.mock.method(f.client.channels, 'fetch', () => new Promise((resolve) => { resolveChannel = resolve; }));
+    const edit = (f.adapter as any).handleMessageUpdate({ partial: true }, f.message());
+    const del = (f.adapter as any).handleMessageDelete(f.message({ guildId: 'g1' }));
+    await (f.adapter as any).handleMessageDelete(f.message({ id: 'm2', guildId: 'g1' }));
+    assert.deepEqual(f.sent.map((e) => e.kind), ['delete'], 'another message is independent');
+    resolveChannel({ guildId: 'g1', parentId: null });
+    await Promise.all([edit, del]);
+    assert.deepEqual(f.sent.map((e) => e.kind), ['delete', 'edit', 'delete']);
+    assert.equal((f.adapter as any).messageEventDeliveries.size, 0);
+  });
+
+  it('a failed edit lookup still lets its following deletion through', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    let rejectChannel!: (error: Error) => void;
+    t.mock.method(f.client.channels, 'fetch', () => new Promise((_resolve, reject) => { rejectChannel = reject; }));
+    const edit = (f.adapter as any).handleMessageUpdate({ partial: true }, f.message());
+    const rejected = assert.rejects(edit, /unavailable/);
+    const del = (f.adapter as any).handleMessageDelete(f.message({ guildId: 'g1' }));
+    rejectChannel(new Error('unavailable'));
+    await Promise.all([rejected, del]);
+    assert.deepEqual(f.sent.map((e) => e.kind), ['delete']);
+    assert.equal((f.adapter as any).messageEventDeliveries.size, 0);
+  });
+
   it('preserves thread-parent allowlists after resolving a sparse event', async (t) => {
     const f = fixture();
     t.after(() => f.client.destroy());
