@@ -682,7 +682,6 @@ describe('suppression baseline drift diagnostics', () => {
     assert.equal(status.source, 'file');
     assert.deepEqual(status.baselineDelta, {
       baselineCount: 4,
-      baselineDigest: stateBaselineDigest(),
       missingCount: 3,
       additionalCount: 0,
     });
@@ -694,12 +693,6 @@ describe('suppression baseline drift diagnostics', () => {
     assert.match(warnings()[0], /file is authoritative/);
   });
 
-  function stateBaselineDigest(): string {
-    const st = state();
-    st.applyParsed({});
-    return st.suppressionStatus().effectiveDigest!;
-  }
-
   it('compares normalized sets and hashes duplicates only once', () => {
     const st = state([SUPPRESSED_BARE, 'sigil', ...BASELINE_TOKENS, '::'].join(','));
     st.applyParsed({ suppressedReactionEmojis: [
@@ -708,12 +701,13 @@ describe('suppression baseline drift diagnostics', () => {
     const status = st.suppressionStatus();
     assert.deepEqual(status.baselineDelta, {
       baselineCount: 4,
-      baselineDigest: status.effectiveDigest,
       missingCount: 0,
       additionalCount: 0,
     });
     assert.equal(warnings().length, 0);
-    assert.equal(status.baselineDelta?.baselineDigest, stateBaselineDigest());
+    st.applyParsed({});
+    assert.equal(st.suppressionStatus().effectiveDigest, status.effectiveDigest,
+      'the existing effective-set digest agrees when the same normalized baseline becomes effective');
   });
 
   it('reports additional file entries without warning or treating a superset as missing protection', () => {
@@ -812,6 +806,8 @@ describe('suppression baseline drift diagnostics', () => {
     const result = await s.executeToolCall('filters_get', {});
     assert.equal(result.reactionSuppression.baselineDelta.missingCount, 3);
     assert.equal(result.reactionSuppression.baselineDelta.additionalCount, 1);
+    assert.deepEqual(Object.keys(result.reactionSuppression.baselineDelta).sort(),
+      ['additionalCount', 'baselineCount', 'missingCount'], 'the overridden baseline exposes counts only');
     const output = JSON.stringify(result) + cap.lines.join('\n');
     for (const secret of [...BASELINE_TOKENS, SUPPRESSED_BARE, 'sigil', ENV_ONLY_GLYPH]) {
       assert.ok(!output.includes(secret), 'status and warnings contain no suppression entries');

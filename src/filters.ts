@@ -336,10 +336,11 @@ export interface FiltersPlaneStatus {
   staleSince?: string;
 }
 
-/** Glyph-free comparison of the enforced file set with the startup baseline. */
+/** Counts comparing the enforced file set with the startup baseline.
+ *  No baseline fingerprint: a small overridden set could be guessed from
+ *  an unsalted digest. The counts alone establish equality or drift. */
 export interface ReactionSuppressionBaselineDelta {
   baselineCount: number;
-  baselineDigest: string;
   /** Baseline entries absent from the enforced file set. */
   missingCount: number;
   /** Enforced file entries absent from the baseline. */
@@ -579,7 +580,6 @@ export class DiscordFiltersState {
     const additional = [...this.suppression.matchSet].filter((t) => !this.baselineSet!.matchSet.has(t));
     this.baselineDelta = {
       baselineCount: this.baselineSet.matchSet.size,
-      baselineDigest: this.baselineSet.digest,
       missingCount: missing.length,
       additionalCount: additional.length,
     };
