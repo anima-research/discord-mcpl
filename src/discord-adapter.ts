@@ -1636,15 +1636,23 @@ export class DiscordAdapter {
   /** Resolve sparse gateway events before applying guild/channel/DM policy.
    *  A missing guild id is not evidence of a DM: uncached guild messages can
    *  lack it too. Fetch the channel (never the deleted message) only when the
-   *  message and cache cannot establish its location. */
+   *  message and cache cannot establish its location or a parent needed by
+   *  the channel allowlist. */
   private async messageEventInfo(message: Message | PartialMessage): Promise<MessageEventInfo | null> {
     const authorId = message.author?.id;
     const authorName = message.author?.username;
     let channel: Channel | null | undefined = message.channel ?? this.client.channels.cache.get(message.channelId);
     let guildId = message.guildId ?? (channel && 'guildId' in channel ? channel.guildId : null);
-    if (!guildId && !channel?.isDMBased()) {
+    // Packet guild identity alone does not establish whether an uncached
+    // channel is a thread under an allowlisted parent. Fetch only when that
+    // missing parent could affect the decision; a directly allowed channel
+    // or a channel with known parent metadata needs no lookup.
+    const needsParent = guildId
+      && !(channel && 'parentId' in channel)
+      && !this.channelAllowed(guildId, message.channelId);
+    if ((!guildId && !channel?.isDMBased()) || needsParent) {
       channel = await this.client.channels.fetch(message.channelId);
-      guildId = channel && 'guildId' in channel ? channel.guildId : null;
+      guildId ??= channel && 'guildId' in channel ? channel.guildId : null;
     }
     if (!guildId && !channel?.isDMBased()) {
       dbg('messageEvent:drop', { msgId: message.id, channelId: message.channelId, reason: 'unknown-channel' });

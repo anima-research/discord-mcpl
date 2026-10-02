@@ -1866,13 +1866,15 @@ export class DiscordMcplServer {
    * delete markers into agents scoped to the whole guild.)
    *
    * Forward iff the channel is open or subscribed (ambient), OR the event
-   * addresses the bot (mention/reply), OR it's a DM. Open channels must also
-   * receive edits/deletes, even when their subscription state differs.
+   * addresses the bot (mention/reply), OR it's a DM. Muting takes precedence
+   * over every admission path. Open channels must also receive edits/deletes
+   * when their subscription state differs, unless muted.
    */
   private shouldEnterContext(
     channelId: string,
     opts: { isMention?: boolean; isDM?: boolean; guildId?: string | null } = {},
   ): boolean {
+    if (this.isChannelMuted(channelId)) return false;
     return Boolean(opts.isMention)
       || Boolean(opts.isDM)
       || (opts.guildId != null && this.channelManager.isDiscordChannelOpen(opts.guildId, channelId))
@@ -2641,7 +2643,7 @@ export class DiscordMcplServer {
       // from must not leak in. (Mentions inside an edit are an accepted edge —
       // the open/subscription/DM threshold closes the cross-channel leak.)
       if (!this.shouldEnterContext(channelId, { isDM, guildId: info?.guildId })) {
-        dbg('handleMessageEdit:drop', { channelId, messageId, reason: 'not-subscribed' });
+        dbg('handleMessageEdit:drop', { channelId, messageId, reason: this.isChannelMuted(channelId) ? 'muted' : 'not-open-or-subscribed' });
         return;
       }
       // Name the author the way a create does (`username: text`) so the agent
@@ -2660,7 +2662,7 @@ export class DiscordMcplServer {
       if (!this.conn || !this.mcplEnabled) return;
       if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
       if (!this.shouldEnterContext(channelId, { isDM, guildId: info?.guildId })) {
-        dbg('handleMessageDelete:drop', { channelId, messageId, reason: 'not-subscribed' });
+        dbg('handleMessageDelete:drop', { channelId, messageId, reason: this.isChannelMuted(channelId) ? 'muted' : 'not-open-or-subscribed' });
         return;
       }
       this.conn.sendRequest(method.PUSH_EVENT, {

@@ -110,6 +110,31 @@ describe('edit/delete push events', () => {
     ]);
   });
 
+  it('muting an open channel excludes mutations until it is unmuted', async () => {
+    const { server, edit, del, sent } = wire();
+    const manager = open(server);
+    await (server as any).executeToolCall('mute_channel', { channelId: 'chan1' });
+    assert.equal(manager.isOpen('discord:g1:chan1'), true);
+    assert.equal((server as any).subscribedChannels.has('chan1'), false);
+    edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
+    del('chan1', 'm1', false, { guildId: 'g1' });
+    assert.deepEqual(sent, []);
+    assert.equal((server as any).shouldEnterContext('chan1', { isMention: true, guildId: 'g1' }), false);
+
+    await (server as any).executeToolCall('unmute_channel', { channelId: 'chan1' });
+    edit('chan1', 'm2', 'updated', false, { guildId: 'g1' });
+    del('chan1', 'm2', false, { guildId: 'g1' });
+    assert.equal(sent.length, 2);
+  });
+
+  it('muting also takes precedence over DM delivery', async () => {
+    const { server, edit, del, sent } = wire(false);
+    await (server as any).executeToolCall('mute_channel', { channelId: 'dmchan' });
+    edit('dmchan', 'm1', 'updated', true, { guildId: null });
+    del('dmchan', 'm1', true, { guildId: null });
+    assert.deepEqual(sent, []);
+  });
+
   it('open-and-subscribed channels receive each mutation only once', () => {
     const { server, edit, del, sent } = wire();
     open(server);
@@ -287,6 +312,36 @@ describe('sparse gateway edit/delete locations', () => {
     await f.mutations(f.message({ channelId: 'thread1' }));
     assert.equal(f.sent.length, 2);
     assert.ok(f.sent.every((e) => !e.isDM));
+  });
+
+  it('fetches an uncached thread parent even when the packet already names the guild', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    const fetch = t.mock.method(f.client.channels, 'fetch', async () => ({ guildId: 'g1', parentId: 'parent' }));
+    await f.mutations(f.message({ guildId: 'g1', channelId: 'thread1' }));
+    assert.equal(fetch.mock.callCount(), 2);
+    assert.equal(f.sent.length, 2);
+    assert.ok(f.sent.every((e) => !e.isDM && e.info?.guildId === 'g1'));
+  });
+
+  it('keeps an uncached thread excluded when its resolved parent is not allowlisted', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    const fetch = t.mock.method(f.client.channels, 'fetch', async () => ({ guildId: 'g1', parentId: 'other-parent' }));
+    await f.mutations(f.message({ guildId: 'g1', channelId: 'thread1' }));
+    assert.equal(fetch.mock.callCount(), 2);
+    assert.deepEqual(f.sent, []);
+  });
+
+  it('uses known parent metadata to exclude channels without a redundant fetch', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    const fetch = t.mock.method(f.client.channels, 'fetch', async () => { throw new Error('unexpected fetch'); });
+    await f.mutations(f.message({
+      guildId: 'g1', channelId: 'thread1', channel: { guildId: 'g1', parentId: 'other-parent' },
+    }));
+    assert.equal(fetch.mock.callCount(), 0);
+    assert.deepEqual(f.sent, []);
   });
 
   it('drops resolved guilds and channels outside the configured filters', async (t) => {
