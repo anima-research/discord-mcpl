@@ -12,9 +12,11 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 
-import { editForwardDecision } from '../src/discord-adapter.js';
+import { DiscordAdapter, editForwardDecision } from '../src/discord-adapter.js';
+import { ChannelManager, toDescriptor } from '../src/channels.js';
+import { ChannelType, type Client } from 'discord.js';
 import { DiscordMcplServer } from '../src/server.js';
-import type { DiscordAdapter, MessageEventInfo } from '../src/discord-adapter.js';
+import type { MessageEventInfo } from '../src/discord-adapter.js';
 
 const EDITED_AT = 1790000000000;
 const guildMsg = (over: Record<string, unknown> = {}) => ({
@@ -67,7 +69,7 @@ describe('edit/delete push events', () => {
   type EditHandler = (c: string, m: string, t: string, isDM: boolean, info?: MessageEventInfo) => void;
   type DeleteHandler = (c: string, m: string, isDM: boolean, info?: MessageEventInfo) => void;
 
-  function wire(): { edit: EditHandler; del: DeleteHandler; sent: Array<{ method: string; params: any }> } {
+  function wire(subscribed = true): { server: DiscordMcplServer; edit: EditHandler; del: DeleteHandler; sent: Array<{ method: string; params: any }> } {
     const server = new DiscordMcplServer({} as DiscordAdapter);
     const s = server as unknown as Record<string, unknown>;
     let edit: EditHandler | undefined;
@@ -84,11 +86,77 @@ describe('edit/delete push events', () => {
     s.mcplEnabled = true;
     (s.enabledFeatureSets as Set<string>).add('discord.messaging');
     (s.ensureSubscriptionsLoaded as () => void).call(server);
-    (s.subscribedChannels as Set<string>).add('chan1');
+    if (subscribed) (s.subscribedChannels as Set<string>).add('chan1');
     (s.setupDiscordForwarding as () => void).call(server);
     assert.ok(edit && del, 'edit/delete handlers registered');
-    return { edit: edit!, del: del!, sent };
+    return { server, edit: edit!, del: del!, sent };
   }
+
+  function open(server: DiscordMcplServer): ChannelManager {
+    const manager = (server as any).channelManager as ChannelManager;
+    manager.register(toDescriptor('g1', 'Guild', { id: 'chan1', name: 'general', type: 'text', label: '#general (Guild)' }));
+    manager.open('discord:g1:chan1');
+    return manager;
+  }
+
+  it('open-but-unsubscribed channels receive edits and deletes exactly once', () => {
+    const { server, edit, del, sent } = wire(false);
+    open(server);
+    edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
+    del('chan1', 'm1', false, { guildId: 'g1' });
+    assert.deepEqual(sent.map(({ method, params }) => [method, params.eventId, params.origin.mcplChannelId]), [
+      ['push/event', 'discord_edit_m1', 'discord:g1:chan1'],
+      ['push/event', 'discord_delete_m1', 'discord:g1:chan1'],
+    ]);
+  });
+
+  it('open-and-subscribed channels receive each mutation only once', () => {
+    const { server, edit, del, sent } = wire();
+    open(server);
+    edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
+    del('chan1', 'm1', false, { guildId: 'g1' });
+    assert.equal(sent.length, 2);
+  });
+
+  it('closing an unsubscribed channel drops subsequent mutations', () => {
+    const { server, edit, del, sent } = wire(false);
+    open(server).close('discord:g1:chan1');
+    edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
+    del('chan1', 'm1', false, { guildId: 'g1' });
+    assert.deepEqual(sent, []);
+  });
+
+  it('an unrelated open channel does not admit a closed channel or unknown guild', () => {
+    const { server, edit, del, sent } = wire(false);
+    open(server);
+    edit('other', 'm1', 'updated', false, { guildId: 'g1' });
+    del('chan1', 'm2', false, { guildId: 'other' });
+    del('chan1', 'm3', false);
+    assert.deepEqual(sent, []);
+  });
+
+  it('open channels still respect MCPL and messaging feature gates', () => {
+    const { server, edit, del, sent } = wire(false);
+    open(server);
+    (server as any).mcplEnabled = false;
+    edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
+    (server as any).mcplEnabled = true;
+    (server as any).enabledFeatureSets.clear();
+    del('chan1', 'm1', false, { guildId: 'g1' });
+    assert.deepEqual(sent, []);
+  });
+
+  it('the same open-but-unsubscribed gate admits ambient creates via channels/incoming', async () => {
+    const { server, sent } = wire(false);
+    open(server);
+    await (server as any).handleDiscordMessage({
+      id: 'm1', content: 'hello', cleanContent: 'hello', authorId: 'u1', authorName: 'someone',
+      isBot: false, channelId: 'chan1', guildId: 'g1', mentions: [], attachments: [], timestamp: new Date(),
+    });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].method, 'channels/incoming');
+    assert.equal(sent[0].params.messages[0].channelId, 'discord:g1:chan1');
+  });
 
   it('a guild edit names its author and carries the guild + composite channel id', () => {
     const { edit, sent } = wire();
@@ -125,5 +193,118 @@ describe('edit/delete push events', () => {
     const { origin, payload } = sent[0]!.params;
     assert.equal(payload.content[0].text, '[message deleted] m4');
     assert.equal(origin.mcplChannelId, 'discord:g1:chan1');
+  });
+});
+
+
+describe('sparse gateway edit/delete locations', () => {
+  function fixture() {
+    const adapter = new DiscordAdapter({
+      token: 'unused', guildIds: ['g1'], guildChannels: { g1: ['chan1', 'parent'] }, dmUsers: ['u1'],
+    });
+    const client = (adapter as any).client as Client;
+    const sent: Array<{ kind: string; isDM: boolean; info?: MessageEventInfo }> = [];
+    adapter.onMessageEdit((_c, _m, _t, isDM, info) => sent.push({ kind: 'edit', isDM, info }));
+    adapter.onMessageDelete((_c, _m, isDM, info) => sent.push({ kind: 'delete', isDM, info }));
+    const emit = client.emit.bind(client) as (event: string, ...args: unknown[]) => boolean;
+    const message = (over: Record<string, unknown> = {}) => ({
+      id: 'm1', channelId: 'chan1', guildId: null, partial: true, channel: null,
+      content: 'edited', editedTimestamp: EDITED_AT, author: { id: 'u1', username: 'someone' }, ...over,
+    });
+    const mutations = async (msg: ReturnType<typeof message>) => {
+      emit('messageUpdate', { partial: true }, msg);
+      emit('messageDelete', msg);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+    return { adapter, client, sent, message, mutations };
+  }
+
+  it('uses a partial message packet guild id without fetching the deleted message', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    const fetch = t.mock.method(f.client.channels, 'fetch', async () => { throw new Error('unexpected fetch'); });
+    await f.mutations(f.message({ guildId: 'g1' }));
+    assert.equal(fetch.mock.callCount(), 0);
+    assert.deepEqual(f.sent.map((e) => [e.kind, e.isDM, e.info?.guildId]), [
+      ['edit', false, 'g1'], ['delete', false, 'g1'],
+    ]);
+  });
+
+  it('recovers guild metadata from the channel cache before DM filtering', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    f.client.channels.cache.set('chan1', { guildId: 'g1', parentId: null } as any);
+    const fetch = t.mock.method(f.client.channels, 'fetch', async () => { throw new Error('unexpected fetch'); });
+    await f.mutations(f.message({ author: { id: 'not-a-dm-contact', username: 'guild-user' } }));
+    assert.equal(fetch.mock.callCount(), 0);
+    assert.equal(f.sent.length, 2);
+    assert.ok(f.sent.every((e) => !e.isDM && e.info?.guildId === 'g1'));
+  });
+
+  it('fetches an unknown channel and labels guild events correctly', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    const fetch = t.mock.method(f.client.channels, 'fetch', async () => ({ guildId: 'g1', parentId: null }));
+    await f.mutations(f.message());
+    assert.equal(fetch.mock.callCount(), 2);
+    assert.ok(f.sent.every((e) => !e.isDM && e.info?.guildId === 'g1'));
+    assert.equal(f.sent.length, 2);
+  });
+
+  it('preserves thread-parent allowlists after resolving a sparse event', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    t.mock.method(f.client.channels, 'fetch', async () => ({ guildId: 'g1', parentId: 'parent' }));
+    await f.mutations(f.message({ channelId: 'thread1' }));
+    assert.equal(f.sent.length, 2);
+    assert.ok(f.sent.every((e) => !e.isDM));
+  });
+
+  it('drops resolved guilds and channels outside the configured filters', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    t.mock.method(f.client.channels, 'fetch', async (id: string) => ({
+      guildId: id === 'other-guild' ? 'g2' : 'g1', parentId: null,
+    }));
+    await f.mutations(f.message({ channelId: 'other-guild' }));
+    await f.mutations(f.message({ channelId: 'blocked-channel' }));
+    assert.deepEqual(f.sent, []);
+  });
+
+  it('only classifies a positively identified DM as a DM', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    await f.mutations(f.message({ channel: { type: ChannelType.DM, isDMBased: () => true } }));
+    assert.deepEqual(f.sent.map((e) => [e.kind, e.isDM, e.info?.guildId]), [
+      ['edit', true, null], ['delete', true, null],
+    ]);
+  });
+
+  it('still applies the DM contact filter to edits after resolving the channel', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    const msg = f.message({ channel: { isDMBased: () => true }, author: { id: 'stranger' } });
+    await (f.adapter as any).handleMessageUpdate({ partial: true }, msg);
+    await (f.adapter as any).handleMessageUpdate({ partial: true }, { ...msg, author: null });
+    assert.deepEqual(f.sent, []);
+  });
+
+  it('drops unresolved locations rather than assigning the DM namespace', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    t.mock.method(f.client.channels, 'fetch', async () => null);
+    await f.mutations(f.message());
+    assert.deepEqual(f.sent, []);
+  });
+
+  it('reports a failed channel lookup without emitting a false DM', async (t) => {
+    const f = fixture();
+    t.after(() => f.client.destroy());
+    t.mock.method(f.client.channels, 'fetch', async () => { throw new Error('channel unavailable'); });
+    const errors = t.mock.method(console, 'error', () => {});
+    await f.mutations(f.message());
+    assert.deepEqual(f.sent, []);
+    assert.equal(errors.mock.callCount(), 2);
+    assert.ok(errors.mock.calls.every((c) => c.arguments.join(' ').includes('channel unavailable')));
   });
 });

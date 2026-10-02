@@ -1865,15 +1865,18 @@ export class DiscordMcplServer {
    * subscription check that creates go through, leaking cross-channel edit/
    * delete markers into agents scoped to the whole guild.)
    *
-   * Forward iff the channel is subscribed (ambient), OR the event addresses the
-   * bot (mention/reply), OR it's a DM. Non-subscribed ambient — including its
-   * edits and deletes — is dropped.
+   * Forward iff the channel is open or subscribed (ambient), OR the event
+   * addresses the bot (mention/reply), OR it's a DM. Open channels must also
+   * receive edits/deletes, even when their subscription state differs.
    */
   private shouldEnterContext(
     channelId: string,
-    opts: { isMention?: boolean; isDM?: boolean } = {},
+    opts: { isMention?: boolean; isDM?: boolean; guildId?: string | null } = {},
   ): boolean {
-    return Boolean(opts.isMention) || Boolean(opts.isDM) || this.isChannelSubscribed(channelId);
+    return Boolean(opts.isMention)
+      || Boolean(opts.isDM)
+      || (opts.guildId != null && this.channelManager.isDiscordChannelOpen(opts.guildId, channelId))
+      || this.isChannelSubscribed(channelId);
   }
 
   // Mute persistence: DISCORD_MUTED_CHANNELS_FILE, else a sibling of the
@@ -2636,8 +2639,8 @@ export class DiscordMcplServer {
       if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
       // Same ingestion gate as a create: an edit in a channel we don't ingest
       // from must not leak in. (Mentions inside an edit are an accepted edge —
-      // the subscription/DM threshold is what closes the cross-channel leak.)
-      if (!this.shouldEnterContext(channelId, { isDM })) {
+      // the open/subscription/DM threshold closes the cross-channel leak.)
+      if (!this.shouldEnterContext(channelId, { isDM, guildId: info?.guildId })) {
         dbg('handleMessageEdit:drop', { channelId, messageId, reason: 'not-subscribed' });
         return;
       }
@@ -2656,7 +2659,7 @@ export class DiscordMcplServer {
     this.discord.onMessageDelete((channelId, messageId, isDM, info) => {
       if (!this.conn || !this.mcplEnabled) return;
       if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
-      if (!this.shouldEnterContext(channelId, { isDM })) {
+      if (!this.shouldEnterContext(channelId, { isDM, guildId: info?.guildId })) {
         dbg('handleMessageDelete:drop', { channelId, messageId, reason: 'not-subscribed' });
         return;
       }
@@ -3000,7 +3003,7 @@ export class DiscordMcplServer {
     }
 
     // Direct address (mention or DM) always reaches Lena. For ambient
-    // (non-direct) messages, only forward when the channel is in her
+    // (non-direct) messages, only forward when the channel is open or in her
     // subscription set — otherwise she'd get unbounded context noise
     // from every channel the bot can see. The wake decision is then
     // left to the host's gate policy via the `isMention`/`isDM` flags
@@ -3025,7 +3028,7 @@ export class DiscordMcplServer {
     // backward compatibility only — the wake decision uses the granular
     // flags above via the gate.
     const isMention = isExplicitMention || isReplyToBot;
-    if (!this.shouldEnterContext(msg.channelId, { isMention, isDM })) {
+    if (!this.shouldEnterContext(msg.channelId, { isMention, isDM, guildId: msg.guildId })) {
       // If we're tracking this channel's missed-ambient (i.e. it was
       // unsubscribed), tally what we're dropping so the agent can ask later.
       // Skip the bot's own messages and chx no-op triggers (never "missed").
