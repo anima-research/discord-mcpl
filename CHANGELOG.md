@@ -7,6 +7,21 @@ in the git log and PR descriptions.
 
 ### Added
 
+- **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
+  advertises `eventCoalescing`, a message create carries its stable subject
+  (`coalesce: { key: "message:<id>", initial: true }`, plus an occurrence
+  `eventId` on `channels/incoming`), and edits/deletes are `push/event`s
+  addressing that same subject in the channel's scope (`coalesce.channelId`,
+  when the host accepts channel-scoped pushes and the channel is declared —
+  guild channels at registration, DMs when first seen). An edit of a message
+  the agent has not read yet replaces it in place of a second copy; a delete
+  of an unread message withdraws it without trace and of a read one appends
+  the `[message deleted]` notice. Hosts without the capability see exactly
+  the old shape. Unconditionally: edit and delete occurrence ids are now
+  unique per occurrence (`discord_edit_<id>_<editedAt>`); the old
+  `discord_edit_<id>` made every edit after the first vanish at the host's
+  dedup.
+
 - **MCPL RFC-008 tool classes.** Every tool in `tools/list` now carries
   `_meta["mcpl/class"]`, e.g. `["comms", "files"]` on the send tools, so
   hosts can decide what tool-lifecycle observers may see; `comms` arguments

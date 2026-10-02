@@ -201,6 +201,30 @@ async function normalizeImageForInference(
   }
 }
 
+/** RFC-006 `coalesce` member (mcpl-core 0.2.x predates it). */
+interface CoalesceMember {
+  key: string;
+  channelId?: string;
+  retract?: boolean;
+  initial?: boolean;
+}
+type CoalescedPushEventParams = PushEventParams & { coalesce?: CoalesceMember };
+type CoalescedIncomingMessage = ChannelsIncomingParams['messages'][number] & { eventId?: string; coalesce?: CoalesceMember };
+
+/** Normalize the host's `eventCoalescing` advertisement (RFC-006 §10). */
+export function parseHostCoalescing(
+  advertised: unknown,
+): { pushEvents: boolean; channelsIncoming: boolean; channelScopedPush: boolean } | null {
+  if (advertised === true) return { pushEvents: true, channelsIncoming: true, channelScopedPush: true };
+  if (!advertised || typeof advertised !== 'object') return null;
+  const o = advertised as Record<string, unknown>;
+  return {
+    pushEvents: o.pushEvents === true,
+    channelsIncoming: o.channelsIncoming === true,
+    channelScopedPush: o.channelScopedPush === true,
+  };
+}
+
 export class DiscordMcplServer {
   private conn: McplConnection | null = null;
   // Note: the location-header transition tracker and the sticky-reply
@@ -393,6 +417,13 @@ export class DiscordMcplServer {
     return raw !== '0' && raw.toLowerCase() !== 'false';
   }
   private mcplEnabled = false;
+  /**
+   * RFC-006 event coalescing, as advertised by THIS host at initialize
+   * (`eventCoalescing: true | { pushEvents, channelsIncoming, channelScopedPush }`).
+   * Null when the host does not advertise it: creates, edits and deletes then
+   * go out exactly as before. Reset per connection.
+   */
+  private hostCoalescing: { pushEvents: boolean; channelsIncoming: boolean; channelScopedPush: boolean } | null = null;
   private enabledFeatureSets = new Set<string>();
   private channelManager = new ChannelManager();
   private stateTracker = new StateTracker();
@@ -955,6 +986,7 @@ export class DiscordMcplServer {
     // Detect MCPL support
     const clientMcpl = params?.capabilities?.experimental?.mcpl;
     this.mcplEnabled = clientMcpl !== undefined;
+    this.hostCoalescing = parseHostCoalescing((clientMcpl as { eventCoalescing?: unknown } | undefined)?.eventCoalescing);
     dbg('handleInitialize', {
       mcplEnabled: this.mcplEnabled,
       clientName: params?.clientInfo?.name,
@@ -2626,6 +2658,19 @@ export class DiscordMcplServer {
     };
   }
 
+  /**
+   * RFC-006 §3.2: the channel scope for a message's subject — the registered
+   * MCPL channel id — when the host accepts channel-scoped pushes and we have
+   * declared that channel to it (guild channels at registration, DMs when
+   * first seen). Otherwise undefined: the subject stays in feature-set scope,
+   * which still coalesces as long as every occurrence uses the same scope.
+   */
+  private coalesceChannelScope(guildId: string | null, channelId: string): string | undefined {
+    if (!this.hostCoalescing?.channelScopedPush) return undefined;
+    const id = mcplChannelId(guildId ?? 'dm', channelId);
+    return this.channelManager.get(id) ? id : undefined;
+  }
+
   private setupDiscordForwarding(): void {
     this.discord.onMessage((msg) => {
       this.handleDiscordMessage(msg).catch((err) => {
@@ -2646,13 +2691,24 @@ export class DiscordMcplServer {
       // Name the author the way a create does (`username: text`) so the agent
       // doesn't attribute the edit to whoever it was last talking to.
       const who = info?.authorName ? `${info.authorName}: ` : '';
-      this.conn.sendRequest(method.PUSH_EVENT, {
+      const timestamp = info?.editedAt ?? new Date().toISOString();
+      const scope = this.coalesceChannelScope(info?.guildId ?? null, channelId);
+      const params: CoalescedPushEventParams = {
         featureSet: 'discord.messaging',
-        eventId: `discord_edit_${messageId}`,
-        timestamp: new Date().toISOString(),
+        // The OCCURRENCE id (RFC-006 §3.1): a second edit of one message is a
+        // new occurrence, not a duplicate of the first — `discord_edit_<id>`
+        // alone made every later edit of a message vanish at the host's dedup.
+        eventId: `discord_edit_${messageId}_${timestamp}`,
+        timestamp,
         origin: this.messageEventOrigin(channelId, messageId, info),
+        tags: ['chat:edited'],
         payload: { content: [textContent(`[message edited] ${who}${newContent}`)] },
-      } satisfies PushEventParams).catch(() => {});
+        // RFC-006: replace the unread original; append once it was read.
+        ...(this.hostCoalescing?.pushEvents
+          ? { coalesce: { key: `message:${messageId}`, ...(scope ? { channelId: scope } : {}) } }
+          : {}),
+      };
+      this.conn.sendRequest(method.PUSH_EVENT, params as unknown as Record<string, unknown>).catch(() => {});
     });
 
     this.discord.onMessageDelete((channelId, messageId, isDM, info) => {
@@ -2662,13 +2718,22 @@ export class DiscordMcplServer {
         dbg('handleMessageDelete:drop', { channelId, messageId, reason: 'not-subscribed' });
         return;
       }
-      this.conn.sendRequest(method.PUSH_EVENT, {
+      const timestamp = new Date().toISOString();
+      const scope = this.coalesceChannelScope(info?.guildId ?? null, channelId);
+      const params: CoalescedPushEventParams = {
         featureSet: 'discord.messaging',
-        eventId: `discord_delete_${messageId}`,
-        timestamp: new Date().toISOString(),
+        eventId: `discord_delete_${messageId}_${timestamp}`,
+        timestamp,
         origin: this.messageEventOrigin(channelId, messageId, info),
-        payload: { content: [textContent(`[message deleted] ${messageId}`)] },
-      } satisfies PushEventParams).catch(() => {});
+        tags: ['chat:deleted'],
+        // The deletion notice (RFC-006 §6): shown only if a model read a
+        // version of the message; an unread message is withdrawn without trace.
+        payload: { content: [textContent(`[message deleted] ${messageId}${info?.authorName ? ` by @${info.authorName}` : ''}`)] },
+        ...(this.hostCoalescing?.pushEvents
+          ? { coalesce: { key: `message:${messageId}`, retract: true, ...(scope ? { channelId: scope } : {}) } }
+          : {}),
+      };
+      this.conn.sendRequest(method.PUSH_EVENT, params as unknown as Record<string, unknown>).catch(() => {});
     });
 
     this.discord.onReaction((ev) => {
@@ -3212,10 +3277,15 @@ export class DiscordMcplServer {
 
     // If this channel is open, use channels/incoming
     if (channelIsOpen) {
-      const incomingParams: ChannelsIncomingParams = {
-        messages: [{
+      const message: CoalescedIncomingMessage = {
           channelId: channelMcplId,
           messageId: msg.id,
+          // RFC-006: the create is the subject's first occurrence (`initial`),
+          // keyed by the stable platform message id so later edits/deletes —
+          // which always arrive as push/event — address the same subject.
+          ...(this.hostCoalescing?.channelsIncoming
+            ? { eventId: `discord_msg_${msg.id}`, coalesce: { key: `message:${msg.id}`, initial: true } }
+            : {}),
           threadId: msg.threadId,
           author: { id: msg.authorId, name: msg.authorName },
           timestamp: msg.timestamp.toISOString(),
@@ -3236,8 +3306,8 @@ export class DiscordMcplServer {
             isDM,
           },
           tags: eventTags,
-        }],
       };
+      const incomingParams: ChannelsIncomingParams = { messages: [message] };
 
       try {
         await conn.sendRequest(method.CHANNELS_INCOMING, incomingParams);
@@ -3258,9 +3328,17 @@ export class DiscordMcplServer {
       // Counts exclude this (addressed) message and all prior mentions/DMs —
       // those were delivered.
       const missed = this.missedTally.get(msg.channelId);
-      const pushParams: PushEventParams = {
+      const scope = this.coalesceChannelScope(msg.guildId, msg.channelId);
+      const pushParams: CoalescedPushEventParams = {
         featureSet: 'discord.messaging',
         eventId: `discord_msg_${msg.id}`,
+        // RFC-006: channel-scoped when the host accepts that and the channel is
+        // declared (guild channels at registration, DMs announced just above),
+        // so an edit or delete addresses the same subject whichever lane
+        // delivered the create.
+        ...(this.hostCoalescing?.pushEvents
+          ? { coalesce: { key: `message:${msg.id}`, initial: true, ...(scope ? { channelId: scope } : {}) } }
+          : {}),
         timestamp: msg.timestamp.toISOString(),
         origin: {
           source: 'discord',
@@ -3298,7 +3376,7 @@ export class DiscordMcplServer {
       };
 
       try {
-        await conn.sendRequest(method.PUSH_EVENT, pushParams);
+        await conn.sendRequest(method.PUSH_EVENT, pushParams as unknown as Record<string, unknown>);
         dbg('handleDiscordMessage:sent', { method: 'push/event', channelMcplId });
       } catch (err) {
         console.error('[discord-mcpl] push/event failed:', (err as Error).message);

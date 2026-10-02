@@ -363,6 +363,9 @@ export interface MessageEventInfo {
   authorId?: string;
   /** Discord username — the same handle the create path renders. */
   authorName?: string;
+  /** Edit time (ISO) when Discord supplies it: distinguishes one edit of a
+   *  message from the next (RFC-006 occurrence identity). */
+  editedAt?: string;
 }
 
 /** Why an incoming `messageUpdate` is (not) forwarded as an edit. */
@@ -1678,6 +1681,7 @@ export class DiscordAdapter {
         guildId: newMsg.guildId ?? null,
         authorId: newMsg.author?.id,
         authorName: newMsg.author?.username,
+        editedAt: newMsg.editedTimestamp ? new Date(newMsg.editedTimestamp).toISOString() : undefined,
       });
     });
 
