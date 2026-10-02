@@ -195,7 +195,7 @@ export const toolDefinitions: ToolDefinition[] = [
       'member of a guild to see it at all. Reports the config plane\'s desired-vs-effective ' +
       'state (live / stale / unavailable — whitelists and suppression share one lifecycle, so ' +
       'a broken filters file makes ALL of them stale together) and reaction-suppression state ' +
-      '(status/count/digest, never the entries themselves): some reaction markers are ' +
+      '(status/count/digest and baseline drift counts, never the entries themselves): some reaction markers are ' +
       'withheld from your view across every surface. Those entries are operator-maintained ' +
       'in the filters file and not adjustable from this tool surface — that is a facility ' +
       'not built yet (a referential suppress-by-key surface is planned host-side), not a ' +
