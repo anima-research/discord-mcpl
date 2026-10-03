@@ -65,8 +65,20 @@ class MockDiscordAdapter {
   onMessage(handler: (msg: DiscordMessageData) => void): void {
     this._messageHandler = handler;
   }
-  onMessageEdit(): void {}
-  onMessageDelete(): void {}
+  private _editHandler?: (channelId: string, messageId: string, newContent: string, isDM: boolean, info?: unknown) => void;
+  private _deleteHandler?: (channelId: string, messageId: string, isDM: boolean, info?: unknown) => void;
+  onMessageEdit(handler: (channelId: string, messageId: string, newContent: string, isDM: boolean, info?: unknown) => void): void {
+    this._editHandler = handler;
+  }
+  onMessageDelete(handler: (channelId: string, messageId: string, isDM: boolean, info?: unknown) => void): void {
+    this._deleteHandler = handler;
+  }
+  simulateEdit(channelId: string, messageId: string, newContent: string, isDM: boolean, info?: unknown): void {
+    this._editHandler?.(channelId, messageId, newContent, isDM, info);
+  }
+  simulateDelete(channelId: string, messageId: string, isDM: boolean, info?: unknown): void {
+    this._deleteHandler?.(channelId, messageId, isDM, info);
+  }
   onReaction(): void {}
   onReady(): void {}
   onChannelCreate(handler: (guildId: string, channel: DiscordChannelInfo) => void): void {
@@ -228,7 +240,7 @@ async function createTestPair(): Promise<{
 }
 
 /** Perform MCPL handshake from client side with MCPL capabilities. */
-async function mcplHandshake(client: McplConnection): Promise<McplInitializeResult> {
+async function mcplHandshake(client: McplConnection, hostExtras: Record<string, unknown> = {}): Promise<McplInitializeResult> {
   const params: McplInitializeParams = {
     protocolVersion: '2024-11-05',
     capabilities: {
@@ -238,7 +250,8 @@ async function mcplHandshake(client: McplConnection): Promise<McplInitializeResu
           pushEvents: true,
           channels: true,
           rollback: true,
-        },
+          ...hostExtras,
+        } as McplInitializeParams['capabilities']['experimental'] extends { mcpl?: infer M } ? M : never,
       },
     },
     clientInfo: { name: 'test-client', version: '0.1.0' },
@@ -1194,5 +1207,188 @@ describe('applyMentionCandidates', () => {
       { id: 'r_b', aliases: ['Dup'], kind: 'role' },
     ];
     assert.equal(applyMentionCandidates('@Dup', ambiguous), '@Dup');
+  });
+});
+
+// ── RFC-006 event coalescing ──
+
+describe('RFC-006 coalescing', () => {
+  type Coalesce = { key: string; channelId?: string; retract?: boolean; initial?: boolean };
+  type Push = PushEventParams & { coalesce?: Coalesce };
+  type Incoming = ChannelsIncomingParams['messages'][number] & { eventId?: string; coalesce?: Coalesce };
+
+  async function boot(hostExtras: Record<string, unknown>) {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client, hostExtras);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    const nextRequest = async (): Promise<{ method: string; params: unknown; id: string | number }> => {
+      for (;;) {
+        const m = await client.nextMessage();
+        if (m.type === 'request') return { method: m.request.method, params: m.request.params, id: m.request.id };
+      }
+    };
+    return { client, discord, serverPromise, nextRequest, finish: async () => { client.close(); await serverPromise; } };
+  }
+  const guildMessage = (id: string, text: string): DiscordMessageData => ({
+    id, content: text, cleanContent: text, authorId: 'u1', authorName: 'Bob', isBot: false,
+    channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+    mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+  } as unknown as DiscordMessageData);
+
+  it('open channel: create carries its identity; edits and deletes address the same channel-scoped subject', async () => {
+    const h = await boot({ eventCoalescing: true });
+    await h.client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });
+    h.discord.simulateMessage(guildMessage('m1', 'first version'));
+    const create = await h.nextRequest();
+    assert.equal(create.method, 'channels/incoming');
+    const msg = (create.params as ChannelsIncomingParams).messages[0] as Incoming;
+    assert.equal(msg.eventId, 'discord_msg_m1');
+    assert.deepEqual(msg.coalesce, { key: 'message:m1', initial: true });
+    h.client.sendResponse(create.id, { results: [{ messageId: 'm1', accepted: true, coalesce: { outcome: 'first' } }] });
+
+    h.discord.simulateEdit('c1', 'm1', 'second version', false, { guildId: 'g1', editedAt: '2026-10-02T00:00:01.000Z', authorName: 'Bob' });
+    const edit1 = await h.nextRequest();
+    assert.equal(edit1.method, 'push/event');
+    const e1 = edit1.params as Push;
+    assert.deepEqual(e1.coalesce, { key: 'message:m1', channelId: 'discord:g1:c1' });
+    assert.match(e1.eventId, /^discord_edit_m1_2026-10-02T00:00:01\.000Z_\d+$/);
+    assert.ok(e1.tags?.includes('chat:edited'));
+    assert.equal((e1.origin as { mcplChannelId?: string }).mcplChannelId, 'discord:g1:c1');
+    assert.equal((e1.payload.content[0] as { text?: string }).text, '[#general in Test Server] Bob: second version [edited]', 'replacement re-renders as the create did');
+    h.client.sendResponse(edit1.id, { accepted: true, coalesce: { outcome: 'replaced' } });
+
+    h.discord.simulateEdit('c1', 'm1', 'third version', false, { guildId: 'g1', editedAt: '2026-10-02T00:00:02.000Z' });
+    const edit2 = await h.nextRequest();
+    assert.notEqual((edit2.params as Push).eventId, e1.eventId, 'a second edit is a new occurrence');
+    h.client.sendResponse(edit2.id, { accepted: true });
+
+    h.discord.simulateDelete('c1', 'm1', false, { guildId: 'g1', authorName: 'Bob' });
+    const del = await h.nextRequest();
+    const d = del.params as Push;
+    assert.deepEqual(d.coalesce, { key: 'message:m1', retract: true, channelId: 'discord:g1:c1' });
+    assert.ok(d.tags?.includes('chat:deleted'));
+    assert.equal((d.payload.content[0] as { text?: string }).text, '[message deleted] m1 by @Bob');
+    assert.match(d.eventId, /^discord_delete_m1_/);
+    h.client.sendResponse(del.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('a replacement keeps the create\'s context: reply marker, location, author; edits in one millisecond stay distinct', async () => {
+    const h = await boot({ eventCoalescing: true });
+    await h.client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });
+    h.discord.simulateMessage({ ...guildMessage('m5', 'first version'), replyToId: 'parent1', replyToUserId: 'u_f', replyToUserName: 'Fable' } as unknown as DiscordMessageData);
+    const create = await h.nextRequest();
+    const createText = ((create.params as ChannelsIncomingParams).messages[0].content[0] as { text?: string }).text ?? '';
+    assert.ok(createText.includes('[replying to @Fable]') && createText.includes('[#general in Test Server]'), createText);
+    h.client.sendResponse(create.id, { results: [{ messageId: 'm5', accepted: true }] });
+    const at = '2026-10-02T00:00:09.000Z';
+    h.discord.simulateEdit('c1', 'm5', 'second <@u_f> version', false, { guildId: 'g1', editedAt: at, authorName: 'Bob', cleanContent: 'second @Fable version' });
+    const e1 = await h.nextRequest();
+    const e1text = ((e1.params as Push).payload.content[0] as { text?: string }).text;
+    assert.equal(e1text, `${createText.replace('first version', 'second @Fable version')} [edited]`, 'same prefix, marker, location and author; new body; marked');
+    h.client.sendResponse(e1.id, { accepted: true });
+    h.discord.simulateEdit('c1', 'm5', 'third version', false, { guildId: 'g1', editedAt: at, cleanContent: 'third version' });
+    const e2 = await h.nextRequest();
+    assert.notEqual((e2.params as Push).eventId, (e1.params as Push).eventId, 'same editedAt, distinct occurrence ids');
+    h.client.sendResponse(e2.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('a delete arriving while the create is still being built waits for it and shares its scope', async () => {
+    const h = await boot({ eventCoalescing: true });
+    // A first DM fetches backscroll before it is announced and forwarded.
+    (h.discord as unknown as { fetchHistory: () => Promise<unknown[]> }).fetchHistory = async () => { await new Promise((r) => setTimeout(r, 80)); return []; };
+    h.discord.simulateMessage({
+      id: 'dm7', content: 'oops', cleanContent: 'oops', authorId: 'u_bob', authorName: 'Bob', isBot: false,
+      channelId: 'dmchan7', channelName: undefined, guildId: null, guildName: undefined,
+      mentions: [], attachments: [], timestamp: new Date(),
+    } as unknown as DiscordMessageData);
+    h.discord.simulateDelete('dmchan7', 'dm7', true, { guildId: null, authorName: 'Bob' });
+    const first = await h.nextRequest();
+    assert.equal((first.params as Push).eventId, 'discord_msg_dm7', 'the create goes first');
+    assert.deepEqual((first.params as Push).coalesce, { key: 'message:dm7', initial: true, channelId: 'discord:dm:dmchan7' });
+    h.client.sendResponse(first.id, { accepted: true });
+    const second = await h.nextRequest();
+    assert.deepEqual((second.params as Push).coalesce, { key: 'message:dm7', retract: true, channelId: 'discord:dm:dmchan7' }, 'the delete follows, in the same scope');
+    h.client.sendResponse(second.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('an edit uses the scope its create used, even after the channel became registered', async () => {
+    const h = await boot({ eventCoalescing: true });
+    // g2/c9 is not registered at startup: the create goes out in feature-set scope.
+    h.discord.simulateMessage({ ...guildMessage('m8', 'before registration'), channelId: 'c9', guildId: 'g2', guildName: 'Late Guild', channelName: 'late' } as unknown as DiscordMessageData);
+    const create = await h.nextRequest();
+    assert.deepEqual((create.params as Push).coalesce, { key: 'message:m8', initial: true });
+    h.client.sendResponse(create.id, { accepted: true });
+    h.discord.simulateGuildCreate('g2', 'Late Guild', [{ id: 'c9', name: 'late', type: 'text' } as unknown as DiscordChannelInfo]);
+    // Registered AND opened now (an edit in an unsubscribed closed channel is
+    // dropped by the ingestion gate, as a create would be).
+    await h.client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g2', channelId: 'c9' } });
+    h.discord.simulateEdit('c9', 'm8', 'after registration', false, { guildId: 'g2', editedAt: '2026-10-02T00:00:10.000Z', cleanContent: 'after registration' });
+    const edit = await h.nextRequest();
+    assert.deepEqual((edit.params as Push).coalesce, { key: 'message:m8' }, 'still feature-set scope: the subject the create opened');
+    h.client.sendResponse(edit.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('closed guild channel: the push create is channel-scoped because the channel is registered', async () => {
+    const h = await boot({ eventCoalescing: { pushEvents: true, channelsIncoming: true, channelScopedPush: true } });
+    h.discord.simulateMessage(guildMessage('m2', 'mention while closed'));
+    const create = await h.nextRequest();
+    assert.equal(create.method, 'push/event');
+    assert.deepEqual((create.params as Push).coalesce, { key: 'message:m2', initial: true, channelId: 'discord:g1:c1' });
+    h.client.sendResponse(create.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('DM: announced first, then the create and its edit share the DM channel scope', async () => {
+    const h = await boot({ eventCoalescing: true });
+    h.discord.simulateMessage({
+      id: 'dm9', content: 'hello', cleanContent: 'hello', authorId: 'u_bob', authorName: 'Bob', isBot: false,
+      channelId: 'dmchan9', channelName: undefined, guildId: null, guildName: undefined,
+      mentions: [], attachments: [], timestamp: new Date(),
+    } as unknown as DiscordMessageData);
+    const create = await h.nextRequest(); // channels/changed is a notification; skipped
+    assert.equal(create.method, 'push/event');
+    assert.deepEqual((create.params as Push).coalesce, { key: 'message:dm9', initial: true, channelId: 'discord:dm:dmchan9' });
+    h.client.sendResponse(create.id, { accepted: true });
+    h.discord.simulateEdit('dmchan9', 'dm9', 'hello (edited)', true, { guildId: null, editedAt: '2026-10-02T00:00:03.000Z' });
+    const edit = await h.nextRequest();
+    assert.deepEqual((edit.params as Push).coalesce, { key: 'message:dm9', channelId: 'discord:dm:dmchan9' });
+    h.client.sendResponse(edit.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('host without channelScopedPush: subjects stay in feature-set scope', async () => {
+    const h = await boot({ eventCoalescing: { pushEvents: true, channelsIncoming: true, channelScopedPush: false } });
+    h.discord.simulateMessage(guildMessage('m3', 'closed, no channel scope'));
+    const create = await h.nextRequest();
+    assert.deepEqual((create.params as Push).coalesce, { key: 'message:m3', initial: true });
+    h.client.sendResponse(create.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('host without eventCoalescing: no coalesce member, but occurrence ids are still distinct', async () => {
+    const h = await boot({});
+    await h.client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });
+    h.discord.simulateMessage(guildMessage('m4', 'plain host'));
+    const create = await h.nextRequest();
+    const msg = (create.params as ChannelsIncomingParams).messages[0] as Incoming;
+    assert.equal(msg.eventId, undefined);
+    assert.equal(msg.coalesce, undefined);
+    h.client.sendResponse(create.id, { results: [{ messageId: 'm4', accepted: true }] });
+    h.discord.simulateEdit('c1', 'm4', 'v2', false, { guildId: 'g1', editedAt: '2026-10-02T00:00:04.000Z' });
+    const e1 = (await h.nextRequest());
+    h.client.sendResponse(e1.id, { accepted: true });
+    h.discord.simulateEdit('c1', 'm4', 'v3', false, { guildId: 'g1', editedAt: '2026-10-02T00:00:05.000Z' });
+    const e2 = (await h.nextRequest());
+    h.client.sendResponse(e2.id, { accepted: true });
+    assert.equal((e1.params as Push).coalesce, undefined);
+    assert.notEqual((e1.params as Push).eventId, (e2.params as Push).eventId);
+    await h.finish();
   });
 });

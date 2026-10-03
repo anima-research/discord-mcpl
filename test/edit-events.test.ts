@@ -105,10 +105,13 @@ describe('edit/delete push events', () => {
     open(server);
     edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
     del('chan1', 'm1', false, { guildId: 'g1' });
-    assert.deepEqual(sent.map(({ method, params }) => [method, params.eventId, params.origin.mcplChannelId]), [
+    // Occurrence ids are unique per edit/delete (RFC-006 §3.1): a fixed
+    // `discord_edit_<id>` collided with itself at the host's dedup.
+    assert.deepEqual(sent.map(({ method, params }) => [method, params.eventId.replace(/_[^_]+_\d+$/, ''), params.origin.mcplChannelId]), [
       ['push/event', 'discord_edit_m1', 'discord:g1:chan1'],
       ['push/event', 'discord_delete_m1', 'discord:g1:chan1'],
     ]);
+    assert.notEqual(sent[0].params.eventId, sent[1].params.eventId);
   });
 
   it('muting requires an explicit reopen before ambient creates and mutations resume', async () => {

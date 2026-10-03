@@ -365,6 +365,11 @@ export interface MessageEventInfo {
   authorId?: string;
   /** Discord username — the same handle the create path renders. */
   authorName?: string;
+  /** Edit time (ISO) when Discord supplies it: distinguishes one edit of a
+   *  message from the next (RFC-006 occurrence identity). */
+  editedAt?: string;
+  /** The edited body with mentions resolved, as a create renders it. */
+  cleanContent?: string;
 }
 
 /** Why an incoming `messageUpdate` is (not) forwarded as an edit. */
@@ -1715,12 +1720,16 @@ export class DiscordAdapter {
     }
     const content = newMsg.content!;
     const { channelId, id: messageId } = newMsg;
+    // RFC-006 occurrence identity and the create-equivalent rendering of a
+    // replacing edit need the edit time and the mention-resolved body.
+    const editedAt = newMsg.editedTimestamp ? new Date(newMsg.editedTimestamp).toISOString() : undefined;
+    const cleanContent = newMsg.cleanContent ?? undefined;
     await this.forwardMessageEvent(newMsg, (info) => {
       if (!info.guildId && this.dmUsers && (!info.authorId || !this.dmUsers.has(info.authorId))) {
         dbg('messageUpdate:drop', { msgId: messageId, channelId, reason: 'dm-not-allowed' });
         return;
       }
-      this.editHandler?.(channelId, messageId, content, !info.guildId, info);
+      this.editHandler?.(channelId, messageId, content, !info.guildId, { ...info, editedAt, cleanContent });
     });
   }
 
