@@ -201,6 +201,23 @@ async function normalizeImageForInference(
   }
 }
 
+/** Per-message memory kept from a create for its later edits/deletes. */
+interface CreateMemory {
+  /** Resolves when the create has been forwarded (or dropped). */
+  settled: Promise<void>;
+  resolve: () => void;
+  /** True once `settled` has resolved (lets callers skip the await). */
+  done: boolean;
+  /** Coalescing scope the create used: a channel id, or null for feature-set scope. */
+  scope?: string | null;
+  /** The create's rendering context, for a replacement that keeps it. */
+  render?: { prefix: string; replyMarker: string; location: string; authorName: string; attachments: ContentBlock[] };
+  edits: number;
+}
+const RECENT_CREATES_MAX = 512;
+/** Attachment blocks above this size are not kept for edits (inline images). */
+const RECENT_CREATE_ATTACHMENT_BYTES = 64 * 1024;
+
 /** RFC-006 `coalesce` member (mcpl-core 0.2.x predates it). */
 interface CoalesceMember {
   key: string;
@@ -424,6 +441,17 @@ export class DiscordMcplServer {
    * go out exactly as before. Reset per connection.
    */
   private hostCoalescing: { pushEvents: boolean; channelsIncoming: boolean; channelScopedPush: boolean } | null = null;
+  /**
+   * What this process remembers about recent creates, so an edit or delete of
+   * the same message (RFC-006: same subject) can (a) wait for an in-flight
+   * create instead of overtaking it, (b) use the create's exact coalescing
+   * scope rather than recomputing it after registration changed, and (c)
+   * re-render with the create's context (backscroll, reply marker, location,
+   * attachments) when it replaces the unread original. Bounded; a message
+   * that is not remembered falls back to recomputing scope and a bare edit.
+   */
+  private readonly recentCreates = new Map<string, CreateMemory>();
+  private editSeq = 0;
   private enabledFeatureSets = new Set<string>();
   private channelManager = new ChannelManager();
   private stateTracker = new StateTracker();
@@ -2671,6 +2699,102 @@ export class DiscordMcplServer {
     return this.channelManager.get(id) ? id : undefined;
   }
 
+  /** The coalescing scope for an edit/delete: the create's, when remembered
+   *  (registration may have changed since), else recomputed now. */
+  private subjectScope(messageId: string, guildId: string | null, channelId: string): string | undefined {
+    const mem = this.recentCreates.get(messageId);
+    if (mem?.scope !== undefined) return mem.scope ?? undefined;
+    return this.coalesceChannelScope(guildId, channelId);
+  }
+
+  /** Never overtake an in-flight create of the same message; synchronous
+   *  (no await, same tick) when there is none, so an edit or delete of a
+   *  settled message is sent exactly as promptly as before. */
+  private afterCreate(messageId: string, then: () => void): Promise<void> | void {
+    const mem = this.recentCreates.get(messageId);
+    if (mem && !mem.done) return mem.settled.then(then);
+    then();
+  }
+
+  private async forwardMessageEdit(channelId: string, messageId: string, newContent: string, isDM: boolean, info?: MessageEventInfo): Promise<void> {
+    if (!this.conn || !this.mcplEnabled) return;
+    if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
+    // Same ingestion gate as a create: an edit in a channel we don't ingest
+    // from must not leak in. (Mentions inside an edit are an accepted edge —
+    // the subscription/DM threshold is what closes the cross-channel leak.)
+    if (!this.shouldEnterContext(channelId, { isDM })) {
+      dbg('handleMessageEdit:drop', { channelId, messageId, reason: 'not-subscribed' });
+      return;
+    }
+    await this.afterCreate(messageId, () => this.sendMessageEdit(channelId, messageId, newContent, info));
+  }
+
+  private sendMessageEdit(channelId: string, messageId: string, newContent: string, info?: MessageEventInfo): void {
+    if (!this.conn) return;
+    const scope = this.subjectScope(messageId, info?.guildId ?? null, channelId);
+    const mem = this.recentCreates.get(messageId);
+    const timestamp = info?.editedAt ?? new Date().toISOString();
+    // Name the author the way a create does (`username: text`) so the agent
+    // doesn't attribute the edit to whoever it was last talking to.
+    const who = info?.authorName ? `${info.authorName}: ` : '';
+    // When the edit may REPLACE the unread create (RFC-006 §4.1), it must be
+    // as self-contained as the create was: same backscroll/guidance prefix,
+    // reply marker, location header and attachments, with the new body and
+    // an [edited] mark. Without a remembered create, or for a host that only
+    // appends, a bare edit line.
+    const render = this.hostCoalescing?.pushEvents ? mem?.render : undefined;
+    const content: ContentBlock[] = render
+      ? [textContent(`${render.prefix}${render.replyMarker}${render.location}${render.authorName}: ${info?.cleanContent ?? newContent} [edited]`), ...render.attachments]
+      : [textContent(`[message edited] ${who}${newContent}`)];
+    const params: CoalescedPushEventParams = {
+      featureSet: 'discord.messaging',
+      // The OCCURRENCE id (RFC-006 §3.1): a second edit of one message is a
+      // new occurrence, not a duplicate of the first — `discord_edit_<id>`
+      // alone made every later edit of a message vanish at the host's dedup.
+      // The counter keeps two edits that share a millisecond distinct.
+      eventId: `discord_edit_${messageId}_${timestamp}_${mem ? ++mem.edits : ++this.editSeq}`,
+      timestamp,
+      origin: this.messageEventOrigin(channelId, messageId, info),
+      tags: ['chat:edited'],
+      payload: { content },
+      // RFC-006: replace the unread original; append once it was read.
+      ...(this.hostCoalescing?.pushEvents
+        ? { coalesce: { key: `message:${messageId}`, ...(scope ? { channelId: scope } : {}) } }
+        : {}),
+    };
+    this.conn.sendRequest(method.PUSH_EVENT, params as unknown as Record<string, unknown>).catch(() => {});
+  }
+
+  private async forwardMessageDelete(channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo): Promise<void> {
+    if (!this.conn || !this.mcplEnabled) return;
+    if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
+    if (!this.shouldEnterContext(channelId, { isDM })) {
+      dbg('handleMessageDelete:drop', { channelId, messageId, reason: 'not-subscribed' });
+      return;
+    }
+    await this.afterCreate(messageId, () => this.sendMessageDelete(channelId, messageId, info));
+  }
+
+  private sendMessageDelete(channelId: string, messageId: string, info?: MessageEventInfo): void {
+    if (!this.conn) return;
+    const scope = this.subjectScope(messageId, info?.guildId ?? null, channelId);
+    const timestamp = new Date().toISOString();
+    const params: CoalescedPushEventParams = {
+      featureSet: 'discord.messaging',
+      eventId: `discord_delete_${messageId}_${timestamp}_${++this.editSeq}`,
+      timestamp,
+      origin: this.messageEventOrigin(channelId, messageId, info),
+      tags: ['chat:deleted'],
+      // The deletion notice (RFC-006 §6): shown only if a model read a
+      // version of the message; an unread message is withdrawn without trace.
+      payload: { content: [textContent(`[message deleted] ${messageId}${info?.authorName ? ` by @${info.authorName}` : ''}`)] },
+      ...(this.hostCoalescing?.pushEvents
+        ? { coalesce: { key: `message:${messageId}`, retract: true, ...(scope ? { channelId: scope } : {}) } }
+        : {}),
+    };
+    this.conn.sendRequest(method.PUSH_EVENT, params as unknown as Record<string, unknown>).catch(() => {});
+  }
+
   private setupDiscordForwarding(): void {
     this.discord.onMessage((msg) => {
       this.handleDiscordMessage(msg).catch((err) => {
@@ -2679,61 +2803,15 @@ export class DiscordMcplServer {
     });
 
     this.discord.onMessageEdit((channelId, messageId, newContent, isDM, info) => {
-      if (!this.conn || !this.mcplEnabled) return;
-      if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
-      // Same ingestion gate as a create: an edit in a channel we don't ingest
-      // from must not leak in. (Mentions inside an edit are an accepted edge —
-      // the subscription/DM threshold is what closes the cross-channel leak.)
-      if (!this.shouldEnterContext(channelId, { isDM })) {
-        dbg('handleMessageEdit:drop', { channelId, messageId, reason: 'not-subscribed' });
-        return;
-      }
-      // Name the author the way a create does (`username: text`) so the agent
-      // doesn't attribute the edit to whoever it was last talking to.
-      const who = info?.authorName ? `${info.authorName}: ` : '';
-      const timestamp = info?.editedAt ?? new Date().toISOString();
-      const scope = this.coalesceChannelScope(info?.guildId ?? null, channelId);
-      const params: CoalescedPushEventParams = {
-        featureSet: 'discord.messaging',
-        // The OCCURRENCE id (RFC-006 §3.1): a second edit of one message is a
-        // new occurrence, not a duplicate of the first — `discord_edit_<id>`
-        // alone made every later edit of a message vanish at the host's dedup.
-        eventId: `discord_edit_${messageId}_${timestamp}`,
-        timestamp,
-        origin: this.messageEventOrigin(channelId, messageId, info),
-        tags: ['chat:edited'],
-        payload: { content: [textContent(`[message edited] ${who}${newContent}`)] },
-        // RFC-006: replace the unread original; append once it was read.
-        ...(this.hostCoalescing?.pushEvents
-          ? { coalesce: { key: `message:${messageId}`, ...(scope ? { channelId: scope } : {}) } }
-          : {}),
-      };
-      this.conn.sendRequest(method.PUSH_EVENT, params as unknown as Record<string, unknown>).catch(() => {});
+      void this.forwardMessageEdit(channelId, messageId, newContent, isDM, info).catch((err) => {
+        console.error('[discord-mcpl] Error forwarding Discord edit:', err);
+      });
     });
 
     this.discord.onMessageDelete((channelId, messageId, isDM, info) => {
-      if (!this.conn || !this.mcplEnabled) return;
-      if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
-      if (!this.shouldEnterContext(channelId, { isDM })) {
-        dbg('handleMessageDelete:drop', { channelId, messageId, reason: 'not-subscribed' });
-        return;
-      }
-      const timestamp = new Date().toISOString();
-      const scope = this.coalesceChannelScope(info?.guildId ?? null, channelId);
-      const params: CoalescedPushEventParams = {
-        featureSet: 'discord.messaging',
-        eventId: `discord_delete_${messageId}_${timestamp}`,
-        timestamp,
-        origin: this.messageEventOrigin(channelId, messageId, info),
-        tags: ['chat:deleted'],
-        // The deletion notice (RFC-006 §6): shown only if a model read a
-        // version of the message; an unread message is withdrawn without trace.
-        payload: { content: [textContent(`[message deleted] ${messageId}${info?.authorName ? ` by @${info.authorName}` : ''}`)] },
-        ...(this.hostCoalescing?.pushEvents
-          ? { coalesce: { key: `message:${messageId}`, retract: true, ...(scope ? { channelId: scope } : {}) } }
-          : {}),
-      };
-      this.conn.sendRequest(method.PUSH_EVENT, params as unknown as Record<string, unknown>).catch(() => {});
+      void this.forwardMessageDelete(channelId, messageId, isDM, info).catch((err) => {
+        console.error('[discord-mcpl] Error forwarding Discord delete:', err);
+      });
     });
 
     this.discord.onReaction((ev) => {
@@ -3025,7 +3103,32 @@ export class DiscordMcplServer {
     return blocks;
   }
 
+  private rememberCreate(messageId: string): CreateMemory {
+    let resolve!: () => void;
+    const settled = new Promise<void>((r) => { resolve = r; });
+    const mem: CreateMemory = { settled, resolve: () => { mem.done = true; resolve(); }, done: false, edits: 0 };
+    this.recentCreates.set(messageId, mem);
+    while (this.recentCreates.size > RECENT_CREATES_MAX) {
+      const oldest = this.recentCreates.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentCreates.delete(oldest);
+    }
+    return mem;
+  }
+
   private async handleDiscordMessage(msg: DiscordMessageData): Promise<void> {
+    // Registered synchronously, before any await: an edit or delete of this
+    // message that arrives while the create is still being built (history
+    // fetch, attachment download) waits for it instead of overtaking it.
+    const mem = this.rememberCreate(msg.id);
+    try {
+      await this.forwardDiscordMessage(msg, mem);
+    } finally {
+      mem.resolve();
+    }
+  }
+
+  private async forwardDiscordMessage(msg: DiscordMessageData, mem: CreateMemory): Promise<void> {
     const conn = this.conn;
     dbg('handleDiscordMessage:enter', {
       msgId: msg.id,
@@ -3275,8 +3378,19 @@ export class DiscordMcplServer {
       return [...t];
     })();
 
+    {
+      const attachmentBytes = Buffer.byteLength(JSON.stringify(attachmentBlocks));
+      mem.render = {
+        prefix: prefixBlock, replyMarker, location, authorName: msg.authorName,
+        attachments: attachmentBytes <= RECENT_CREATE_ATTACHMENT_BYTES ? attachmentBlocks
+          : attachmentBlocks.length ? [textContent('[attachments as in the original message]')] : [],
+      };
+    }
+
     // If this channel is open, use channels/incoming
     if (channelIsOpen) {
+      // channels/incoming is channel scope by definition (RFC-006 §3.2).
+      mem.scope = channelMcplId;
       const message: CoalescedIncomingMessage = {
           channelId: channelMcplId,
           messageId: msg.id,
@@ -3329,6 +3443,7 @@ export class DiscordMcplServer {
       // those were delivered.
       const missed = this.missedTally.get(msg.channelId);
       const scope = this.coalesceChannelScope(msg.guildId, msg.channelId);
+      mem.scope = scope ?? null;
       const pushParams: CoalescedPushEventParams = {
         featureSet: 'discord.messaging',
         eventId: `discord_msg_${msg.id}`,

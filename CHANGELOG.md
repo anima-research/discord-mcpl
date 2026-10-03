@@ -16,9 +16,12 @@ in the git log and PR descriptions.
   guild channels at registration, DMs when first seen). An edit of a message
   the agent has not read yet replaces it in place of a second copy; a delete
   of an unread message withdraws it without trace and of a read one appends
-  the `[message deleted]` notice. Hosts without the capability see exactly
-  the old shape. Unconditionally: edit and delete occurrence ids are now
-  unique per occurrence (`discord_edit_<id>_<editedAt>`); the old
+  the `[message deleted]` notice; a replacing edit is rendered as the create
+  was (backscroll, reply marker, location, attachments) with an `[edited]`
+  mark. Edits and deletes wait for an in-flight create of the same message
+  and reuse its scope. Hosts without the capability see the old shape, with
+  one unconditional change: edit and delete occurrence ids are now unique
+  per occurrence (`discord_edit_<id>_<editedAt>_<n>`); the old
   `discord_edit_<id>` made every edit after the first vanish at the host's
   dedup.
 

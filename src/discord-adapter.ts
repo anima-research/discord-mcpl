@@ -366,6 +366,8 @@ export interface MessageEventInfo {
   /** Edit time (ISO) when Discord supplies it: distinguishes one edit of a
    *  message from the next (RFC-006 occurrence identity). */
   editedAt?: string;
+  /** The edited body with mentions resolved, as a create renders it. */
+  cleanContent?: string;
 }
 
 /** Why an incoming `messageUpdate` is (not) forwarded as an edit. */
@@ -1682,6 +1684,7 @@ export class DiscordAdapter {
         authorId: newMsg.author?.id,
         authorName: newMsg.author?.username,
         editedAt: newMsg.editedTimestamp ? new Date(newMsg.editedTimestamp).toISOString() : undefined,
+        cleanContent: newMsg.cleanContent,
       });
     });
 

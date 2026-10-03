@@ -1254,10 +1254,10 @@ describe('RFC-006 coalescing', () => {
     assert.equal(edit1.method, 'push/event');
     const e1 = edit1.params as Push;
     assert.deepEqual(e1.coalesce, { key: 'message:m1', channelId: 'discord:g1:c1' });
-    assert.equal(e1.eventId, 'discord_edit_m1_2026-10-02T00:00:01.000Z');
+    assert.match(e1.eventId, /^discord_edit_m1_2026-10-02T00:00:01\.000Z_\d+$/);
     assert.ok(e1.tags?.includes('chat:edited'));
     assert.equal((e1.origin as { mcplChannelId?: string }).mcplChannelId, 'discord:g1:c1');
-    assert.equal((e1.payload.content[0] as { text?: string }).text, '[message edited] Bob: second version');
+    assert.equal((e1.payload.content[0] as { text?: string }).text, '[#general in Test Server] Bob: second version [edited]', 'replacement re-renders as the create did');
     h.client.sendResponse(edit1.id, { accepted: true, coalesce: { outcome: 'replaced' } });
 
     h.discord.simulateEdit('c1', 'm1', 'third version', false, { guildId: 'g1', editedAt: '2026-10-02T00:00:02.000Z' });
@@ -1273,6 +1273,65 @@ describe('RFC-006 coalescing', () => {
     assert.equal((d.payload.content[0] as { text?: string }).text, '[message deleted] m1 by @Bob');
     assert.match(d.eventId, /^discord_delete_m1_/);
     h.client.sendResponse(del.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('a replacement keeps the create\'s context: reply marker, location, author; edits in one millisecond stay distinct', async () => {
+    const h = await boot({ eventCoalescing: true });
+    await h.client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });
+    h.discord.simulateMessage({ ...guildMessage('m5', 'first version'), replyToId: 'parent1', replyToUserId: 'u_f', replyToUserName: 'Fable' } as unknown as DiscordMessageData);
+    const create = await h.nextRequest();
+    const createText = ((create.params as ChannelsIncomingParams).messages[0].content[0] as { text?: string }).text ?? '';
+    assert.ok(createText.includes('[replying to @Fable]') && createText.includes('[#general in Test Server]'), createText);
+    h.client.sendResponse(create.id, { results: [{ messageId: 'm5', accepted: true }] });
+    const at = '2026-10-02T00:00:09.000Z';
+    h.discord.simulateEdit('c1', 'm5', 'second <@u_f> version', false, { guildId: 'g1', editedAt: at, authorName: 'Bob', cleanContent: 'second @Fable version' });
+    const e1 = await h.nextRequest();
+    const e1text = ((e1.params as Push).payload.content[0] as { text?: string }).text;
+    assert.equal(e1text, `${createText.replace('first version', 'second @Fable version')} [edited]`, 'same prefix, marker, location and author; new body; marked');
+    h.client.sendResponse(e1.id, { accepted: true });
+    h.discord.simulateEdit('c1', 'm5', 'third version', false, { guildId: 'g1', editedAt: at, cleanContent: 'third version' });
+    const e2 = await h.nextRequest();
+    assert.notEqual((e2.params as Push).eventId, (e1.params as Push).eventId, 'same editedAt, distinct occurrence ids');
+    h.client.sendResponse(e2.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('a delete arriving while the create is still being built waits for it and shares its scope', async () => {
+    const h = await boot({ eventCoalescing: true });
+    // A first DM fetches backscroll before it is announced and forwarded.
+    (h.discord as unknown as { fetchHistory: () => Promise<unknown[]> }).fetchHistory = async () => { await new Promise((r) => setTimeout(r, 80)); return []; };
+    h.discord.simulateMessage({
+      id: 'dm7', content: 'oops', cleanContent: 'oops', authorId: 'u_bob', authorName: 'Bob', isBot: false,
+      channelId: 'dmchan7', channelName: undefined, guildId: null, guildName: undefined,
+      mentions: [], attachments: [], timestamp: new Date(),
+    } as unknown as DiscordMessageData);
+    h.discord.simulateDelete('dmchan7', 'dm7', true, { guildId: null, authorName: 'Bob' });
+    const first = await h.nextRequest();
+    assert.equal((first.params as Push).eventId, 'discord_msg_dm7', 'the create goes first');
+    assert.deepEqual((first.params as Push).coalesce, { key: 'message:dm7', initial: true, channelId: 'discord:dm:dmchan7' });
+    h.client.sendResponse(first.id, { accepted: true });
+    const second = await h.nextRequest();
+    assert.deepEqual((second.params as Push).coalesce, { key: 'message:dm7', retract: true, channelId: 'discord:dm:dmchan7' }, 'the delete follows, in the same scope');
+    h.client.sendResponse(second.id, { accepted: true });
+    await h.finish();
+  });
+
+  it('an edit uses the scope its create used, even after the channel became registered', async () => {
+    const h = await boot({ eventCoalescing: true });
+    // g2/c9 is not registered at startup: the create goes out in feature-set scope.
+    h.discord.simulateMessage({ ...guildMessage('m8', 'before registration'), channelId: 'c9', guildId: 'g2', guildName: 'Late Guild', channelName: 'late' } as unknown as DiscordMessageData);
+    const create = await h.nextRequest();
+    assert.deepEqual((create.params as Push).coalesce, { key: 'message:m8', initial: true });
+    h.client.sendResponse(create.id, { accepted: true });
+    h.discord.simulateGuildCreate('g2', 'Late Guild', [{ id: 'c9', name: 'late', type: 'text' } as unknown as DiscordChannelInfo]);
+    // Registered AND opened now (an edit in an unsubscribed closed channel is
+    // dropped by the ingestion gate, as a create would be).
+    await h.client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g2', channelId: 'c9' } });
+    h.discord.simulateEdit('c9', 'm8', 'after registration', false, { guildId: 'g2', editedAt: '2026-10-02T00:00:10.000Z', cleanContent: 'after registration' });
+    const edit = await h.nextRequest();
+    assert.deepEqual((edit.params as Push).coalesce, { key: 'message:m8' }, 'still feature-set scope: the subject the create opened');
+    h.client.sendResponse(edit.id, { accepted: true });
     await h.finish();
   });
 
