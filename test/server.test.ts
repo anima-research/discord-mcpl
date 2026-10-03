@@ -6,7 +6,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import * as assert from 'node:assert/strict';
 import * as net from 'node:net';
-import { writeFileSync, unlinkSync, existsSync } from 'node:fs';
+import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -297,6 +297,8 @@ describe('DiscordMcplServer', () => {
     const initResult = await mcplHandshake(client);
 
     assert.equal(initResult.serverInfo.name, 'discord-mcpl');
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    assert.equal(initResult.serverInfo.version, manifest.version);
     const mcpl = initResult.capabilities.experimental?.mcpl as McplCapabilities;
     assert.ok(mcpl);
     assert.equal(mcpl.pushEvents, true);
@@ -338,6 +340,8 @@ describe('DiscordMcplServer', () => {
     const initResult = await mcpHandshake(client);
 
     assert.equal(initResult.serverInfo.name, 'discord-mcpl');
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    assert.equal(initResult.serverInfo.version, manifest.version);
     // No MCPL capabilities in MCP mode
     assert.equal(initResult.capabilities.experimental, undefined);
     // But tools should be declared
