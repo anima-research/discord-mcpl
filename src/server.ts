@@ -1542,6 +1542,9 @@ export class DiscordMcplServer {
         // stops delivering; it also won't auto-subscribe back in while muted.
         this.ensureSubscriptionsLoaded();
         this.subscribedChannels.delete(channelId);
+        for (const channel of this.channelManager.getOpen()) {
+          if (parseMcplChannelId(channel.id)?.channelId === channelId) this.channelManager.close(channel.id);
+        }
         return wasNew
           ? `Muted channel ${channelId}: no ambient, no wake on mention/reply, and it will not auto-subscribe you back in. Reverse with unmute_channel("${channelId}").`
           : `Channel ${channelId} was already muted.`;
@@ -1555,8 +1558,11 @@ export class DiscordMcplServer {
         this.ensureMutedLoaded();
         const removed = this.mutedChannels.delete(channelId);
         if (removed) this.saveMuted();
+        const compositeId = this.channelManager.getAll()
+          .find((channel) => parseMcplChannelId(channel.id)?.channelId === channelId)?.id;
+        const target = compositeId ? `channelId "${compositeId}"` : 'its MCPL channel id';
         return removed
-          ? `Unmuted channel ${channelId}. Direct addresses will reach you again; use channel_open with its MCPL id for ordinary traffic.`
+          ? `Unmuted channel ${channelId}. Direct addresses will reach you again. Ordinary traffic requires channel_open with ${target}. If the host still shows it as open, use channel_close then channel_open with the same id to reconcile.`
           : `Channel ${channelId} was not muted.`;
       }
 
@@ -1927,15 +1933,20 @@ export class DiscordMcplServer {
    * subscription check that creates go through, leaking cross-channel edit/
    * delete markers into agents scoped to the whole guild.)
    *
-   * Forward iff the channel is subscribed (ambient), OR the event addresses the
-   * bot (mention/reply), OR it's a DM. Non-subscribed ambient — including its
-   * edits and deletes — is dropped.
+   * Forward iff the channel is open or subscribed (ambient), OR the event
+   * addresses the bot (mention/reply), OR it's a DM. Muting takes precedence
+   * over every admission path. Open channels must also receive edits/deletes
+   * when their subscription state differs, unless muted.
    */
   private shouldEnterContext(
     channelId: string,
-    opts: { isMention?: boolean; isDM?: boolean } = {},
+    opts: { isMention?: boolean; isDM?: boolean; guildId?: string | null } = {},
   ): boolean {
-    return Boolean(opts.isMention) || Boolean(opts.isDM) || this.isChannelSubscribed(channelId);
+    if (this.isChannelMuted(channelId)) return false;
+    return Boolean(opts.isMention)
+      || Boolean(opts.isDM)
+      || (opts.guildId != null && this.channelManager.isDiscordChannelOpen(opts.guildId, channelId))
+      || this.isChannelSubscribed(channelId);
   }
 
   // Mute persistence: DISCORD_MUTED_CHANNELS_FILE, else a sibling of the
@@ -2721,9 +2732,9 @@ export class DiscordMcplServer {
     if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
     // Same ingestion gate as a create: an edit in a channel we don't ingest
     // from must not leak in. (Mentions inside an edit are an accepted edge —
-    // the subscription/DM threshold is what closes the cross-channel leak.)
-    if (!this.shouldEnterContext(channelId, { isDM })) {
-      dbg('handleMessageEdit:drop', { channelId, messageId, reason: 'not-subscribed' });
+    // the open/subscription/DM threshold closes the cross-channel leak.)
+    if (!this.shouldEnterContext(channelId, { isDM, guildId: info?.guildId })) {
+      dbg('handleMessageEdit:drop', { channelId, messageId, reason: this.isChannelMuted(channelId) ? 'muted' : 'not-open-or-subscribed' });
       return;
     }
     await this.afterCreate(messageId, () => this.sendMessageEdit(channelId, messageId, newContent, info));
@@ -2768,8 +2779,8 @@ export class DiscordMcplServer {
   private async forwardMessageDelete(channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo): Promise<void> {
     if (!this.conn || !this.mcplEnabled) return;
     if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
-    if (!this.shouldEnterContext(channelId, { isDM })) {
-      dbg('handleMessageDelete:drop', { channelId, messageId, reason: 'not-subscribed' });
+    if (!this.shouldEnterContext(channelId, { isDM, guildId: info?.guildId })) {
+      dbg('handleMessageDelete:drop', { channelId, messageId, reason: this.isChannelMuted(channelId) ? 'muted' : 'not-open-or-subscribed' });
       return;
     }
     await this.afterCreate(messageId, () => this.sendMessageDelete(channelId, messageId, info));
@@ -2802,17 +2813,18 @@ export class DiscordMcplServer {
       });
     });
 
+    const acceptMutation = (channelId: string) => !this.isChannelMuted(channelId);
     this.discord.onMessageEdit((channelId, messageId, newContent, isDM, info) => {
       void this.forwardMessageEdit(channelId, messageId, newContent, isDM, info).catch((err) => {
         console.error('[discord-mcpl] Error forwarding Discord edit:', err);
       });
-    });
+    }, acceptMutation);
 
     this.discord.onMessageDelete((channelId, messageId, isDM, info) => {
       void this.forwardMessageDelete(channelId, messageId, isDM, info).catch((err) => {
         console.error('[discord-mcpl] Error forwarding Discord delete:', err);
       });
-    });
+    }, acceptMutation);
 
     this.discord.onReaction((ev) => {
       if (!this.conn || !this.mcplEnabled) return;
@@ -3170,7 +3182,7 @@ export class DiscordMcplServer {
     }
 
     // Direct address (mention or DM) always reaches Lena. For ambient
-    // (non-direct) messages, only forward when the channel is in her
+    // (non-direct) messages, only forward when the channel is open or in her
     // subscription set — otherwise she'd get unbounded context noise
     // from every channel the bot can see. The wake decision is then
     // left to the host's gate policy via the `isMention`/`isDM` flags
@@ -3195,7 +3207,7 @@ export class DiscordMcplServer {
     // backward compatibility only — the wake decision uses the granular
     // flags above via the gate.
     const isMention = isExplicitMention || isReplyToBot;
-    if (!this.shouldEnterContext(msg.channelId, { isMention, isDM })) {
+    if (!this.shouldEnterContext(msg.channelId, { isMention, isDM, guildId: msg.guildId })) {
       // If we're tracking this channel's missed-ambient (i.e. it was
       // unsubscribed), tally what we're dropping so the agent can ask later.
       // Skip the bot's own messages and chx no-op triggers (never "missed").

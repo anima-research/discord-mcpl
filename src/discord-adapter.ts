@@ -16,6 +16,8 @@ import {
   MessageType,
   AttachmentBuilder,
   type Message,
+  type PartialMessage,
+  type Channel,
   type MessageReaction,
   type PartialMessageReaction,
   type PartialUser,
@@ -501,6 +503,8 @@ export class DiscordAdapter {
   private guildIds?: string[];
   private guildChannels?: Map<string, Set<string>>;
   private dmUsers?: Set<string>;
+  /** In-flight mutation deliveries, ordered per Discord message. */
+  private messageEventDeliveries = new Map<string, Promise<void>>();
   private slashCommandHandler?: (interaction: ChatInputCommandInteraction) => void;
   private guildCommandDefs?: ApplicationCommandDataResolvable[];
 
@@ -509,6 +513,8 @@ export class DiscordAdapter {
     channelId: string, messageId: string, newContent: string, isDM: boolean, info?: MessageEventInfo,
   ) => void;
   private deleteHandler?: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void;
+  private editAccept?: (channelId: string) => boolean;
+  private deleteAccept?: (channelId: string) => boolean;
   private reactionHandler?: (ev: ReactionEvent) => void;
   private readyHandler?: () => void;
   private channelCreateHandler?: (guildId: string, channel: DiscordChannelInfo) => void;
@@ -594,14 +600,23 @@ export class DiscordAdapter {
     this.messageHandler = handler;
   }
 
+  /** Optional acceptance predicates run synchronously at gateway receipt,
+   *  before mutation lookup/ordering. The server owns the policy; omitting
+   *  a predicate preserves the adapter's usual delivery behavior. */
   onMessageEdit(
     handler: (channelId: string, messageId: string, newContent: string, isDM: boolean, info?: MessageEventInfo) => void,
+    accept?: (channelId: string) => boolean,
   ): void {
     this.editHandler = handler;
+    this.editAccept = accept;
   }
 
-  onMessageDelete(handler: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void): void {
+  onMessageDelete(
+    handler: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void,
+    accept?: (channelId: string) => boolean,
+  ): void {
     this.deleteHandler = handler;
+    this.deleteAccept = accept;
   }
 
   /** Register a handler for incoming Discord reactions (add/remove). The server
@@ -1634,6 +1649,101 @@ export class DiscordAdapter {
 
   // ── Private ──
 
+  /** Resolve sparse gateway events before applying guild/channel/DM policy.
+   *  A missing guild id is not evidence of a DM: uncached guild messages can
+   *  lack it too. Fetch the channel (never the deleted message) only when the
+   *  message and cache cannot establish its location or a parent needed by
+   *  the channel allowlist. */
+  private async messageEventInfo(message: Message | PartialMessage): Promise<MessageEventInfo | null> {
+    const authorId = message.author?.id;
+    const authorName = message.author?.username;
+    let channel: Channel | null | undefined = message.channel ?? this.client.channels.cache.get(message.channelId);
+    let guildId = message.guildId ?? (channel && 'guildId' in channel ? channel.guildId : null);
+    // Packet guild identity alone does not establish whether an uncached
+    // channel is a thread under an allowlisted parent. Fetch only when that
+    // missing parent could affect the decision; a directly allowed channel
+    // or a channel with known parent metadata needs no lookup.
+    const needsParent = guildId
+      && !(channel && 'parentId' in channel)
+      && !this.channelAllowed(guildId, message.channelId);
+    if ((!guildId && !channel?.isDMBased()) || needsParent) {
+      channel = await this.client.channels.fetch(message.channelId);
+      guildId ??= channel && 'guildId' in channel ? channel.guildId : null;
+    }
+    if (!guildId && !channel?.isDMBased()) {
+      dbg('messageEvent:drop', { msgId: message.id, channelId: message.channelId, reason: 'unknown-channel' });
+      return null;
+    }
+    if (guildId && this.guildIds?.length && !this.guildIds.includes(guildId)) return null;
+    const parentId = channel && 'parentId' in channel ? channel.parentId : null;
+    if (!this.channelAllowed(guildId, message.channelId, parentId)) return null;
+    return {
+      guildId: guildId ?? null,
+      authorId,
+      authorName,
+    };
+  }
+
+  /** Resolve locations concurrently, but let earlier mutations finish before
+   *  delivering later ones for the same message. A slow edit lookup must not
+   *  arrive after its deletion. Failure releases the next delivery as well. */
+  private forwardMessageEvent(
+    message: Message | PartialMessage,
+    forward: (info: MessageEventInfo) => void,
+  ): Promise<void> {
+    const messageId = message.id;
+    const previous = this.messageEventDeliveries.get(messageId) ?? Promise.resolve();
+    const pending = Promise.allSettled([previous, this.messageEventInfo(message)]).then(([, result]) => {
+      if (result.status === 'rejected') throw result.reason;
+      if (result.value) forward(result.value);
+    });
+    const settled = pending.catch(() => {});
+    this.messageEventDeliveries.set(messageId, settled);
+    void settled.then(() => {
+      if (this.messageEventDeliveries.get(messageId) === settled) this.messageEventDeliveries.delete(messageId);
+    });
+    return pending;
+  }
+
+  private async handleMessageUpdate(oldMsg: Message | PartialMessage, newMsg: Message | PartialMessage): Promise<void> {
+    // Reject non-edits before potentially fetching a sparse event's channel.
+    const decision = editForwardDecision(oldMsg, newMsg, { selfId: this.client.user?.id });
+    if (decision !== 'forward') {
+      if (decision !== 'no-content' && decision !== 'self') {
+        dbg('messageUpdate:drop', { msgId: newMsg.id, channelId: newMsg.channelId, reason: decision });
+      }
+      return;
+    }
+    if (this.editAccept && !this.editAccept(newMsg.channelId)) {
+      dbg('messageUpdate:drop', { msgId: newMsg.id, channelId: newMsg.channelId, reason: 'ingress-filtered' });
+      return;
+    }
+    const content = newMsg.content!;
+    const { channelId, id: messageId } = newMsg;
+    // RFC-006 occurrence identity and the create-equivalent rendering of a
+    // replacing edit need the edit time and the mention-resolved body.
+    const editedAt = newMsg.editedTimestamp ? new Date(newMsg.editedTimestamp).toISOString() : undefined;
+    const cleanContent = newMsg.cleanContent ?? undefined;
+    await this.forwardMessageEvent(newMsg, (info) => {
+      if (!info.guildId && this.dmUsers && (!info.authorId || !this.dmUsers.has(info.authorId))) {
+        dbg('messageUpdate:drop', { msgId: messageId, channelId, reason: 'dm-not-allowed' });
+        return;
+      }
+      this.editHandler?.(channelId, messageId, content, !info.guildId, { ...info, editedAt, cleanContent });
+    });
+  }
+
+  private async handleMessageDelete(message: Message | PartialMessage): Promise<void> {
+    if (this.deleteAccept && !this.deleteAccept(message.channelId)) {
+      dbg('messageDelete:drop', { msgId: message.id, channelId: message.channelId, reason: 'ingress-filtered' });
+      return;
+    }
+    const { channelId, id: messageId } = message;
+    await this.forwardMessageEvent(message, (info) => {
+      this.deleteHandler?.(channelId, messageId, !info.guildId, info);
+    });
+  }
+
   private setupEvents(): void {
     this.client.on('messageCreate', (message: Message) => {
       const base = {
@@ -1664,40 +1774,14 @@ export class DiscordAdapter {
     });
 
     this.client.on('messageUpdate', (oldMsg, newMsg) => {
-      const decision = editForwardDecision(oldMsg, newMsg, {
-        selfId: this.client.user?.id,
-        dmUsers: this.dmUsers,
-      });
-      if (decision !== 'forward') {
-        if (decision !== 'no-content' && decision !== 'self') {
-          dbg('messageUpdate:drop', { msgId: newMsg.id, channelId: newMsg.channelId, reason: decision });
-        }
-        return;
-      }
-      const editParent =
-        newMsg.channel && 'parentId' in newMsg.channel
-          ? ((newMsg.channel as { parentId?: string | null }).parentId ?? null)
-          : null;
-      if (!this.channelAllowed(newMsg.guildId, newMsg.channelId, editParent)) return;
-      this.editHandler?.(newMsg.channelId, newMsg.id, newMsg.content!, !newMsg.guildId, {
-        guildId: newMsg.guildId ?? null,
-        authorId: newMsg.author?.id,
-        authorName: newMsg.author?.username,
-        editedAt: newMsg.editedTimestamp ? new Date(newMsg.editedTimestamp).toISOString() : undefined,
-        cleanContent: newMsg.cleanContent,
+      void this.handleMessageUpdate(oldMsg, newMsg).catch((err) => {
+        console.error('[discord-mcpl] Failed to forward message edit:', (err as Error).message);
       });
     });
 
     this.client.on('messageDelete', (message) => {
-      const delParent =
-        message.channel && 'parentId' in message.channel
-          ? ((message.channel as { parentId?: string | null }).parentId ?? null)
-          : null;
-      if (!this.channelAllowed(message.guildId, message.channelId, delParent)) return;
-      this.deleteHandler?.(message.channelId, message.id, !message.guildId, {
-        guildId: message.guildId ?? null,
-        authorId: message.author?.id,
-        authorName: message.author?.username,
+      void this.handleMessageDelete(message).catch((err) => {
+        console.error('[discord-mcpl] Failed to forward message deletion:', (err as Error).message);
       });
     });
 
