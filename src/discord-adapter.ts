@@ -1779,10 +1779,18 @@ export class DiscordAdapter {
       });
     });
 
-    this.client.on('messageDelete', (message) => {
+    const forwardDelete = (message: Message | PartialMessage): void => {
       void this.handleMessageDelete(message).catch((err) => {
         console.error('[discord-mcpl] Failed to forward message deletion:', (err as Error).message);
       });
+    };
+    this.client.on('messageDelete', forwardDelete);
+    // Discord emits a separate event for moderator bulk purges. Each member
+    // needs the same tombstone, location/filter checks, and per-message
+    // ordering as an individual deletion; one failed lookup leaves the
+    // remaining members free to proceed.
+    this.client.on('messageDeleteBulk', (messages) => {
+      for (const message of messages.values()) forwardDelete(message);
     });
 
     this.client.on('messageReactionAdd', (reaction, user) => {
