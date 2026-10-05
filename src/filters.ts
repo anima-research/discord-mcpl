@@ -336,6 +336,17 @@ export interface FiltersPlaneStatus {
   staleSince?: string;
 }
 
+/** Counts comparing the enforced file set with the startup baseline.
+ *  No baseline fingerprint: a small overridden set could be guessed from
+ *  an unsalted digest. The counts alone establish equality or drift. */
+export interface ReactionSuppressionBaselineDelta {
+  baselineCount: number;
+  /** Baseline entries absent from the enforced file set. */
+  missingCount: number;
+  /** Enforced file entries absent from the baseline. */
+  additionalCount: number;
+}
+
 export interface ReactionSuppressionStatus {
   /** not-configured: no suppression anywhere — reported plainly, never
    *  implying protection. configured-empty: the file key exists with zero
@@ -367,6 +378,12 @@ export interface ReactionSuppressionStatus {
   legacyEnvIgnored?: true;
   /** Source is the deprecated env alias; migrate to the file key. */
   deprecated?: true;
+  /** Present when a file key is enforced and a nonempty baseline was
+   *  injected. Compares normalized sets without changing file authority.
+   *  Under stale status this describes the last-known-good file set, not
+   *  unreadable disk contents. Absent when withholding all reactions
+   *  (unavailable): no finite set is enforced in that posture. */
+  baselineDelta?: ReactionSuppressionBaselineDelta;
 }
 
 interface CompiledSet {
@@ -378,7 +395,7 @@ interface CompiledSet {
 }
 
 function compileTokens(tokens: string[]): CompiledSet {
-  const normalized = tokens.map(normalizeReactionEmoji).filter(Boolean);
+  const normalized = [...new Set(tokens.map(normalizeReactionEmoji).filter(Boolean))];
   return {
     tokens,
     matchSet: new Set(normalized),
@@ -403,8 +420,9 @@ function compileTokens(tokens: string[]): CompiledSet {
  * - file key present (even empty): sole authority. An explicit `[]` means
  *   the operator chose no suppression — it beats every default. A
  *   concurrently-set legacy env is IGNORED — never unioned — with a
- *   glyph-free warning; a concurrently-injected baseline is overridden
- *   silently (that is normal operation, not an anomaly).
+ *   glyph-free warning. A concurrently-injected baseline is overridden;
+ *   a glyph-free delta reports omissions for operator review, never as
+ *   authority to merge entries back into an operator's file.
  * - file key absent, DISCORD_SUPPRESS_REACTION_EMOJIS set at startup: the
  *   deprecated compatibility source (process-static snapshot; changing the
  *   env requires a restart). Pre-existing filter files that lack the key
@@ -470,6 +488,8 @@ export class DiscordFiltersState {
   /** Host-injected protective baseline, snapshotted once — process-static. */
   private readonly baselineSet: CompiledSet | null;
   private warnedLegacyIgnored = false;
+  private baselineDelta: ReactionSuppressionBaselineDelta | undefined;
+  private lastMissingBaselineDigest: string | null = null;
 
   constructor(opts?: { fileConfigured?: boolean; legacyEnv?: string; baselineEnv?: string }) {
     this.fileConfigured = opts?.fileConfigured ?? !!process.env.DISCORD_FILTERS_FILE;
@@ -497,6 +517,7 @@ export class DiscordFiltersState {
     this.keyPresent = list !== undefined;
     this.suppression = list !== undefined ? compileTokens(list) : null;
     this.warnLegacyIgnoredOnce();
+    this.updateBaselineDelta();
   }
 
   /** The desired state on disk is unreadable ('invalid') or the file is
@@ -543,6 +564,34 @@ export class DiscordFiltersState {
         'but the filters file suppressedReactionEmojis key is authoritative — the env is IGNORED, not merged. ' +
         'Fold its entries into the filters file and unset the env (alias retires per issue #16).',
     );
+  }
+
+  /** Compare on each successful load, including startup and hot reload.
+   *  Log once per changed missing set, so whitelist-only updates and
+   *  repeated status reads do not repeat the warning. A repaired set
+   *  resets the warning, allowing a later regression to be reported. */
+  private updateBaselineDelta(): void {
+    if (!this.suppression || !this.baselineSet) {
+      this.baselineDelta = undefined;
+      this.lastMissingBaselineDigest = null;
+      return;
+    }
+    const missing = [...this.baselineSet.matchSet].filter((t) => !this.suppression!.matchSet.has(t));
+    const additional = [...this.suppression.matchSet].filter((t) => !this.baselineSet!.matchSet.has(t));
+    this.baselineDelta = {
+      baselineCount: this.baselineSet.matchSet.size,
+      missingCount: missing.length,
+      additionalCount: additional.length,
+    };
+    const missingDigest = missing.length ? sha256(JSON.stringify(missing.sort())) : null;
+    if (missingDigest && missingDigest !== this.lastMissingBaselineDigest) {
+      console.error(
+        `[discord-mcpl] reaction-suppression: filters file key is missing ${missing.length} entries ` +
+          'present in the injected baseline — the file is authoritative; add them if the omission was not deliberate. ' +
+          'Compare the operator file with DISCORD_SUPPRESSED_REACTIONS_BASELINE; entries are omitted from diagnostics.',
+      );
+    }
+    this.lastMissingBaselineDigest = missingDigest;
   }
 
   /** The set currently matched against, if any: the file key when present
@@ -601,6 +650,7 @@ export class DiscordFiltersState {
     if (this.keyPresent) {
       const n = this.suppression?.matchSet.size ?? 0;
       const legacyIgnored = this.legacySet ? { legacyEnvIgnored: true as const } : {};
+      const baselineDelta = this.baselineDelta ? { baselineDelta: { ...this.baselineDelta } } : {};
       if (this.broken) {
         // suppressAll() already routed the unusable-LKG cases away, so the
         // stale set has entries and stays enforced.
@@ -611,6 +661,7 @@ export class DiscordFiltersState {
           effectiveDigest: this.suppression!.digest,
           source: 'file',
           ...legacyIgnored,
+          ...baselineDelta,
         };
       }
       return {
@@ -620,6 +671,7 @@ export class DiscordFiltersState {
         effectiveDigest: n > 0 ? this.suppression!.digest : null,
         source: 'file',
         ...legacyIgnored,
+        ...baselineDelta,
       };
     }
     if (this.legacyPresent) {

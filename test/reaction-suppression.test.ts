@@ -646,6 +646,175 @@ describe('startup resolution (resolveStartupFilters)', () => {
   });
 });
 
+describe('suppression baseline drift diagnostics', () => {
+  const BASELINE_TOKENS = [SUPPRESSED_UNICODE, SUPPRESSED_VARIANT, ':sigil:', SUPPRESSED_CUSTOM_ID];
+  const BASELINE = BASELINE_TOKENS.join(',');
+  let cap: ReturnType<typeof captureStderr>;
+
+  beforeEach(() => {
+    cap = captureStderr();
+  });
+
+  afterEach(() => {
+    cap.restore();
+  });
+
+  function state(baselineEnv: string | undefined = BASELINE): DiscordFiltersState {
+    return new DiscordFiltersState({ fileConfigured: true, legacyEnv: undefined, baselineEnv });
+  }
+
+  function warnings(): string[] {
+    return cap.lines.filter((line) => line.includes('filters file key is missing'));
+  }
+
+  it('detects a baseline that grew after the file was seeded, without rewriting the file', () => {
+    const path = join(dir, 'seeded.json');
+    const initialEnv = { DISCORD_SUPPRESSED_REACTIONS_BASELINE: SUPPRESSED_UNICODE };
+    const initial = state(SUPPRESSED_UNICODE);
+    initial.applyParsed(resolveStartupFilters(path, initialEnv).filters);
+    assert.equal(initial.suppressionStatus().baselineDelta?.missingCount, 0);
+    assert.equal(warnings().length, 0);
+    const seededBytes = readFileSync(path, 'utf8');
+
+    const grown = state(BASELINE);
+    grown.applyParsed(resolveStartupFilters(path, { DISCORD_SUPPRESSED_REACTIONS_BASELINE: BASELINE }).filters);
+    const status = grown.suppressionStatus();
+    assert.equal(status.source, 'file');
+    assert.deepEqual(status.baselineDelta, {
+      baselineCount: 4,
+      missingCount: 3,
+      additionalCount: 0,
+    });
+    assert.equal(readFileSync(path, 'utf8'), seededBytes);
+    assert.equal(grown.isSuppressed({ emoji: SUPPRESSED_UNICODE }), true);
+    assert.equal(grown.isSuppressed({ emoji: SUPPRESSED_VARIANT }), false);
+    assert.equal(warnings().length, 1);
+    assert.match(warnings()[0], /missing 3 entries/);
+    assert.match(warnings()[0], /file is authoritative/);
+  });
+
+  it('compares normalized sets and hashes duplicates only once', () => {
+    const st = state([SUPPRESSED_BARE, 'sigil', ...BASELINE_TOKENS, '::'].join(','));
+    st.applyParsed({ suppressedReactionEmojis: [
+      SUPPRESSED_CUSTOM_ID, 'sigil', SUPPRESSED_BARE, SUPPRESSED_UNICODE, SUPPRESSED_VARIANT,
+    ] });
+    const status = st.suppressionStatus();
+    assert.deepEqual(status.baselineDelta, {
+      baselineCount: 4,
+      missingCount: 0,
+      additionalCount: 0,
+    });
+    assert.equal(warnings().length, 0);
+    st.applyParsed({});
+    assert.equal(st.suppressionStatus().effectiveDigest, status.effectiveDigest,
+      'the existing effective-set digest agrees when the same normalized baseline becomes effective');
+  });
+
+  it('reports additional file entries without warning or treating a superset as missing protection', () => {
+    const st = state();
+    st.applyParsed({ suppressedReactionEmojis: [...BASELINE_TOKENS, HARMLESS] });
+    assert.equal(st.suppressionStatus().baselineDelta?.additionalCount, 1);
+    assert.equal(st.suppressionStatus().baselineDelta?.missingCount, 0);
+    assert.equal(warnings().length, 0);
+    assert.equal(st.isSuppressed({ emoji: HARMLESS }), true);
+  });
+
+  it('reports an explicit empty key as missing the baseline but preserves the operator clear', () => {
+    const st = state();
+    st.applyParsed({ suppressedReactionEmojis: [] });
+    const status = st.suppressionStatus();
+    assert.equal(status.status, 'configured-empty');
+    assert.equal(status.source, 'file');
+    assert.equal(status.baselineDelta?.missingCount, 4);
+    assert.equal(status.baselineDelta?.additionalCount, 0);
+    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false);
+    assert.equal(warnings().length, 1);
+  });
+
+  it('warns on changed omissions and regressions, rather than every reload or status read', () => {
+    const st = state();
+    const key = { suppressedReactionEmojis: [SUPPRESSED_UNICODE] };
+    st.applyParsed(key);
+    st.suppressionStatus();
+    st.suppressionStatus();
+    st.applyParsed({ ...key, dmUsers: ['123456789012345678'] });
+    st.applyParsed({ suppressedReactionEmojis: [SUPPRESSED_UNICODE, HARMLESS] });
+    assert.equal(warnings().length, 1, 'same missing set is not re-logged');
+
+    st.applyParsed({ suppressedReactionEmojis: [SUPPRESSED_VARIANT] });
+    assert.equal(warnings().length, 2, 'same missing count but different entries warns');
+    st.applyParsed({ suppressedReactionEmojis: BASELINE_TOKENS });
+    assert.equal(st.suppressionStatus().baselineDelta?.missingCount, 0);
+    assert.equal(warnings().length, 2, 'repair itself is quiet');
+    st.applyParsed(key);
+    assert.equal(warnings().length, 3, 'a later regression is reported');
+    st.applyParsed({});
+    assert.equal(st.suppressionStatus().baselineDelta, undefined);
+    st.applyParsed(key);
+    assert.equal(warnings().length, 4, 'key removal clears the old comparison');
+  });
+
+  it('omits the comparison when there is no baseline or no authoritative file key', () => {
+    for (const baselineEnv of [undefined, '', ' , :: , ']) {
+      const st = new DiscordFiltersState({ fileConfigured: true, legacyEnv: undefined, baselineEnv });
+      st.applyParsed({ suppressedReactionEmojis: [HARMLESS] });
+      assert.equal(st.suppressionStatus().baselineDelta, undefined);
+    }
+    const baseline = state();
+    baseline.applyParsed({});
+    assert.equal(baseline.suppressionStatus().source, 'baseline-default');
+    assert.equal(baseline.suppressionStatus().baselineDelta, undefined);
+    const legacy = new DiscordFiltersState({ fileConfigured: true, legacyEnv: HARMLESS, baselineEnv: BASELINE });
+    legacy.applyParsed({});
+    assert.equal(legacy.suppressionStatus().source, 'legacy-env');
+    assert.equal(legacy.suppressionStatus().baselineDelta, undefined);
+    assert.equal(warnings().length, 0);
+  });
+
+  it('compares the stale last-known-good set, but omits unavailable withhold-all states', () => {
+    const st = state();
+    st.applyParsed({ suppressedReactionEmojis: [SUPPRESSED_UNICODE] });
+    const delta = st.suppressionStatus().baselineDelta;
+    st.markBroken('missing');
+    assert.equal(st.suppressionStatus().status, 'stale');
+    assert.deepEqual(st.suppressionStatus().baselineDelta, delta);
+    assert.equal(warnings().length, 1);
+
+    st.applyParsed({ suppressedReactionEmojis: [] });
+    st.markBroken('invalid');
+    assert.equal(st.suppressionStatus().status, 'unavailable');
+    assert.equal(st.suppressionStatus().baselineDelta, undefined);
+    const neverLoaded = state();
+    neverLoaded.markBroken('invalid');
+    assert.equal(neverLoaded.suppressionStatus().baselineDelta, undefined);
+
+    st.applyParsed({ suppressedReactionEmojis: BASELINE_TOKENS });
+    assert.equal(st.suppressionStatus().status, 'active');
+    assert.equal(st.suppressionStatus().baselineDelta?.missingCount, 0);
+  });
+
+  it('returns the redacted delta through filters_get, including baseline-only and file-only entries', async () => {
+    process.env.DISCORD_FILTERS_FILE = join(dir, 'filters.json');
+    process.env.DISCORD_SUPPRESSED_REACTIONS_BASELINE = BASELINE;
+    const server = new DiscordMcplServer({ getFilters: () => ({}) } as DiscordAdapter);
+    server.filtersState.applyParsed({ suppressedReactionEmojis: [SUPPRESSED_UNICODE, ENV_ONLY_GLYPH] });
+    const s = server as unknown as {
+      executeToolCall(name: string, args: Record<string, unknown>): Promise<{
+        reactionSuppression: { baselineDelta: { missingCount: number; additionalCount: number } };
+      }>;
+    };
+    const result = await s.executeToolCall('filters_get', {});
+    assert.equal(result.reactionSuppression.baselineDelta.missingCount, 3);
+    assert.equal(result.reactionSuppression.baselineDelta.additionalCount, 1);
+    assert.deepEqual(Object.keys(result.reactionSuppression.baselineDelta).sort(),
+      ['additionalCount', 'baselineCount', 'missingCount'], 'the overridden baseline exposes counts only');
+    const output = JSON.stringify(result) + cap.lines.join('\n');
+    for (const secret of [...BASELINE_TOKENS, SUPPRESSED_BARE, 'sigil', ENV_ONLY_GLYPH]) {
+      assert.ok(!output.includes(secret), 'status and warnings contain no suppression entries');
+    }
+  });
+});
+
 describe('server integration', () => {
   function makeServer(): DiscordMcplServer {
     // The server's filters state reads DISCORD_FILTERS_FILE at
