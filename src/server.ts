@@ -548,7 +548,17 @@ export class DiscordMcplServer {
    */
   async setupSlashCommands(): Promise<void> {
     this.discord.onSlashCommand((interaction) => {
-      void this.handleSlashCommand(interaction);
+      // Dispatched without awaiting, so a handler's rejection would be
+      // unhandled — and on Node ≥ 15 an unhandled rejection ends the
+      // process. Discord rejects a late reply ("Unknown interaction" once
+      // its 3-second acknowledgment window has passed), so this must never
+      // take the server down with it.
+      void this.handleSlashCommand(interaction).catch((err) => {
+        console.error(
+          `[discord-mcpl] /${interaction.commandName} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
     });
     await this.discord.registerGuildCommands([
       {
