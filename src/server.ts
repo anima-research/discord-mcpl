@@ -52,7 +52,7 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { withToolClasses } from './tool-classes.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
-import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
+import { ChannelManager, mcplChannelId, parseMcplChannelId, resolveOpenTarget, toDescriptor, toDmDescriptor } from './channels.js';
 import {
   channelLabel,
   isSnowflake,
@@ -2504,23 +2504,11 @@ export class DiscordMcplServer {
   }
 
   private async handleChannelOpen(params: ChannelOpenRequest): Promise<ChannelOpenResponse> {
-    let desc = params.channelId ? this.channelManager.get(params.channelId) : undefined;
-
-    // Compatibility with hosts that predate exact channelId routing.
-    const addr = params.address as { guildId?: string; channelId?: string } | undefined;
-    if (!desc && params.type === 'discord' && addr?.guildId && addr?.channelId) {
-      desc = this.channelManager.get(mcplChannelId(addr.guildId, addr.channelId));
-    }
-
-    if (!desc) {
-      for (const candidate of this.channelManager.getAll()) {
-        if (candidate.type === params.type) {
-          desc = candidate;
-          break;
-        }
-      }
-    }
-    if (!desc) throw new Error('No matching channel found');
+    // Every supplied selector must name the same registered channel; nothing
+    // is fetched, opened or subscribed unless they do (see resolveOpenTarget).
+    const target = resolveOpenTarget(params, this.channelManager.getAll());
+    if (!target.ok) throw new Error(target.reason);
+    const desc = target.channel;
 
     const parsed = parseMcplChannelId(desc.id);
     if (!parsed) throw new Error(`Invalid Discord channel ID: ${desc.id}`);
@@ -2537,7 +2525,7 @@ export class DiscordMcplServer {
       });
       messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
       result.history = this.projectHistoryReactions(messages).map((message) => ({
-        channelId: desc!.id,
+        channelId: desc.id,
         messageId: message.id,
         author: { id: message.authorId, name: message.authorName },
         timestamp: message.timestamp.toISOString(),
