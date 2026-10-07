@@ -84,10 +84,6 @@ export function toDmDescriptor(
   };
 }
 
-/**
- * Tracks which channels are registered (known to host) and which are open
- * (host has explicitly opened them for bidirectional message flow).
- */
 /** How many candidates an ambiguity refusal lists before summarizing. */
 const OPEN_CHOICES_SHOWN = 10;
 
@@ -99,6 +95,10 @@ const OPEN_CHOICES_SHOWN = 10;
  * Only a request with no selector at all (a legacy host) may pick a channel
  * by type, and only when exactly one of that type is registered.
  *
+ * type is required in MCPL, so every request must carry it as a non-empty
+ * string, and the channel opened must be of that type. A missing or invalid
+ * type is refused, never read as "any type".
+ *
  * "No selector" is narrow. channelId is optional in MCPL, so it is absent
  * only when omitted; an empty or non-string channelId is an invalid selector.
  * address is a required field, so a selector-free host sends it as null or
@@ -109,7 +109,10 @@ export function resolveOpenTarget(
   params: { channelId?: unknown; type?: unknown; address?: unknown },
   channels: readonly ChannelDescriptor[],
 ): { ok: true; channel: ChannelDescriptor } | { ok: false; reason: string } {
-  const type = typeof params.type === 'string' && params.type.length > 0 ? params.type : null;
+  const { type } = params;
+  if (typeof type !== 'string' || type === '') {
+    return { ok: false, reason: 'type must be a non-empty string naming a channel type, such as "discord". Nothing was opened.' };
+  }
   const byId = new Map(channels.map((c) => [c.id, c]));
   const named: Array<{ via: string; id: string }> = [];
 
@@ -146,25 +149,29 @@ export function resolveOpenTarget(
       };
     }
     const channel = byId.get(named[0].id)!;
-    if (type && channel.type !== type) {
+    if (channel.type !== type) {
       return { ok: false, reason: `${named[0].via} is a ${channel.type} channel, not ${type}; nothing was opened.` };
     }
     return { ok: true, channel };
   }
 
-  const candidates = channels.filter((c) => !type || c.type === type);
+  const candidates = channels.filter((c) => c.type === type);
   if (candidates.length === 1) return { ok: true, channel: candidates[0] };
   if (candidates.length === 0) {
-    return { ok: false, reason: `No ${type ?? ''} channel is registered${type ? '' : ' at all'}; nothing was opened.`.replace('No  channel', 'No channel') };
+    return { ok: false, reason: `No ${type} channel is registered; nothing was opened.` };
   }
   const shown = candidates.slice(0, OPEN_CHOICES_SHOWN).map((c) => `${c.id} (${c.label})`).join(', ');
   const more = candidates.length > OPEN_CHOICES_SHOWN ? `, and ${candidates.length - OPEN_CHOICES_SHOWN} more` : '';
   return {
     ok: false,
-    reason: `${candidates.length} ${type ?? ''} channels are registered; name one with channelId. Choices: ${shown}${more}. Nothing was opened.`.replace(/ {2}/g, ' '),
+    reason: `${candidates.length} ${type} channels are registered; name one with channelId. Choices: ${shown}${more}. Nothing was opened.`,
   };
 }
 
+/**
+ * Tracks which channels are registered (known to host) and which are open
+ * (host has explicitly opened them for bidirectional message flow).
+ */
 export class ChannelManager {
   /** All registered channel descriptors, keyed by MCPL channel ID. */
   private registered = new Map<string, ChannelDescriptor>();

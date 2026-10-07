@@ -111,6 +111,44 @@ describe('channels/open selectors', () => {
     }
   });
 
+  it('refuses a missing, empty or non-string type on every path, even where the selector fits', async () => {
+    // With type "discord", each of these requests would open discord:g1:c1.
+    const selectors = [{}, { address: null }, { address: {} }, { channelId: 'discord:g1:c1' }, { address: { guildId: 'g1', channelId: 'c1' } }];
+    for (const type of [undefined, null, '', 0, false, {}, []]) {
+      for (const selector of selectors) {
+        const f = fixture([general]);
+        const params = { ...selector, ...(type === undefined ? {} : { type }), history: { limit: 10 } };
+        await assert.rejects(
+          f.server.handleChannelOpen(params),
+          /type must be a non-empty string naming a channel type, such as "discord"\. Nothing was opened\./,
+          JSON.stringify(params),
+        );
+        f.nothingOpened();
+      }
+    }
+  });
+
+  it('refuses a string type the fitting channel does not have, on every path', async () => {
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [{ address: null }, /^No slack channel is registered; nothing was opened\.$/],
+      [{ address: {} }, /^No slack channel is registered; nothing was opened\.$/],
+      [{ channelId: 'discord:g1:c1' }, /^channelId "discord:g1:c1" is a discord channel, not slack; nothing was opened\.$/],
+      [{ address: { guildId: 'g1', channelId: 'c1' } }, /^address g1\/c1 is a discord channel, not slack; nothing was opened\.$/],
+    ];
+    for (const [selector, refusal] of cases) {
+      const f = fixture([general]);
+      await assert.rejects(
+        f.server.handleChannelOpen({ ...selector, type: 'slack', history: { limit: 10 } }),
+        (err: Error) => {
+          assert.match(err.message, refusal);
+          return true;
+        },
+        JSON.stringify(selector),
+      );
+      f.nothingOpened();
+    }
+  });
+
   it('opens exactly the channel an id names, with its own history', async () => {
     const f = fixture();
     const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c2', type: 'discord', history: { limit: 5 } });

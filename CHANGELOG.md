@@ -159,7 +159,10 @@ in the git log and PR descriptions.
   or contradictory one is refused before any history is fetched or anything
   is opened. Only a request with no selector at all may pick a channel by
   type, and only when exactly one fits; otherwise the refusal lists bounded
-  choices.
+  choices. `type`, which MCPL requires, must be a non-empty string on every
+  request and must match the channel opened: a missing or invalid `type` is
+  refused, even beside an exact `channelId` or `address`, rather than read as
+  any type.
 
 - **Ghost "[message edited]" events.** Discord emits `messageUpdate` for more
   than content edits: link-preview / embed refreshes re-send old messages with
