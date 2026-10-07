@@ -61,6 +61,7 @@ import {
   isRetractReceipt,
   isView,
   MARKS_OPTION,
+  markersReported,
   readMarksChoice,
   renderEntry,
   renderListPage,
@@ -1072,10 +1073,12 @@ export class DiscordMcplServer {
       // lack the verb, where the operator chose `all` and the framework
       // reported no marks of its own. A host with the verb that omits its
       // receipt is reported as such, never supplemented: reactions placed
-      // here would bypass its journal and its cancel. Best-effort, in
-      // parallel.
+      // here would bypass its journal and its cancel. Any receipt at all,
+      // even one this server can't read, is shown and never supplemented.
+      // Best-effort, in parallel.
+      const reported = markersReported(result.markers);
       let reacted = 0;
-      const refs = support === false && marks === 'all' && !result.markers ? result.hiddenRefs ?? [] : [];
+      const refs = support === false && marks === 'all' && !reported ? result.hiddenRefs ?? [] : [];
       await Promise.all(
         refs.map(async (ref) => {
           // channelId may be raw or the "discord:guild:channel" composite.
@@ -1093,7 +1096,7 @@ export class DiscordMcplServer {
       const n = result.hidden ?? 0;
       const lines = [
         `🙈 Removed **${n}** message${n === 1 ? '' : 's'} from the agent's context (redacted in place).`,
-        result.markers || support
+        reported || support
           ? describeMarkers(result.markers)
           : marks === 'all'
             ? `Marks: this host doesn't place them, so this server reacted 💤 itself on ${reacted} of ${refs.length}.`

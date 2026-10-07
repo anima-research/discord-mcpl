@@ -48,13 +48,20 @@ export type MarkersReceipt = {
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
 /**
+ * Whether the host said anything about marks. Only an absent receipt
+ * (undefined or null) says nothing; anything else is its account, shown even
+ * when this server can't read it, and never supplemented.
+ */
+export const markersReported = (markers: unknown): boolean => markers !== undefined && markers !== null;
+
+/**
  * The reply's account of marks, saying what the receipt says and no more: a
  * queued mark is requested, not yet seen on Discord. A receipt this server
  * can't read (a status it doesn't know, a field it reads missing) is shown
  * as sent, never described as something else or left out.
  */
 export function describeMarkers(markers: unknown): string {
-  if (markers === undefined || markers === null) return 'Marks: this host reported nothing about 💤 marks.';
+  if (!markersReported(markers)) return 'Marks: this host reported nothing about 💤 marks.';
   if (!isMarkersReceipt(markers)) {
     return `Marks: the host's receipt is in a shape this server can't read; here it is as sent:\n${asSent(markers)}`;
   }

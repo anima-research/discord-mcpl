@@ -387,6 +387,30 @@ describe('/hide and the marks choice', () => {
     assert.deepEqual(c.reactions, []);
     assert.match(ic.out.replies.at(-1)!, /Marks: none \(not chosen\)\./);
   });
+
+  it('on an older host, reacts itself only when the host sent no receipt at all, and shows any it did send', async () => {
+    const hiding = (markers: unknown) => host({
+      marksVerb: 'no',
+      answer: (p) => (p.command === 'hide' ? { ok: true, hidden: 2, hiddenRefs: hidden, markers } : { ok: true }),
+    });
+    for (const markers of [false, 0, '', {}, 'queued']) {
+      const { server, reactions } = serverWith(hiding(markers).conn);
+      const i = interaction('hide', { message: '111111111111111111', marks: 'all' });
+      await asAdmin(() => server.handleSlashCommand(i.value));
+      const what = JSON.stringify(markers);
+      assert.deepEqual(reactions, [], `${what}: never supplemented`);
+      const reply = i.out.replies.at(-1)!;
+      assert.match(reply, /\nMarks: the host's receipt is in a shape this server can't read; here it is as sent:\n```json\n/, what);
+      assert.ok(reply.includes(`\n${what}\n`), what);
+    }
+    for (const markers of [undefined, null]) {
+      const { server, reactions } = serverWith(hiding(markers).conn);
+      const i = interaction('hide', { message: '111111111111111111', marks: 'all' });
+      await asAdmin(() => server.handleSlashCommand(i.value));
+      assert.equal(reactions.length, 2, String(markers));
+      assert.match(i.out.replies.at(-1)!, /reacted 💤 itself on 2 of 2/, String(markers));
+    }
+  });
 });
 
 // Shapes as agent-framework#250 (dc2928c, unchanged at 485a3c7) produces them:
@@ -632,6 +656,9 @@ describe('rendering', () => {
       ['a scope that is no marks choice', { scope: 'everyone', unmarked: 0, notRemoved: 0, status: 'none', queued: 0 }],
       ['a count that is not a number', { scope: 'all', unmarked: '1', notRemoved: 0, status: 'none', queued: 0 }],
       ['no record at all', 'queued'],
+      ['false', false],
+      ['zero', 0],
+      ['empty text', ''],
     ];
     for (const [what, receipt] of receipts) {
       const text = describeMarkers(receipt);
