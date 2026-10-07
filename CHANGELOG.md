@@ -7,6 +7,26 @@ in the git log and PR descriptions.
 
 ### Added
 
+- **A refused DM's sender is told** (issue #60). When the DM whitelist refuses
+  a DM, the connector posts one plain notice in that DM channel, with mentions
+  disabled: "Automatic delivery notice: this connection did not forward your
+  DM because this sender is outside its configured contacts. It sends this
+  notice at most once per 24 hours." The DM itself is still never forwarded
+  and never wakes the agent. Each refused message notifies at most once
+  (duplicates and catch-up included), each sender at most once per 24 hours,
+  and a message older than the notice state never notifies, whether it
+  arrives live or through catch-up. Each attempt is reserved durably before
+  sending and never retried; its outcome (sent, failed, unknown) is recorded
+  after, and an attempt interrupted in between is reported as unknown at the
+  next start. State lives in
+  `$XDG_STATE_HOME/discord-mcpl/<bot user id>/dm-notices.json` (override:
+  `DISCORD_DM_NOTICES_FILE`) and holds no message bodies. If it can't be read
+  or written, notices are suspended. The agent can turn notices off and on with
+  `filters_update {setDmNotice}`, which works with or without a filters file.
+  `filters_get` shows the setting and whether the state is persisted. Every
+  refused DM leaves one operator log line (sender id, message id, notice
+  outcome) without its body.
+
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
   advertises `eventCoalescing`, a message create carries its stable subject
   (`coalesce: { key: "message:<id>", initial: true }`, plus an occurrence
@@ -150,6 +170,16 @@ in the git log and PR descriptions.
   ceilings. (issue #30, PR #12)
 
 ### Fixed
+
+- **The reconnect catch-up sweep bypassed the ingress filters** (issue #60).
+  It delivered every missed message in a known DM channel, including DMs from a
+  sender since removed from the DM whitelist, and kept sweeping channels of
+  guilds removed from the guild filter. The sweep now applies the same ingress
+  decision as live delivery (guild, channel and thread parent, DM author),
+  evaluated after the history fetch, so a filter change made while the fetch
+  was pending applies. A channel whose identity can't be resolved isn't
+  delivered on a guess; it waits for the next sweep. Withheld messages are
+  never rendered, and a withheld DM goes through the refusal notice rule.
 
 - **Ghost "[message edited]" events.** Discord emits `messageUpdate` for more
   than content edits: link-preview / embed refreshes re-send old messages with

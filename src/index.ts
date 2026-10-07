@@ -13,6 +13,16 @@
  *                       (whitelist those channels + their threads only)
  *   DISCORD_DM_USERS  - Optional: Comma-separated user ID whitelist for DMs.
  *                       Nonempty = only listed users; empty/unset = anyone.
+ *                       A refused DM is never forwarded; its sender gets an
+ *                       automatic delivery notice at most once per 24 hours
+ *                       (the agent can turn this off: filters_update
+ *                       setDmNotice).
+ *   DISCORD_DM_NOTICES_FILE - Optional: where that notice's durable state
+ *                       lives (per-sender limits and the on/off setting; no
+ *                       message bodies). Default:
+ *                       $XDG_STATE_HOME/discord-mcpl/<bot user id>/dm-notices.json
+ *                       (~/.local/state when XDG_STATE_HOME is unset). If it
+ *                       can't be read or written, notices are suspended.
  *   DISCORD_ADMIN_USERS - Optional: Comma-separated user IDs allowed to use
  *                       admin slash commands (/undo). Unset = nobody.
  *   DISCORD_FILTERS_FILE - Optional: path to a JSON file holding the guild/
@@ -116,6 +126,9 @@ async function main(): Promise<void> {
   }
 
   const server = new DiscordMcplServer(discord, voice);
+  // Refused-DM notice state: opened now. A new state's floor is the server's
+  // construction, before anything is listened to or swept.
+  server.openDmNoticeState();
 
   // The filters plane state (whitelists + reaction suppression share one
   // desired/effective/status lifecycle): hand it the startup filters, or

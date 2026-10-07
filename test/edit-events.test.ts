@@ -77,7 +77,7 @@ describe('edit/delete push events', () => {
     const noop = () => {};
     s.discord = {
       botUserId: 'bot',
-      onMessage: noop, onReaction: noop,
+      onMessage: noop, onReaction: noop, onDmRefused: noop,
       onChannelCreate: noop, onChannelDelete: noop, onGuildCreate: noop, onChannelAvailable: noop,
       onMessageEdit: (h: EditHandler) => { edit = h; },
       onMessageDelete: (h: DeleteHandler) => { del = h; },

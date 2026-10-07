@@ -81,6 +81,31 @@ class MockDiscordAdapter {
   }
   onReaction(): void {}
   onReady(): void {}
+
+  // DM allowlist refusals and the shared ingress decision. Tests set
+  // `refuse` to make the sweep's decision refuse particular authors/channels.
+  private _dmRefusedHandler?: (ev: { messageId: string; channelId: string; authorId: string; origin: 'live' | 'sweep' }) => void;
+  onDmRefused(handler: (ev: { messageId: string; channelId: string; authorId: string; origin: 'live' | 'sweep' }) => void): void {
+    this._dmRefusedHandler = handler;
+  }
+  simulateDmRefused(ev: { messageId: string; channelId: string; authorId: string }): void {
+    this._dmRefusedHandler?.({ ...ev, origin: 'live' });
+  }
+  refuse: (channelId: string, guildId: string | null, authorId: string) => string | null = () => null;
+  historyIngressReason(channelId: string, guildId: string | null, authorId: string): string | null {
+    return this.refuse(channelId, guildId, authorId);
+  }
+  dmNotice = true;
+  getFilters(): { dmNotice: boolean } {
+    return { dmNotice: this.dmNotice };
+  }
+  notices: Array<{ channelId: string; content: string }> = [];
+  noticeError: Error | null = null;
+  async sendDmNotice(channelId: string, content: string): Promise<{ messageId: string }> {
+    if (this.noticeError) throw this.noticeError;
+    this.notices.push({ channelId, content });
+    return { messageId: `notice_${this.nextMessageId++}` };
+  }
   onChannelCreate(handler: (guildId: string, channel: DiscordChannelInfo) => void): void {
     this._channelCreateHandler = handler;
   }
