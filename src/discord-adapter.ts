@@ -1377,6 +1377,26 @@ export class DiscordAdapter {
         });
       }
     });
+    // Active threads are not part of guild.channels.fetch(), so without this
+    // an agent can't discover ongoing thread conversations. Same visibility
+    // filter as channels (a thread under an allowed parent is allowed).
+    try {
+      const listed = new Set(result.map((c) => c.id));
+      const active = await guild.channels.fetchActiveThreads();
+      active.threads.forEach((t) => {
+        if (listed.has(t.id) || !this.channelAllowed(guildId, t.id, t.parentId)) return;
+        result.push({
+          id: t.id,
+          name: t.name,
+          type: mapChannelType(t.type),
+          parentId: t.parentId ?? undefined,
+          label: formatChannelLabel(t.name, guild.name),
+        });
+      });
+    } catch (err) {
+      // Best-effort: the channel listing above still stands.
+      console.error(`[discord-mcpl] listing active threads failed for guild ${guildId}:`, (err as Error).message);
+    }
     return result;
   }
 
