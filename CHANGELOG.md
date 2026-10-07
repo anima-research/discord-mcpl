@@ -135,6 +135,14 @@ in the git log and PR descriptions.
   claimed for it). Migration: write the key (or let first materialization
   seed it), unset the env, verify `source: "file"`; the alias retires per
   issue #16 once fleet inventory shows migrated files.
+- **Every channel declares where a publish lands (MCPL RFC-011).** Channel
+  descriptors carry `capabilities.publish.target: 'root'`: a Discord thread
+  is its own channel and a DM has none, so a publish lands in the channel
+  itself or fails. `channels/publish` takes the RFC's `threadId`: `null`
+  posts to the channel and is echoed back as `threadId: null` so the host
+  can check where it landed; a thread id (or any other value) is refused
+  before anything is posted, as `delivered: false` with a reason and no
+  message id; a request without the field is answered exactly as before.
 
 ### Changed
 

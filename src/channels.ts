@@ -11,8 +11,19 @@ export type DiscordChannelDescriptor = ChannelDescriptor & {
   capabilities?: {
     history?: { maxMessages?: number; supportsBeforeMessage?: boolean };
     acknowledgment?: { kind?: string; supportsValue?: boolean };
+    publish?: { target: 'root' };
   };
 };
+
+/**
+ * Where a channels/publish lands (MCPL RFC-011 `capabilities.publish`):
+ * `root` — the channel has no threads inside it, so every publish lands in
+ * the channel itself or fails, and a publish naming a thread is refused
+ * before anything is posted. True of every Discord channel this server
+ * registers: a Discord thread is its own channel (with its own id), never a
+ * thread within one, and a DM has none.
+ */
+export const PUBLISH_TARGET = { target: 'root' } as const;
 
 /** MCPL channel ID format: discord:<guildId>:<channelId> */
 export function mcplChannelId(guildId: string, channelId: string): string {
@@ -47,6 +58,7 @@ export function toDescriptor(
     capabilities: {
       history: { maxMessages: maxHistory, supportsBeforeMessage: true },
       acknowledgment: { kind: 'reaction', supportsValue: true },
+      publish: PUBLISH_TARGET,
     },
   };
 }
@@ -80,6 +92,7 @@ export function toDmDescriptor(
     capabilities: {
       history: { maxMessages: maxHistory, supportsBeforeMessage: true },
       acknowledgment: { kind: 'reaction', supportsValue: true },
+      publish: PUBLISH_TARGET,
     },
   };
 }

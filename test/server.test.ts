@@ -860,6 +860,90 @@ describe('DiscordMcplServer', () => {
     await serverPromise;
   });
 
+  it('channels/register declares a root publish target on every channel (RFC-011)', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    assert.equal(regMsg.type, 'request');
+    if (regMsg.type === 'request') {
+      const channels = (regMsg.request.params as { channels: Array<{ id: string; capabilities?: Record<string, unknown> }> }).channels;
+      assert.ok(channels.length > 0);
+      for (const c of channels) {
+        assert.deepEqual(c.capabilities?.publish, { target: 'root' }, `${c.id} declares root`);
+        // The existing per-channel capabilities are kept beside it.
+        assert.ok(c.capabilities?.history && c.capabilities?.acknowledgment, `${c.id} keeps history/acknowledgment`);
+      }
+      client.sendResponse(regMsg.request.id, {});
+    }
+    client.close();
+    await serverPromise;
+  });
+
+  it('channels/publish with threadId null posts to the channel and echoes null', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1', threadId: null,
+      content: [{ type: 'text', text: 'At the root.' }],
+    })) as Record<string, unknown>;
+    assert.equal(res.delivered, true);
+    assert.equal(typeof res.messageId, 'string');
+    assert.ok('threadId' in res && res.threadId === null, 'the explicit root target is echoed');
+    assert.deepEqual(discord.sentMessages.map((m) => [m.channelId, m.content]), [['c1', 'At the root.']]);
+    client.close();
+    await serverPromise;
+  });
+
+  it('channels/publish naming a thread is refused before anything is posted', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    for (const threadId of ['t-123', 42, '', { id: 't' }]) {
+      const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+        conversationId: 'conv_1', channelId: 'discord:g1:c1', threadId,
+        content: [{ type: 'text', text: 'Into a thread?' }],
+      })) as Record<string, unknown>;
+      assert.equal(res.delivered, false, `threadId ${JSON.stringify(threadId)} refused`);
+      // No message id: a definitive no-post the host may count as failed.
+      assert.equal('messageId' in res, false);
+      assert.equal('threadId' in res, false, 'nothing landed, so no target is echoed');
+      assert.match(String(res.reason), /thread|threadId/);
+    }
+    assert.equal(discord.sentMessages.length, 0, 'nothing was posted');
+    client.close();
+    await serverPromise;
+  });
+
+  it('channels/publish without threadId answers a legacy caller exactly as before', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1',
+      content: [{ type: 'text', text: 'Legacy.' }],
+    })) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(res).sort(), ['delivered', 'messageId']);
+    assert.equal(res.delivered, true);
+    assert.equal(discord.sentMessages.length, 1);
+    client.close();
+    await serverPromise;
+  });
+
   it('guildCreate registers new guild channels via channels/changed', async () => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
