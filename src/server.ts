@@ -65,9 +65,9 @@ import {
   renderEntry,
   renderListPage,
   summarizeControl,
+  surgeryOutcomeUnknown,
   unreadable,
   type BoundedReply,
-  type MarkersReceipt,
 } from './awareness-marks.js';
 import { toolDefinitions } from './tools.js';
 import { withToolClasses } from './tool-classes.js';
@@ -271,10 +271,11 @@ export function parseHostCoalescing(
 export class DiscordMcplServer {
   private conn: McplConnection | null = null;
 
-  /** Whether the connected host makes 💤 awareness marks a choice (its
+  /** Whether each host connection makes 💤 awareness marks a choice (its
    *  `host/command` has the `marks` verb): probed once per connection, on
-   *  first need. Only a definite answer is kept. */
-  private marksSupport: { conn: McplConnection; supported: boolean } | null = null;
+   *  first need, with commands that arrive meanwhile sharing the probe. Only
+   *  a definite answer is kept. */
+  private readonly marksSupport = new WeakMap<McplConnection, Promise<boolean | { reason: string }>>();
   // Note: the location-header transition tracker and the sticky-reply
   // channel are the same thing — both want to know "where did
   // communication last happen, in either direction." Tracked in
@@ -735,7 +736,8 @@ export class DiscordMcplServer {
       error?: string;
       code?: string;
       messagesRemoved?: number;
-      markers?: MarkersReceipt;
+      /** The host's SurgeryMarkerReceipt, unverified: describeMarkers reads it. */
+      markers?: unknown;
       lastVisible?: { participant?: string; role?: string; preview?: string } | null;
     };
     try {
@@ -754,10 +756,11 @@ export class DiscordMcplServer {
       // The request may have reached the host before this failed: what it
       // did is unknown, not undone.
       dbg('slash:undo-failed', { error: (err as Error).message });
-      await this.acknowledge(interaction, boundedReply(
-        `⚠️ Undo outcome unknown (${(err as Error).message}): the host may or may not have applied it. ` +
-          "Check the agent's context before trying again.",
-      ));
+      await this.acknowledge(
+        interaction,
+        boundedReply(surgeryOutcomeUnknown('Undo', (err as Error).message)),
+        surgeryOutcomeUnknown('Undo'),
+      );
       return;
     }
 
@@ -796,14 +799,17 @@ export class DiscordMcplServer {
   }
 
   /**
-   * Show a command's reply. If Discord refuses it, say so — with `applied`,
-   * the short account of an operation that did happen, so the operation's
-   * outcome is never misreported as a failure to show its acknowledgment.
+   * Show a command's reply. If Discord refuses it, say so, leading with
+   * `outcome`: the short account of an operation that did happen, or whose
+   * outcome is unknown. Either makes a blind retry wrong, so neither is lost
+   * with its reply, and an applied operation is never misreported as a
+   * failure to show its acknowledgment. Refusals, failures and reads, which
+   * a retry can't repeat unawares, pass none.
    */
   private async acknowledge(
     interaction: ChatInputCommandInteraction,
     reply: BoundedReply,
-    applied?: string,
+    outcome?: string,
   ): Promise<void> {
     try {
       await interaction.editReply(reply);
@@ -811,7 +817,7 @@ export class DiscordMcplServer {
       dbg('slash:reply-failed', { error: (err as Error).message });
       try {
         await interaction.editReply(boundedReply(
-          `${applied ? `${applied} ` : ''}(The full reply couldn't be shown: ${(err as Error).message}.)`,
+          `${outcome ? `${outcome} ` : ''}(The full reply couldn't be shown: ${(err as Error).message}.)`,
         ));
       } catch (again) {
         dbg('slash:reply-failed-again', { error: (again as Error).message });
@@ -821,13 +827,23 @@ export class DiscordMcplServer {
 
   /**
    * Does the connected host make 💤 awareness marks a choice? Probed with
-   * `host/command {command: 'marks', action: 'list'}` once per connection:
-   * a host with the verb answers `ok`, and an older one answers "Unknown host
-   * command". Anything else (a timeout, another error) proves neither, so it
-   * isn't kept and the next command asks again.
+   * `host/command {command: 'marks', action: 'list'}` once per connection,
+   * and commands arriving while the probe is out share it: a host with the
+   * verb answers `ok`, and an older one answers "Unknown host command".
+   * Anything else (a timeout, another error) proves neither, so it isn't
+   * kept and the next command asks again.
    */
-  private async hostMarksSupport(conn: McplConnection): Promise<boolean | { reason: string }> {
-    if (this.marksSupport?.conn === conn) return this.marksSupport.supported;
+  private hostMarksSupport(conn: McplConnection): Promise<boolean | { reason: string }> {
+    const known = this.marksSupport.get(conn);
+    if (known) return known;
+    const probe = this.probeMarksSupport(conn);
+    this.marksSupport.set(conn, probe);
+    const forget = () => { this.marksSupport.delete(conn); };
+    void probe.then((answer) => { if (typeof answer !== 'boolean') forget(); }, forget);
+    return probe;
+  }
+
+  private async probeMarksSupport(conn: McplConnection): Promise<boolean | { reason: string }> {
     let result: { ok?: boolean; error?: string } | undefined;
     try {
       result = (await conn.sendRequest('host/command', { command: 'marks', action: 'list' }, 15000)) as typeof result;
@@ -838,7 +854,6 @@ export class DiscordMcplServer {
     if (!supported && !/unknown host command/i.test(result?.error ?? '')) {
       return { reason: result?.error ?? 'no answer' };
     }
-    this.marksSupport = { conn, supported };
     dbg('slash:marks-support', { supported });
     return supported;
   }
@@ -900,9 +915,15 @@ export class DiscordMcplServer {
       dbg('slash:marks-failed', { action, error: (err as Error).message });
       // A read that failed changed nothing. A control may have reached the
       // host first: its outcome is unknown, never "failed".
-      await this.acknowledge(interaction, boundedReply(action === 'list'
-        ? `⚠️ /marks list failed: ${(err as Error).message}`
-        : controlOutcomeUnknown(action, target, (err as Error).message)));
+      if (action === 'list') {
+        await this.acknowledge(interaction, boundedReply(`⚠️ /marks list failed: ${(err as Error).message}`));
+      } else {
+        await this.acknowledge(
+          interaction,
+          boundedReply(controlOutcomeUnknown(action, target, (err as Error).message)),
+          controlOutcomeUnknown(action, target),
+        );
+      }
       return;
     }
     if (!result?.ok) {
@@ -1011,7 +1032,8 @@ export class DiscordMcplServer {
       code?: string;
       hidden?: number;
       hiddenRefs?: Array<{ channelId: string; messageId: string }>;
-      markers?: MarkersReceipt;
+      /** The host's SurgeryMarkerReceipt, unverified: describeMarkers reads it. */
+      markers?: unknown;
       lastVisible?: { participant?: string; role?: string; preview?: string } | null;
     };
     try {
@@ -1029,10 +1051,11 @@ export class DiscordMcplServer {
       )) as typeof result;
     } catch (err) {
       dbg('slash:hide-failed', { error: (err as Error).message });
-      await this.acknowledge(interaction, boundedReply(
-        `⚠️ Hide outcome unknown (${(err as Error).message}): the host may or may not have applied it. ` +
-          "Check the agent's context before trying again.",
-      ));
+      await this.acknowledge(
+        interaction,
+        boundedReply(surgeryOutcomeUnknown('Hide', (err as Error).message)),
+        surgeryOutcomeUnknown('Hide'),
+      );
       return;
     }
 

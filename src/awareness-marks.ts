@@ -26,9 +26,11 @@ export const MARKS_OPTION = {
   ],
 } as const;
 
+const isMarksChoice = (v: unknown): v is MarksChoice => v === 'none' || v === 'addressed' || v === 'all';
+
 export function readMarksChoice(interaction: ChatInputCommandInteraction): MarksChoice | undefined {
   const raw = interaction.options.getString('marks');
-  return raw === 'none' || raw === 'addressed' || raw === 'all' ? raw : undefined;
+  return isMarksChoice(raw) ? raw : undefined;
 }
 
 /** What a surgery did about marks (agent-framework's SurgeryMarkerReceipt). */
@@ -46,11 +48,16 @@ export type MarkersReceipt = {
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
 /**
- * One line for the reply, saying what the receipt says and no more: a
- * queued mark is requested, not yet seen on Discord.
+ * The reply's account of marks, saying what the receipt says and no more: a
+ * queued mark is requested, not yet seen on Discord. A receipt this server
+ * can't read (a status it doesn't know, a field it reads missing) is shown
+ * as sent, never described as something else or left out.
  */
-export function describeMarkers(markers: MarkersReceipt | undefined): string {
-  if (!markers) return 'Marks: this host reported nothing about 💤 marks.';
+export function describeMarkers(markers: unknown): string {
+  if (markers === undefined || markers === null) return 'Marks: this host reported nothing about 💤 marks.';
+  if (!isMarkersReceipt(markers)) {
+    return `Marks: the host's receipt is in a shape this server can't read; here it is as sent:\n${asSent(markers)}`;
+  }
   const extras: string[] = [];
   if (markers.unmarked > 0 && markers.scope !== 'none') {
     extras.push(`${plural(markers.unmarked, 'removed message')} outside that scope left unmarked`);
@@ -83,7 +90,9 @@ type Counts = Partial<Record<OpStatus, number>>;
 export interface BatchView {
   kind: 'batch';
   id: string;
-  status: 'prepared' | 'active' | 'held' | 'discarded';
+  /** prepared, active, held or discarded at agent-framework#250; shown as the
+   *  host names it, so a state a later host adds still reads. */
+  status: string;
   scope: string;
   agentName: string;
   sourceBranch?: string;
@@ -158,11 +167,12 @@ export function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
+/** A value as the host sent it, as a JSON block. */
+const asSent = (value: unknown): string => `\`\`\`json\n${JSON.stringify(value) ?? String(value)}\n\`\`\``;
+
 /** An answer this server can't read, shown as it came (bounded) rather than misread. */
 export function unreadable(what: string, value: unknown): string {
-  const head = `The host answered ${what} in a shape this server can't read; here it is as sent:\n`;
-  const raw = JSON.stringify(value) ?? String(value);
-  return `${head}\`\`\`json\n${raw}\n\`\`\``;
+  return `The host answered ${what} in a shape this server can't read; here it is as sent:\n${asSent(value)}`;
 }
 
 const counts = (c: Counts | undefined): string => {
@@ -272,13 +282,54 @@ export function renderEntry(views: AwarenessView[], id: string): string {
   return found.map(detailText).join('\n\n');
 }
 
+const isStr = (v: unknown): v is string => typeof v === 'string';
+/** An optional field: absent, or what `is` accepts. */
+const opt = (v: unknown, is: (x: unknown) => boolean): boolean => v === undefined || is(v);
+const allNums = (o: Record<string, unknown>, keys: string[]): boolean => keys.every((k) => isNum(o[k]));
+/** Operations by status: a status is shown as the host names it, and every count is a number. */
+const isCounts = (v: unknown): boolean => isObj(v) && Object.values(v).every(isNum);
+/** When something was cancelled or released, and by whom if known. */
+const isStamp = (v: unknown): boolean => isObj(v) && isNum(v.at) && opt(v.by, isStr);
+
+/**
+ * A journal entry the formatters can show without misreading it: every field
+ * they read has the type they read it as, optional ones when present. `status`
+ * and `scope` are shown as the host names them, so they need only be text; a
+ * field nothing here reads isn't checked, so a host's change there doesn't
+ * make the journal unreadable.
+ */
 export function isView(v: unknown): v is AwarenessView {
-  return isObj(v) && typeof v.id === 'string' &&
-    ((v.kind === 'batch' && typeof v.status === 'string' && isNum(v.refs) && isObj(v.adds) && isObj(v.removals)) ||
-      (v.kind === 'retract' && typeof v.target === 'string' && isObj(v.removals)));
+  if (!isObj(v) || !isStr(v.id) || !isCounts(v.removals) || !isNum(v.unresolvedAttempts) || !opt(v.cancelled, isStamp)) {
+    return false;
+  }
+  if (v.kind === 'retract') return isStr(v.target) && isNum(v.at) && opt(v.by, isStr);
+  return v.kind === 'batch' && isStr(v.status) && isStr(v.scope) && isStr(v.agentName) && isNum(v.createdAt) &&
+    isNum(v.refs) && isCounts(v.adds) && opt(v.sourceBranch, isStr) && opt(v.targetBranch, isStr) &&
+    opt(v.unmarked, isNum) && opt(v.notRemoved, isNum) && opt(v.released, isStamp) &&
+    opt(v.held, (h) => isObj(h) && isStr(h.reason) && isNum(h.at) && isNum(h.releaseActions)) &&
+    opt(v.legacy, (l) => isObj(l) && allNums(l, ['entries', 'lastAddConfirmed', 'lastRemoveConfirmed', 'outcomesUnrecorded']));
 }
 
-const allNums = (o: Record<string, unknown>, keys: string[]): boolean => keys.every((k) => isNum(o[k]));
+/**
+ * A markers receipt as agent-framework#250 defines it, with every field its
+ * description reads: a status this server doesn't know is not one it can
+ * describe.
+ */
+export function isMarkersReceipt(m: unknown): m is MarkersReceipt {
+  if (!isObj(m) || !isMarksChoice(m.scope) || !isNum(m.unmarked) || !isNum(m.notRemoved)) return false;
+  switch (m.status) {
+    case 'none':
+      return true;
+    case 'queued':
+      return isNum(m.queued) && isStr(m.batchId);
+    case 'not-scheduled':
+      return isStr(m.error);
+    case 'unresolved':
+      return isStr(m.batchId) && isStr(m.error);
+    default:
+      return false;
+  }
+}
 
 export function isCancelReceipt(r: unknown): r is CancelReceipt {
   return isObj(r) && typeof r.target === 'string' && (r.kind === 'batch' || r.kind === 'retract') &&
@@ -375,13 +426,26 @@ export function summarizeControl(action: string, target: string | undefined, ans
   return `✅ The host accepted /marks ${action}${target ? ` \`${target}\`` : ''} (its receipt couldn't be read).`;
 }
 
-/** A control whose request failed in transit: it may have been applied. */
-export function controlOutcomeUnknown(action: string, target: string | undefined, error: string): string {
+/**
+ * A control whose request failed in transit: it may have been applied.
+ * Without `error`, it's the short account kept when the reply can't be shown.
+ */
+export function controlOutcomeUnknown(action: string, target: string | undefined, error?: string): string {
   const effect = action === 'cancel'
     ? 'already have cancelled it'
     : action === 'retract'
       ? 'already have queued the removals'
       : 'already have queued the release';
   const look = target && target !== 'all' ? `\`/marks list target:${target}\`` : '`/marks list`';
-  return `⚠️ /marks ${action} outcome unknown (${error}): the host may ${effect}. Check ${look} before trying again.`;
+  return `⚠️ /marks ${action} outcome unknown${error ? ` (${error})` : ''}: the host may ${effect}. Check ${look} before trying again.`;
+}
+
+/**
+ * An /undo or /hide whose request failed in transit: the host may have
+ * applied it. Without `error`, it's the short account kept when the reply
+ * can't be shown.
+ */
+export function surgeryOutcomeUnknown(command: 'Undo' | 'Hide', error?: string): string {
+  return `⚠️ ${command} outcome unknown${error ? ` (${error})` : ''}: the host may or may not have applied it. ` +
+    "Check the agent's context before trying again.";
 }

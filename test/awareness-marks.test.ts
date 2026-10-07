@@ -16,7 +16,7 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { DiscordMcplServer } from '../src/server.js';
 import type { DiscordAdapter } from '../src/discord-adapter.js';
-import { boundedReply, describeMarkers, paginate, renderListPage, REPLY_LIMIT, type AwarenessView } from '../src/awareness-marks.js';
+import { boundedReply, describeMarkers, isView, paginate, renderListPage, REPLY_LIMIT, type AwarenessView } from '../src/awareness-marks.js';
 
 type Sent = Record<string, unknown>;
 
@@ -159,6 +159,103 @@ describe('/undo and the marks choice', () => {
     assert.match(reply, /3 💤 marks requested \(addressed; batch `b-7`\) — not yet confirmed on Discord/);
     assert.match(reply, /1 removed message outside that scope left unmarked/);
   });
+
+  it('shows a markers receipt it cannot read as sent, beside the applied undo', async () => {
+    const markers = { scope: 'all', unmarked: 0, notRemoved: 0, status: 'deferred', queued: 0, until: 'resume' };
+    const h = host({ marksVerb: 'yes', answer: undoAnswer(markers) });
+    const { server } = serverWith(h.conn);
+    const i = interaction('undo', { messages: 2, marks: 'all' });
+    await asAdmin(() => server.handleSlashCommand(i.value));
+    const reply = i.out.replies.at(-1)!;
+    assert.match(reply, /^🗑️ Removed the last \*\*2\*\*/);
+    assert.match(reply, /\nMarks: the host's receipt is in a shape this server can't read; here it is as sent:\n```json\n/);
+    assert.ok(reply.includes(JSON.stringify(markers)), reply);
+  });
+});
+
+describe('the marks probe', () => {
+  /** A host whose probes wait until the test answers them, in order. */
+  function gatedHost() {
+    const sent: Sent[] = [];
+    const probes: Array<{ resolve: (answer: unknown) => void; reject: (err: Error) => void }> = [];
+    const conn = {
+      sendRequest: (_m: string, params: Sent): Promise<unknown> => {
+        sent.push(params);
+        if (params.command === 'marks' && !params.requesterId) {
+          return new Promise((resolve, reject) => probes.push({ resolve, reject }));
+        }
+        return Promise.resolve({ ok: true, messagesRemoved: 1, markers: { scope: 'none', unmarked: 0, notRemoved: 0, status: 'none', queued: 0 }, lastVisible: null });
+      },
+    };
+    return { conn, sent, probes, undos: () => sent.filter((p) => p.command === 'undo').length };
+  }
+  /** Let the commands in flight run until they wait on the host. */
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  it('is shared by commands that arrive while it is out', async () => {
+    const h = gatedHost();
+    const { server } = serverWith(h.conn);
+    const a = interaction('undo', {});
+    const b = interaction('undo', {});
+    const both = asAdmin(() => Promise.all([server.handleSlashCommand(a.value), server.handleSlashCommand(b.value)]));
+    await settle();
+    assert.equal(h.probes.length, 1, 'one probe for both commands');
+    h.probes[0]!.resolve({ ok: true, awareness: [] });
+    await both;
+    assert.equal(h.probes.length, 1);
+    assert.equal(h.undos(), 2);
+    for (const i of [a, b]) assert.match(i.out.replies.at(-1)!, /Removed the last \*\*1\*\*/);
+  });
+
+  it('forgets an unproven answer once it settles, so the next command asks again', async () => {
+    const h = gatedHost();
+    const { server } = serverWith(h.conn);
+    const a = interaction('undo', {});
+    const b = interaction('undo', {});
+    const both = asAdmin(() => Promise.all([server.handleSlashCommand(a.value), server.handleSlashCommand(b.value)]));
+    await settle();
+    assert.equal(h.probes.length, 1);
+    h.probes[0]!.reject(new Error('request timed out'));
+    await both;
+    for (const i of [a, b]) assert.match(i.out.replies.at(-1)!, /Undo not sent: couldn't confirm .*request timed out/);
+    assert.equal(h.undos(), 0);
+
+    const c = interaction('undo', {});
+    const third = asAdmin(() => server.handleSlashCommand(c.value));
+    await settle();
+    assert.equal(h.probes.length, 2, 'asked again');
+    h.probes[1]!.resolve({ ok: true, awareness: [] });
+    await third;
+    assert.match(c.out.replies.at(-1)!, /Removed the last \*\*1\*\*/);
+  });
+
+  it("probes a replaced connection afresh, and the old probe's late answer leaves the new one's kept", async () => {
+    const old = gatedHost();
+    const fresh = gatedHost();
+    const { server } = serverWith(old.conn);
+    const a = interaction('undo', {});
+    const first = asAdmin(() => server.handleSlashCommand(a.value));
+    await settle();
+    server.conn = fresh.conn; // the host reconnected while the old probe was out
+    const b = interaction('undo', {});
+    const second = asAdmin(() => server.handleSlashCommand(b.value));
+    await settle();
+    assert.equal(fresh.probes.length, 1, 'the new connection is probed');
+    fresh.probes[0]!.resolve({ ok: true, awareness: [] });
+    await second;
+    // The old connection's host answers last, and definitely: it's an older one.
+    old.probes[0]!.resolve({ ok: false, error: 'Unknown host command: marks' });
+    await first;
+    assert.match(a.out.replies.at(-1)!, /Undo refused: this host can't make awareness marks a choice/);
+
+    const c = interaction('undo', {});
+    const third = asAdmin(() => server.handleSlashCommand(c.value));
+    await settle();
+    assert.equal(fresh.probes.length, 1, "the new connection's answer is still kept");
+    await third;
+    assert.equal(fresh.undos(), 2);
+    assert.equal(old.undos(), 0);
+  });
 });
 
 describe('replies stay within one message, and never misreport an applied surgery', () => {
@@ -213,6 +310,28 @@ describe('replies stay within one message, and never misreport an applied surger
     const i = interaction('undo', {});
     await asAdmin(() => server.handleSlashCommand(i.value));
     assert.match(i.out.replies.at(-1)!, /Undo outcome unknown \(request timed out\): the host may or may not have applied it/);
+  });
+
+  it('keeps an unknown outcome and its check-before-retry when Discord also refuses the reply', async () => {
+    const conn = {
+      sendRequest: async (_m: string, p: Sent) => {
+        if (!p.requesterId) return { ok: true, awareness: [] };
+        throw new Error('request timed out');
+      },
+    };
+    const { server } = serverWith(conn);
+    const refused = " (The full reply couldn't be shown: Unknown interaction.)";
+    const cases: Array<[string, Record<string, string>, string]> = [
+      ['undo', {}, "⚠️ Undo outcome unknown: the host may or may not have applied it. Check the agent's context before trying again."],
+      ['hide', { message: '111111111111111111' }, "⚠️ Hide outcome unknown: the host may or may not have applied it. Check the agent's context before trying again."],
+      ['marks', { action: 'retract', target: 'b-1' }, '⚠️ /marks retract outcome unknown: the host may already have queued the removals. Check `/marks list target:b-1` before trying again.'],
+      ['marks', { action: 'cancel', target: 'r-1' }, '⚠️ /marks cancel outcome unknown: the host may already have cancelled it. Check `/marks list target:r-1` before trying again.'],
+    ];
+    for (const [name, options, outcome] of cases) {
+      const i = interaction(name, options, { rejectFirstEdit: true });
+      await asAdmin(() => server.handleSlashCommand(i.value));
+      assert.deepEqual(i.out.replies, [outcome + refused], name);
+    }
   });
 });
 
@@ -432,6 +551,21 @@ describe('/marks', () => {
     assert.deepEqual(JSON.parse(i.out.files.at(-1)![0]!.attachment.toString('utf8')), odd);
   });
 
+  it('shows a journal with an entry it cannot read as sent, listed or opened', async () => {
+    // A hold with no reason: rendering it would have thrown, and the
+    // fire-and-forget command with it.
+    const partial = batch(2, { status: 'held', held: {} });
+    const h = host({ marksVerb: 'yes', answer: listing([batch(1), partial]) });
+    const { server } = serverWith(h.conn);
+    for (const options of [{ action: 'list' }, { action: 'list', target: partial.id }]) {
+      const i = interaction('marks', options);
+      await asAdmin(() => server.handleSlashCommand(i.value));
+      const reply = i.out.replies.at(-1)!;
+      assert.match(reply, /^The host answered the journal in a shape this server can't read; here it is as sent:\n```json\n/, JSON.stringify(options));
+      assert.match(reply, /"held":\{\}/);
+    }
+  });
+
   it('calls a control whose request failed in transit unknown, pointing at the journal', async () => {
     const conn = {
       sendRequest: async (_m: string, p: Sent) => {
@@ -485,6 +619,55 @@ describe('rendering', () => {
     assert.match(describeMarkers({ scope: 'addressed', unmarked: 0, notRemoved: 0, status: 'none', queued: 0 }), /nothing removed fell within "addressed"/);
     assert.match(describeMarkers({ scope: 'all', unmarked: 0, notRemoved: 2, status: 'not-scheduled', queued: 0, error: 'journal full' }), /not scheduled — journal full\. None will be placed\. \(2 chosen messages not removed, so not marked\)/);
     assert.match(describeMarkers({ scope: 'all', unmarked: 0, notRemoved: 0, status: 'unresolved', queued: 0, batchId: 'b-2', error: 'disk' }), /may still be delivered later/);
+  });
+
+  it('shows a markers receipt it cannot describe as sent, never as something else or nothing', () => {
+    assert.match(describeMarkers(null), /reported nothing/);
+    const receipts: Array<[string, unknown]> = [
+      ['a status this server does not know', { scope: 'all', unmarked: 0, notRemoved: 0, status: 'deferred', queued: 0 }],
+      ['queued with no batch', { scope: 'all', unmarked: 0, notRemoved: 0, status: 'queued', queued: 2 }],
+      ['queued with no count', { scope: 'all', unmarked: 0, notRemoved: 0, status: 'queued', batchId: 'b-1' }],
+      ['not scheduled with no reason', { scope: 'all', unmarked: 0, notRemoved: 0, status: 'not-scheduled', queued: 0 }],
+      ['unresolved with no batch', { scope: 'all', unmarked: 0, notRemoved: 0, status: 'unresolved', queued: 0, error: 'disk' }],
+      ['a scope that is no marks choice', { scope: 'everyone', unmarked: 0, notRemoved: 0, status: 'none', queued: 0 }],
+      ['a count that is not a number', { scope: 'all', unmarked: '1', notRemoved: 0, status: 'none', queued: 0 }],
+      ['no record at all', 'queued'],
+    ];
+    for (const [what, receipt] of receipts) {
+      const text = describeMarkers(receipt);
+      assert.match(text, /^Marks: the host's receipt is in a shape this server can't read; here it is as sent:\n```json\n/, what);
+      assert.ok(text.includes(JSON.stringify(receipt)), what);
+    }
+  });
+
+  it("reads a journal entry only when every field it shows has the type it's read as", () => {
+    assert.ok(isView(batch(1)));
+    assert.ok(isView(retractView(1)));
+    // Shown as the host names them: a later host's batch state, AF's legacy
+    // scope, an operation status this server doesn't know.
+    const later = batch(1, { status: 'staged', scope: 'legacy', adds: { requested: 1, superseded: 2 } });
+    assert.ok(isView(later));
+    assert.match(renderListPage([later], 1), /— staged, legacy, 3 messages \(lena\): adds requested 1, superseded 2;/);
+    const entries: Array<[string, unknown]> = [
+      ['an empty hold', batch(1, { held: {} })],
+      ['a hold whose reason is not text', batch(1, { held: { reason: 7, at: 1, releaseActions: 1 } })],
+      ['a hold with no release-action count', batch(1, { held: { reason: 'r', at: 1 } })],
+      ['imported history missing its counts', batch(1, { legacy: { entries: 1 } })],
+      ['a count that is not a number', batch(1, { adds: { requested: '3' } })],
+      ['removals that are not counts', batch(1, { removals: [] })],
+      ['a cancellation with no time', batch(1, { cancelled: { by: 'Admin' } })],
+      ['a release by someone not named in text', batch(1, { released: { at: 1, by: { id: 'u1' } } })],
+      ['no creation time', batch(1, { createdAt: undefined })],
+      ['no agent', batch(1, { agentName: undefined })],
+      ['branches that are not text', batch(1, { sourceBranch: 3 })],
+      ['an unmarked count that is not a number', batch(1, { unmarked: 'two' })],
+      ['no unresolved-attempt count', batch(1, { unresolvedAttempts: undefined })],
+      ['a retract with no time', { ...retractView(1), at: 'yesterday' }],
+      ['a retract by someone not named in text', { ...retractView(1), by: 7 }],
+      ['a retract with no target', { ...retractView(1), target: undefined }],
+      ['an entry of another kind', { ...retractView(1), kind: 'release' }],
+    ];
+    for (const [what, entry] of entries) assert.equal(isView(entry), false, what);
   });
 
   it('fits a long reply into one message, cut visibly with the whole text attached', () => {
