@@ -1453,15 +1453,27 @@ export class DiscordAdapter {
    *  Configured channel filters bound what a residence may INSPECT, not just
    *  what gets delivered: a channel outside them throws, matching
    *  listChannels' enforcement. Threads count as their parent channel, same
-   *  as event routing. */
-  /** `cap: false` returns every member (for author resolution); the listing
-   *  tool keeps the MEMBER_LIST_CAP cut. */
+   *  as event routing.
+   *
+   *  `cap: false` returns every member (for author resolution); the listing
+   *  tool keeps the MEMBER_LIST_CAP cut. `warmups` lets one operation that
+   *  lists twice in a guild (a thread, then its parent) warm the member cache
+   *  once: each guild's first outcome is recorded there and reused, so a
+   *  success isn't downloaded again and a failure isn't waited out again. */
   async listChannelMembers(
     channelId: string,
-    opts: { cap?: boolean; withPermission?: bigint } = {},
+    opts: { cap?: boolean; withPermission?: bigint; warmups?: Map<string, boolean> } = {},
   ): Promise<DiscordChannelMembers> {
     const channel = await this.client.channels.fetch(channelId);
     if (!channel) throw new Error(`Channel ${channelId} not found`);
+    const warm = async (guild: Guild): Promise<boolean> => {
+      let warmed = opts.warmups?.get(guild.id);
+      if (warmed === undefined) {
+        warmed = await this.warmGuildMemberCache(guild);
+        opts.warmups?.set(guild.id, warmed);
+      }
+      return warmed;
+    };
 
     const toInfo = (m: GuildMember): DiscordMemberInfo => ({
       id: m.id,
@@ -1520,7 +1532,7 @@ export class DiscordAdapter {
       // serial per-member REST fetch. Warm failure only degrades DISPLAY here
       // (the membership list itself comes from the thread, not the guild
       // cache), so unknown members fall back to id-only rather than aborting.
-      await this.warmGuildMemberCache(guild);
+      await warm(guild);
       let unresolved = 0;
       const members = [...threadMembers.values()].map((tm) => {
         const gm = guild.members.cache.get(tm.id);
@@ -1546,7 +1558,7 @@ export class DiscordAdapter {
       // warm it first (timeout-guarded) so the answer covers everyone, not
       // just recent speakers. A failed warm-up must throw: a list computed
       // over a partial cache would be silently incomplete.
-      const warmed = await this.warmGuildMemberCache(guildChannel.guild);
+      const warmed = await warm(guildChannel.guild);
       if (!warmed) {
         throw new Error(
           'Guild member cache warm-up failed or timed out — a member list computed now ' +
@@ -1580,9 +1592,23 @@ export class DiscordAdapter {
    * can't be read whole (the member list fails, or lists members it couldn't
    * name), a name can't be checked for collisions and is refused; a numeric
    * id still works. No match in the window is refused; nothing older or by
-   * anyone else is ever chosen.
+   * anyone else is ever chosen. A channel outside the configured channel
+   * filters is refused before its history or members are read: those
+   * filters bound inspection as well as delivery, as in listChannels and
+   * listChannelMembers.
    */
   async resolveLatestFrom(channelId: string, ref: string): Promise<LatestFromResult> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel) throw new Error(`Channel ${channelId} not found`);
+    // The same check listChannelMembers makes, here for ids as well as names:
+    // a thread counts as its parent, and a DM has no guild and passes.
+    const guildId = 'guildId' in channel ? channel.guildId : null;
+    if (!this.channelAllowed(guildId, channelId, 'parentId' in channel ? channel.parentId : null)) {
+      return {
+        ok: false,
+        message: `Channel ${channelId} is outside this residence's configured channel filters, which bound reading as well as delivery, so latestFrom can't choose a message there; nothing was done.`,
+      };
+    }
     const window = await this.fetchHistory(channelId, { limit: LATEST_FROM_WINDOW });
     const newestFirst = [...window].sort((a, b) => (BigInt(b.id) > BigInt(a.id) ? 1 : BigInt(b.id) < BigInt(a.id) ? -1 : 0));
     const span = newestFirst.length
@@ -1602,18 +1628,20 @@ export class DiscordAdapter {
       let identities: DiscordMemberInfo[];
       let unresolved = 0;
       try {
-        const lists = [await this.listChannelMembers(channelId, { cap: false })];
+        // Both listings below share one guild member-cache warm-up.
+        const warmups = new Map<string, boolean>();
+        const lists = [await this.listChannelMembers(channelId, { cap: false, warmups })];
         if (lists[0].scope === 'thread-joined') {
           // A thread is readable beyond its joined members, so a name must be
           // unique among those readers as well: for a public thread, everyone
           // who can view its parent; for a private one, the parent's viewers
           // who can manage threads there (administrators included).
-          const thread = await this.client.channels.fetch(channelId);
-          if (!thread?.isThread()) throw new Error(`channel ${channelId} no longer resolves as a thread`);
-          if (!thread.parentId) throw new Error(`thread ${channelId} has no parent channel`);
-          lists.push(await this.listChannelMembers(thread.parentId, {
+          if (!channel.isThread()) throw new Error(`channel ${channelId} was listed as a thread but isn't one`);
+          if (!channel.parentId) throw new Error(`thread ${channelId} has no parent channel`);
+          lists.push(await this.listChannelMembers(channel.parentId, {
             cap: false,
-            ...(thread.type === ChannelType.PrivateThread
+            warmups,
+            ...(channel.type === ChannelType.PrivateThread
               ? { withPermission: PermissionsBitField.Flags.ManageThreads }
               : {}),
           }));

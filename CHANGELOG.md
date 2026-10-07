@@ -12,7 +12,11 @@ in the git log and PR descriptions.
   numeric user ID, bots included) as the exclusive alternative to
   `messageId`. It targets that author's newest message among the 100 most
   recent in the channel, resolved once when the call runs and frozen for the
-  action. A name must match one identity among everyone who can read the
+  action. Like `list_channels` and `list_channel_members`, it reads only
+  channels the configured channel filters admit (a thread by its parent's
+  entry); a channel outside them is refused, by ID or by name, before its
+  history or members are read. A name
+  must match one identity among everyone who can read the
   channel (for a public thread, its parent's viewers as well as its joined
   members; for a private thread, its members and the parent's viewers who
   can manage threads) plus the window's authors; a collision returns

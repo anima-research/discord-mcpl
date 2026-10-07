@@ -162,6 +162,112 @@ describe('resolveLatestFrom', () => {
     }
   });
 
+  it('refuses a channel outside the configured channel filters before reading it, by id or by name', async (t) => {
+    const ALLOWED = '500000000000000001';
+    const EXCLUDED = '500000000000000002';
+    const THREAD_IN_ALLOWED = '500000000000000004';
+    const THREAD_IN_EXCLUDED = '500000000000000005';
+    const DM = '500000000000000006';
+    const adapter = new DiscordAdapter({ token: 'unused', guildChannels: { g1: [ALLOWED] } });
+    const client = (adapter as unknown as { client: Client }).client;
+    t.after(() => client.destroy());
+    const channels: Record<string, Record<string, unknown>> = {
+      [ALLOWED]: { id: ALLOWED, type: ChannelType.GuildText, guildId: 'g1', parentId: null },
+      [EXCLUDED]: { id: EXCLUDED, type: ChannelType.GuildText, guildId: 'g1', parentId: null },
+      [THREAD_IN_ALLOWED]: { id: THREAD_IN_ALLOWED, type: ChannelType.PublicThread, guildId: 'g1', parentId: ALLOWED },
+      [THREAD_IN_EXCLUDED]: { id: THREAD_IN_EXCLUDED, type: ChannelType.PublicThread, guildId: 'g1', parentId: EXCLUDED },
+      [DM]: { id: DM, type: ChannelType.DM },
+    };
+    (client.channels as unknown as { fetch: unknown }).fetch = async (id: string) => channels[id] ?? null;
+    const reads: string[] = [];
+    const a = adapter as unknown as Record<string, unknown>;
+    a.fetchHistory = async (id: string) => { reads.push(id); return history; };
+    a.listChannelMembers = async (id: string) => {
+      reads.push(`members of ${id}`);
+      return { channelId: id, channelName: 'general', scope: 'guild-channel', total: members.length, members, truncated: false };
+    };
+    for (const id of [EXCLUDED, THREAD_IN_EXCLUDED]) {
+      for (const ref of [RA, 'Ra']) {
+        const r = await adapter.resolveLatestFrom(id, ref);
+        assert.ok(!r.ok, `${id} by ${ref}`);
+        if (!r.ok) {
+          assert.equal(r.message, `Channel ${id} is outside this residence's configured channel filters, which bound reading as well as delivery, so latestFrom can't choose a message there; nothing was done.`);
+        }
+      }
+    }
+    assert.deepEqual(reads, [], 'no history or members of a filtered-out channel are read');
+    for (const id of [ALLOWED, THREAD_IN_ALLOWED, DM]) {
+      const r = await adapter.resolveLatestFrom(id, RA);
+      assert.ok(r.ok && r.message.id === '200000000000000030', id);
+    }
+    assert.deepEqual(reads, [ALLOWED, THREAD_IN_ALLOWED, DM]);
+  });
+
+  it('checks a private thread past one page of members through the real listings, warming the member cache once', async (t) => {
+    const THREAD = '300000000000000011';
+    const PARENT = '300000000000000012';
+    const MOD = '100000000000000009';
+    const NAMESAKE = '900000000000000002';
+    const fixture = (namesake: boolean, warmSucceeds = true) => {
+      const adapter = new DiscordAdapter({ token: 'unused' });
+      const client = (adapter as unknown as { client: Client }).client;
+      t.after(() => client.destroy());
+      const member = (id: string, username: string, displayName: string) => ({ id, displayName, user: { username, bot: false } });
+      // 248 others sort after Ra by id and before "Ra" by display name, so a
+      // namesake who joined is beyond Discord's 100-member page and beyond
+      // the listing tool's 200 cap.
+      const others = Array.from({ length: 248 }, (_, i) =>
+        member(String(400000000000000000n + BigInt(i)), `member${i}`, `Member ${String(i).padStart(3, '0')}`));
+      const joined = [member(RA, 'ra', 'Ra'), ...others, ...(namesake ? [member(NAMESAKE, 'ra_two', 'Ra')] : [])];
+      const guild = { id: 'g1', name: 'Guild', members: { cache: new Map([...joined, member(MOD, 'mod', 'Mod')].map((m) => [m.id, m])) } };
+      const joinedIds = joined.map((m) => m.id).sort((x, y) => (BigInt(x) < BigInt(y) ? -1 : 1));
+      const thread = {
+        id: THREAD, name: 'plans', type: ChannelType.PrivateThread, guild, guildId: 'g1', parentId: PARENT, isThread: () => true,
+        members: {
+          // List Thread Members as discord.js 14 documents it on API v10:
+          // without withMember, every member at once; with it, pages of at
+          // most 100 after `after`.
+          async fetch(options?: { withMember?: boolean; after?: string; limit?: number }) {
+            let ids = joinedIds;
+            if (options?.withMember) {
+              const start = options.after ? ids.findIndex((id) => BigInt(id) > BigInt(options.after!)) : 0;
+              ids = start < 0 ? [] : ids.slice(start, start + Math.min(options.limit ?? 100, 100));
+            }
+            return new Map(ids.map((id) => [id, { id }]));
+          },
+        },
+      };
+      // Everyone can view the parent; only the moderator manages threads there.
+      const parent = {
+        id: PARENT, name: 'general', type: ChannelType.GuildText, guild, guildId: 'g1', parentId: null, isThread: () => false,
+        members: guild.members.cache,
+        permissionsFor: (m: { id: string }) => ({ has: (p: bigint) => p === PermissionsBitField.Flags.ManageThreads && m.id === MOD }),
+      };
+      (client.channels as unknown as { fetch: unknown }).fetch = async (id: string) => (id === THREAD ? thread : id === PARENT ? parent : null);
+      let warmups = 0;
+      const a = adapter as unknown as Record<string, unknown>;
+      a.warmGuildMemberCache = async () => { warmups++; return warmSucceeds; };
+      a.fetchHistory = async () => [msg('200000000000000030', RA, 'ra', 'newest from Ra', 3)];
+      return { adapter, warmups: () => warmups };
+    };
+
+    const collision = fixture(true);
+    const refused = await collision.adapter.resolveLatestFrom(THREAD, 'Ra');
+    assert.ok(!refused.ok && /^"Ra" matches 2 people here: /.test(refused.message), JSON.stringify(refused));
+    assert.ok(!refused.ok && refused.message.includes(`Ra (@ra_two) = ${NAMESAKE}`));
+    assert.equal(collision.warmups(), 1, 'the thread and its parent share one member-cache warm-up');
+
+    const unique = fixture(false);
+    const chosen = await unique.adapter.resolveLatestFrom(THREAD, 'Ra');
+    assert.ok(chosen.ok && chosen.authorId === RA && chosen.message.id === '200000000000000030', JSON.stringify(chosen));
+    assert.equal(unique.warmups(), 1);
+
+    const cold = fixture(false, false);
+    const unchecked = await cold.adapter.resolveLatestFrom(THREAD, 'Ra');
+    assert.ok(!unchecked.ok && /member list is unavailable \(Guild member cache warm-up failed/.test(unchecked.message), JSON.stringify(unchecked));
+    assert.equal(cold.warmups(), 1, 'a failed warm-up is not waited out a second time');
+  });
+
   it('narrows a guild channel\'s viewers to those holding a permission when asked', async (t) => {
     const adapter = new DiscordAdapter({ token: 'unused' });
     const client = (adapter as unknown as { client: Client }).client;
@@ -226,6 +332,8 @@ describe('reply and reaction tools', () => {
       resolveChannelRef: (given: string) => ({ ok: true, id: given }),
       async resolveLatestFrom(channelId: string, ref: string) {
         const real = new DiscordAdapter({ token: 'unused' }) as unknown as Record<string, unknown>;
+        ((real as unknown as { client: Client }).client.channels as unknown as { fetch: unknown }).fetch = async () =>
+          ({ id: channelId, type: ChannelType.GuildText, guildId: 'g1', parentId: null, isThread: () => false });
         real.fetchHistory = async () => history;
         real.listChannelMembers = async () => ({ channelId, channelName: 'general', scope: 'guild-channel', total: 1, members, truncated: false });
         try {
@@ -331,6 +439,36 @@ describe('reply and reaction tools', () => {
     const res = await f.call('add_reaction', { latestFrom: 'Ra', emoji: '👍' });
     assert.ok(res.isError);
     assert.match(res.content[0].text, /Unknown Message/);
+  });
+
+  it('refuses latestFrom in a channel outside the filters, for every tool, without reading it or acting', async (t) => {
+    const EXCLUDED = '500000000000000002';
+    const adapter = new DiscordAdapter({ token: 'unused', guildChannels: { g1: ['500000000000000001'] } });
+    const client = (adapter as unknown as { client: Client }).client;
+    t.after(() => client.destroy());
+    (client.channels as unknown as { fetch: unknown }).fetch = async () =>
+      ({ id: EXCLUDED, type: ChannelType.GuildText, guildId: 'g1', parentId: null });
+    const touched: string[] = [];
+    const a = adapter as unknown as Record<string, unknown>;
+    a.fetchHistory = async () => {
+      touched.push('fetchHistory');
+      return [msg('200000000000000030', RA, 'Ra', 'secret words from an excluded channel', 3)];
+    };
+    for (const op of ['sendMessage', 'addReaction', 'removeReaction']) {
+      a[op] = async () => { touched.push(op); return { messageId: '300000000000000001' }; };
+    }
+    const server = new DiscordMcplServer(adapter) as unknown as {
+      handleToolCall(name: string, args: Record<string, unknown>): Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+    };
+    for (const [name, extra] of [['reply_message', { content: 'x' }], ['add_reaction', { emoji: '👍' }], ['remove_reaction', { emoji: '👍' }]] as const) {
+      for (const latestFrom of [RA, 'Ra']) {
+        const res = await server.handleToolCall(name, { channelId: EXCLUDED, latestFrom, ...extra });
+        assert.ok(res.isError, `${name} by ${latestFrom}`);
+        assert.match(res.content[0].text, /is outside this residence's configured channel filters/);
+        assert.ok(!res.content[0].text.includes('secret words'), 'no excerpt of what is there');
+      }
+    }
+    assert.deepEqual(touched, []);
   });
 
   it('refuses a latestFrom with no match without acting', async () => {

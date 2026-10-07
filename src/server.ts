@@ -1679,6 +1679,48 @@ export class DiscordMcplServer {
     }
   }
 
+  /** The target of a reply or reaction: exactly one of messageId or
+   *  latestFrom, each a string or null (null and omission mean absent). A
+   *  latestFrom selection is resolved once, its message id frozen for the
+   *  action, and echoed back so the resident can recognize what was chosen. */
+  private async resolveTargetMessage(
+    channelId: string,
+    args: Record<string, unknown>,
+  ): Promise<{ messageId: string; target?: Record<string, unknown> }> {
+    const selector = (value: unknown, name: string): string | null => {
+      if (value === undefined || value === null) return null;
+      if (typeof value !== 'string') throw new Error(`${name} must be a string or null; nothing was done.`);
+      return value.trim() ? value.trim() : null;
+    };
+    const messageId = selector(args.messageId, 'messageId');
+    const latestFrom = selector(args.latestFrom, 'latestFrom');
+    if (messageId && latestFrom) {
+      throw new Error('Give messageId or latestFrom, not both; nothing was done.');
+    }
+    if (!messageId && !latestFrom) {
+      throw new Error('Give exactly one of messageId or latestFrom; nothing was done.');
+    }
+    if (messageId) return { messageId };
+    const r = await this.discord.resolveLatestFrom(channelId, latestFrom!);
+    if (!r.ok) throw new Error(r.message);
+    const text = r.message.cleanContent.replace(/\s+/g, ' ').trim();
+    return {
+      messageId: r.message.id,
+      target: {
+        messageId: r.message.id,
+        author: { id: r.authorId, name: r.authorLabel },
+        // The raw Discord id, named as such: in receipts `channelId` is the
+        // canonical discord:<guild|dm>:<channel> form.
+        discordChannelId: channelId,
+        timestamp: r.message.timestamp.toISOString(),
+        excerpt: text.length > LATEST_FROM_EXCERPT ? `${text.slice(0, LATEST_FROM_EXCERPT)}…` : text,
+        selectedBy:
+          `latestFrom "${latestFrom}": their newest message among the ${LATEST_FROM_WINDOW} most recent ` +
+          'in this channel when this call ran (not a claim about what you have seen)',
+      },
+    };
+  }
+
   /** Hot-apply a whitelist change: mutate the filters file (source of truth),
    *  swap the adapter's in-memory filters, and register any newly-visible
    *  channels with the host. See tools.ts for the argument semantics. */
@@ -1814,48 +1856,6 @@ export class DiscordMcplServer {
    *  the conversational locus, i.e. the most recent *incoming* channel, not
    *  the last channel this bot sent to). `_shifted` is kept in the signature
    *  for call-site compatibility but no longer used. */
-  /** The target of a reply or reaction: exactly one of messageId or
-   *  latestFrom, each a string or null (null and omission mean absent). A
-   *  latestFrom selection is resolved once, its message id frozen for the
-   *  action, and echoed back so the resident can recognize what was chosen. */
-  private async resolveTargetMessage(
-    channelId: string,
-    args: Record<string, unknown>,
-  ): Promise<{ messageId: string; target?: Record<string, unknown> }> {
-    const selector = (value: unknown, name: string): string | null => {
-      if (value === undefined || value === null) return null;
-      if (typeof value !== 'string') throw new Error(`${name} must be a string or null; nothing was done.`);
-      return value.trim() ? value.trim() : null;
-    };
-    const messageId = selector(args.messageId, 'messageId');
-    const latestFrom = selector(args.latestFrom, 'latestFrom');
-    if (messageId && latestFrom) {
-      throw new Error('Give messageId or latestFrom, not both; nothing was done.');
-    }
-    if (!messageId && !latestFrom) {
-      throw new Error('Give exactly one of messageId or latestFrom; nothing was done.');
-    }
-    if (messageId) return { messageId };
-    const r = await this.discord.resolveLatestFrom(channelId, latestFrom!);
-    if (!r.ok) throw new Error(r.message);
-    const text = r.message.cleanContent.replace(/\s+/g, ' ').trim();
-    return {
-      messageId: r.message.id,
-      target: {
-        messageId: r.message.id,
-        author: { id: r.authorId, name: r.authorLabel },
-        // The raw Discord id, named as such: in receipts `channelId` is the
-        // canonical discord:<guild|dm>:<channel> form.
-        discordChannelId: channelId,
-        timestamp: r.message.timestamp.toISOString(),
-        excerpt: text.length > LATEST_FROM_EXCERPT ? `${text.slice(0, LATEST_FROM_EXCERPT)}…` : text,
-        selectedBy:
-          `latestFrom "${latestFrom}": their newest message among the ${LATEST_FROM_WINDOW} most recent ` +
-          'in this channel when this call ran (not a claim about what you have seen)',
-      },
-    };
-  }
-
   private async augmentSendResult(
     messageId: string,
     _channelId: string,
