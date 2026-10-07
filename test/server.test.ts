@@ -737,6 +737,69 @@ describe('DiscordMcplServer', () => {
     await serverPromise;
   });
 
+  it('marks a message posted in a thread as in that thread, without an MCPL threadId', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    await client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });
+
+    // As convertMessage reports a message posted IN a thread: Discord threads
+    // are channels, so threadId equals channelId.
+    discord.simulateMessage({
+      id: 'th-msg', content: 'in the thread', cleanContent: 'in the thread',
+      authorId: 'u1', authorName: 'Bob', isBot: false,
+      channelId: 'c1', channelName: 'design-chat', guildId: 'g1', guildName: 'Test Server',
+      threadId: 'c1', threadName: 'design-chat', threadParentName: 'general',
+      mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+    });
+    const inMsg = await client.nextMessage();
+    assert.equal(inMsg.type, 'request');
+    if (inMsg.type === 'request') {
+      assert.equal(inMsg.request.method, 'channels/incoming');
+      const m = (inMsg.request.params as ChannelsIncomingParams).messages[0] as unknown as Record<string, unknown>;
+      assert.equal('threadId' in m, false, 'a Discord thread is its own channel: no MCPL threadId');
+      assert.ok((m.tags as string[]).includes('chat:thread'));
+      const text = (m.content as Array<{ text: string }>)[0].text;
+      assert.ok(text.includes('[#general thread "design-chat" in Test Server]'), text);
+      client.sendResponse(inMsg.request.id, { results: [{ messageId: 'th-msg', accepted: true }] });
+    }
+    client.close();
+    await serverPromise;
+  });
+
+  it('does not mark a message that merely started a thread as being in one', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    await client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });
+
+    // convertMessage no longer reports message.thread (a thread this message
+    // started), so a channel message carries no thread fields.
+    discord.simulateMessage({
+      id: 'starter', content: 'kick off', cleanContent: 'kick off',
+      authorId: 'u1', authorName: 'Bob', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+      mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+    });
+    const inMsg = await client.nextMessage();
+    if (inMsg.type === 'request') {
+      const m = (inMsg.request.params as ChannelsIncomingParams).messages[0] as unknown as Record<string, unknown>;
+      assert.equal('threadId' in m, false);
+      assert.equal((m.tags as string[]).includes('chat:thread'), false);
+      const text = (m.content as Array<{ text: string }>)[0].text;
+      assert.ok(text.includes('[#general in Test Server]'), text);
+      client.sendResponse(inMsg.request.id, { results: [{ messageId: 'starter', accepted: true }] });
+    }
+    client.close();
+    await serverPromise;
+  });
+
   it('renders reply target visibly and carries standard metadata on open channels', async () => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);

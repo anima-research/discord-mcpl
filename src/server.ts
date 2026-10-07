@@ -3329,8 +3329,13 @@ export class DiscordMcplServer {
     let location = '';
     if (contextChanged) {
       const locationParts: string[] = [];
-      if (msg.channelName) locationParts.push(`#${msg.channelName}`);
-      if (msg.threadName) locationParts.push(`thread "${msg.threadName}"`);
+      if (msg.threadId) {
+        // Posted in a thread: name the channel it hangs off, then the thread.
+        if (msg.threadParentName) locationParts.push(`#${msg.threadParentName}`);
+        locationParts.push(`thread "${msg.threadName ?? msg.threadId}"`);
+      } else if (msg.channelName) {
+        locationParts.push(`#${msg.channelName}`);
+      }
       if (msg.guildName) locationParts.push(`in ${msg.guildName}`);
       else if (msg.guildId === null) locationParts.push('DM');
       if (locationParts.length > 0) location = `[${locationParts.join(' ')}] `;
@@ -3418,7 +3423,8 @@ export class DiscordMcplServer {
           ...(this.hostCoalescing?.channelsIncoming
             ? { eventId: `discord_msg_${msg.id}`, coalesce: { key: `message:${msg.id}`, initial: true } }
             : {}),
-          threadId: msg.threadId,
+          // No MCPL threadId: it means a thread WITHIN the channel, and a
+          // Discord thread is its own channel, already named by channelId.
           author: { id: msg.authorId, name: msg.authorName },
           timestamp: msg.timestamp.toISOString(),
           content: [textContent(renderedContent), ...attachmentBlocks],
@@ -3486,8 +3492,9 @@ export class DiscordMcplServer {
           // to the DM (item-3 redux, DM sub-case).
           mcplChannelId: channelMcplId,
           channelName: msg.channelName,
-          threadId: msg.threadId,
+          // Display only; the composite channel id already names the thread.
           threadName: msg.threadName,
+          threadParentName: msg.threadParentName ?? undefined,
           authorId: msg.authorId,
           authorName: msg.authorName,
           replyTo: msg.replyToId,
