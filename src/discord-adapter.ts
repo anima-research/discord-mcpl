@@ -36,6 +36,7 @@ import { dbg } from './debug-log.js';
 import {
   buildCandidates,
   formatChannelLabel,
+  isSnowflake,
   parseChannelRef,
   resolveChannelName,
   type ResolveResult,
@@ -191,6 +192,13 @@ export interface DiscordMemberInfo {
   isBot: boolean;
 }
 
+/** How far latestFrom looks: the newest messages fetched at invocation. */
+export const LATEST_FROM_WINDOW = 100;
+
+export type LatestFromResult =
+  | { ok: true; message: HistoryMessage; authorId: string; authorLabel: string }
+  | { ok: false; message: string };
+
 export interface DiscordChannelMembers {
   channelId: string;
   channelName: string | null;
@@ -208,6 +216,9 @@ export interface DiscordChannelMembers {
   truncated: boolean;
   /** Scope caveat the agent should see (set for threads). */
   note?: string;
+  /** Members listed by id only because their names couldn't be resolved
+   *  (thread members after a failed member-cache warm-up); absent when 0. */
+  unresolved?: number;
 }
 
 export interface HistoryMessage {
@@ -765,7 +776,7 @@ export class DiscordAdapter {
   async sendMessage(
     channelId: string,
     content: string,
-    options?: { replyTo?: string; files?: OutgoingFile[] },
+    options?: { replyTo?: string; files?: OutgoingFile[]; requireReplyTarget?: boolean },
   ): Promise<{ messageId: string }> {
     const channel = await this.client.channels.fetch(channelId);
     if (!channel || !('send' in channel)) {
@@ -782,7 +793,11 @@ export class DiscordAdapter {
       const isLast = i === chunks.length - 1;
       const sent = await (channel as TextChannel | DMChannel).send({
         content: chunks[i] || undefined,
-        reply: i === 0 && options?.replyTo ? { messageReference: options.replyTo } : undefined,
+        // requireReplyTarget: an addressed reply (a latestFrom selection)
+        // fails if its target is gone rather than posting unthreaded.
+        reply: i === 0 && options?.replyTo
+          ? { messageReference: options.replyTo, ...(options.requireReplyTarget ? { failIfNotExists: true } : {}) }
+          : undefined,
         files: isLast && attachments.length > 0 ? attachments : undefined,
       });
       lastId = sent.id;
@@ -1439,7 +1454,12 @@ export class DiscordAdapter {
    *  what gets delivered: a channel outside them throws, matching
    *  listChannels' enforcement. Threads count as their parent channel, same
    *  as event routing. */
-  async listChannelMembers(channelId: string): Promise<DiscordChannelMembers> {
+  /** `cap: false` returns every member (for author resolution); the listing
+   *  tool keeps the MEMBER_LIST_CAP cut. */
+  async listChannelMembers(
+    channelId: string,
+    opts: { cap?: boolean; withPermission?: bigint } = {},
+  ): Promise<DiscordChannelMembers> {
     const channel = await this.client.channels.fetch(channelId);
     if (!channel) throw new Error(`Channel ${channelId} not found`);
 
@@ -1467,8 +1487,8 @@ export class DiscordAdapter {
         channelName,
         scope,
         total: members.length,
-        members: members.slice(0, MEMBER_LIST_CAP),
-        truncated: members.length > MEMBER_LIST_CAP,
+        members: opts.cap === false ? members : members.slice(0, MEMBER_LIST_CAP),
+        truncated: opts.cap !== false && members.length > MEMBER_LIST_CAP,
         ...(note ? { note } : {}),
       };
     };
@@ -1501,16 +1521,19 @@ export class DiscordAdapter {
       // (the membership list itself comes from the thread, not the guild
       // cache), so unknown members fall back to id-only rather than aborting.
       await this.warmGuildMemberCache(guild);
+      let unresolved = 0;
       const members = [...threadMembers.values()].map((tm) => {
         const gm = guild.members.cache.get(tm.id);
+        if (!gm) unresolved++;
         return gm ? toInfo(gm) : { id: tm.id, username: tm.id, displayName: tm.id, isBot: false };
       });
-      return finish(
+      const listed = finish(
         channel.name,
         'thread-joined',
         members,
         'Joined members only. Users with access to the parent channel may be able to read a public thread without joining it.',
       );
+      return unresolved > 0 ? { ...listed, unresolved } : listed;
     }
 
     if ('members' in channel && 'guild' in channel) {
@@ -1531,11 +1554,122 @@ export class DiscordAdapter {
           '(Developer Portal → Bot → Privileged Gateway Intents).',
         );
       }
-      const members = [...guildChannel.members.values()].map(toInfo);
+      // withPermission narrows a guild channel's viewers to those holding a
+      // permission there (computed per member: overwrites, roles, admin).
+      const members = [...guildChannel.members.values()]
+        .filter((m) => opts.withPermission === undefined
+          || (guildChannel as GuildBasedChannel & { permissionsFor(m: GuildMember): Readonly<PermissionsBitField> | null })
+            .permissionsFor(m)?.has(opts.withPermission) === true)
+        .map(toInfo);
       return finish(guildChannel.name, 'guild-channel', members);
     }
 
     throw new Error(`Channel ${channelId} has no queryable membership (type ${channel.type})`);
+  }
+
+  /**
+   * Resolve a reply/reaction target by its author: the newest message from
+   * that author among the LATEST_FROM_WINDOW most recent messages in the
+   * channel, fetched now. A numeric id (or <@id>) names the author directly. A
+   * name resolves within the channel's identity context (everyone who can
+   * read it, bots included: a guild channel's viewers, a public thread's
+   * joined members plus its parent's viewers, a private thread's members
+   * plus the parent's viewers who can manage threads, a DM's two parties;
+   * plus the authors in that window) and must match one person:
+   * a collision is refused with choices, never guessed. When that context
+   * can't be read whole (the member list fails, or lists members it couldn't
+   * name), a name can't be checked for collisions and is refused; a numeric
+   * id still works. No match in the window is refused; nothing older or by
+   * anyone else is ever chosen.
+   */
+  async resolveLatestFrom(channelId: string, ref: string): Promise<LatestFromResult> {
+    const window = await this.fetchHistory(channelId, { limit: LATEST_FROM_WINDOW });
+    const newestFirst = [...window].sort((a, b) => (BigInt(b.id) > BigInt(a.id) ? 1 : BigInt(b.id) < BigInt(a.id) ? -1 : 0));
+    const span = newestFirst.length
+      ? `the ${newestFirst.length} most recent messages here (${newestFirst[newestFirst.length - 1].timestamp.toISOString()} to ${newestFirst[0].timestamp.toISOString()})`
+      : 'this channel, which has no messages';
+    const raw = ref.trim();
+    const mention = /^<@!?(\d{17,20})>$/.exec(raw);
+    let authorId: string;
+    let authorLabel: string;
+    if (mention || isSnowflake(raw)) {
+      authorId = mention ? mention[1] : raw;
+      authorLabel = newestFirst.find((m) => m.authorId === authorId)?.authorName ?? authorId;
+    } else {
+      const name = raw.replace(/^@/, '').trim().toLowerCase();
+      if (!name) return { ok: false, message: 'latestFrom names no one; nothing was done.' };
+      const matches = new Map<string, { label: string; username?: string; isBot: boolean }>();
+      let identities: DiscordMemberInfo[];
+      let unresolved = 0;
+      try {
+        const lists = [await this.listChannelMembers(channelId, { cap: false })];
+        if (lists[0].scope === 'thread-joined') {
+          // A thread is readable beyond its joined members, so a name must be
+          // unique among those readers as well: for a public thread, everyone
+          // who can view its parent; for a private one, the parent's viewers
+          // who can manage threads there (administrators included).
+          const thread = await this.client.channels.fetch(channelId);
+          if (!thread?.isThread()) throw new Error(`channel ${channelId} no longer resolves as a thread`);
+          if (!thread.parentId) throw new Error(`thread ${channelId} has no parent channel`);
+          lists.push(await this.listChannelMembers(thread.parentId, {
+            cap: false,
+            ...(thread.type === ChannelType.PrivateThread
+              ? { withPermission: PermissionsBitField.Flags.ManageThreads }
+              : {}),
+          }));
+        }
+        identities = lists.flatMap((l) => l.members);
+        // A member a list couldn't name appears id-only (username and display
+        // name both the id); count those too, whether or not the list says so.
+        for (const l of lists) {
+          unresolved += Math.max(
+            l.unresolved ?? 0,
+            l.members.filter((m) => m.username === m.id && m.displayName === m.id).length,
+          );
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          message: `"${raw}" can't be checked for people sharing that name: this channel's member list is unavailable (${(err as Error).message}). Use their numeric user id; nothing was done.`,
+        };
+      }
+      if (unresolved > 0) {
+        return {
+          ok: false,
+          message: `"${raw}" can't be checked for people sharing that name: ${unresolved} member(s) here couldn't be resolved to names. Use their numeric user id; nothing was done.`,
+        };
+      }
+      for (const m of identities) {
+        if (m.username.toLowerCase() === name || m.displayName.toLowerCase() === name) {
+          matches.set(m.id, { label: m.displayName, username: m.username, isBot: m.isBot });
+        }
+      }
+      for (const m of newestFirst) {
+        if (m.authorName.toLowerCase() === name && !matches.has(m.authorId)) {
+          matches.set(m.authorId, { label: m.authorName, isBot: m.isBot });
+        }
+      }
+      if (matches.size === 0) {
+        return { ok: false, message: `No one named "${raw}" is in this channel or among ${span}. Use their numeric user id; nothing was done.` };
+      }
+      if (matches.size > 1) {
+        const choices = [...matches].slice(0, 10)
+          .map(([id, m]) => `${m.label}${m.username ? ` (@${m.username})` : ''}${m.isBot ? ' [bot]' : ''} = ${id}`)
+          .join('; ');
+        return { ok: false, message: `"${raw}" matches ${matches.size} people here: ${choices}. Use the numeric user id; nothing was done.` };
+      }
+      const [[id, only]] = [...matches];
+      authorId = id;
+      authorLabel = only.label;
+    }
+    const target = newestFirst.find((m) => m.authorId === authorId);
+    if (!target) {
+      return {
+        ok: false,
+        message: `No message from ${authorLabel} among ${span}; nothing was done. latestFrom never reaches further back or picks another author.`,
+      };
+    }
+    return { ok: true, message: target, authorId, authorLabel };
   }
 
   /** List the custom (server) emojis the bot can see — the shared palette for
