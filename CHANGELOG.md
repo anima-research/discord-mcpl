@@ -157,6 +157,12 @@ in the git log and PR descriptions.
   weeks-old, never-edited messages. Updates are now forwarded only when
   `editedTimestamp` is set and the content actually changed (when the old
   message is cached). Real edits are unaffected.
+- **A notification whose handler throws no longer stops the server.** The
+  main loop read each message and dispatched notifications without a guard,
+  so a synchronous throw in one (a malformed `featureSets/update`, a typing
+  or voice handler failing) ended the loop. The server then read nothing
+  more, and every later request went unanswered until the host timed it
+  out. The throw is now logged and the loop goes on.
 - **Edits and deletes carry their author and location.** The push-event
   origin now includes `guildId`, the composite `mcplChannelId`, `messageId`
   and (when known) `authorId`/`authorName`, and an edit reads

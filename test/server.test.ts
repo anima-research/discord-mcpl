@@ -351,6 +351,27 @@ describe('DiscordMcplServer', () => {
     await serverPromise;
   });
 
+  it('a notification whose handler throws leaves the server serving requests', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcpHandshake(client);
+
+    // The mock adapter has no sendTyping, so this handler throws synchronously.
+    client.sendNotification('channels/typing', { channelId: 'discord:g1:c1', op: 'start' });
+    const answered = await Promise.race([
+      client.sendRequest('tools/list', {}).then(() => true),
+      new Promise<boolean>((resolve) => {
+        const t = setTimeout(() => resolve(false), 3000);
+        (t as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    assert.equal(answered, true, 'tools/list was answered after the throwing notification');
+
+    client.close();
+    await serverPromise;
+  });
+
   it('tools/list returns tool definitions', async () => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
