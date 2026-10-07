@@ -166,3 +166,13 @@ in the git log and PR descriptions.
 - **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
   edit whose author is unknown (uncached message) was forwarded because the
   check required an author; it is now dropped, like creates.
+- **`fetch_history` and `fetch_around` respect the channel filters for
+  numeric ids.** Names already resolved only among allowed channels, but a
+  numeric channel id went straight to Discord, so either tool could read a
+  channel the configured channel list (`guildChannels`) excludes. Both now
+  refuse such a channel before any message is read, by the rule
+  `list_channels` and `list_channel_members` already apply (a thread or a
+  categorized channel admitted by its parent). The guild filter
+  (registration, name resolution, delivery) and the DM contact list
+  (incoming DMs) keep their meaning and don't restrict deliberate reads; the
+  config docs now say what each filter bounds.
