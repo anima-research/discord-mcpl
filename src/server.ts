@@ -996,7 +996,7 @@ export class DiscordMcplServer {
           } catch (err) {
             console.error(
               `[discord-mcpl] notification ${msg.notification.method} failed:`,
-              err instanceof Error ? err.message : err,
+              err,
             );
           }
         }
