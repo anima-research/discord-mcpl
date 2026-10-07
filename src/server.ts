@@ -64,6 +64,7 @@ import {
   renderEntry,
   renderListPage,
   unreadable,
+  type BoundedReply,
   type MarkersReceipt,
 } from './awareness-marks.js';
 import { toolDefinitions } from './tools.js';
@@ -719,16 +720,24 @@ export class DiscordMcplServer {
     // so such a host is refused outright (as the web UI does).
     const support = await this.hostMarksSupport(conn);
     if (support !== true) {
-      await interaction.editReply(support === false
+      await this.acknowledge(interaction, boundedReply(support === false
         ? "⚠️ Undo refused: this host can't make awareness marks a choice — its undo places 💤 marks that " +
           'follow branches. Upgrade the host (an agent framework with the `marks` host command) to undo from Discord.'
         : `⚠️ Undo not sent: couldn't confirm that this host makes awareness marks a choice (${support.reason}). ` +
-          'Nothing was changed; try again.');
+          'Nothing was changed; try again.'));
       return;
     }
 
+    let result: {
+      ok?: boolean;
+      error?: string;
+      code?: string;
+      messagesRemoved?: number;
+      markers?: MarkersReceipt;
+      lastVisible?: { participant?: string; role?: string; preview?: string } | null;
+    };
     try {
-      const result = (await conn.sendRequest(
+      result = (await conn.sendRequest(
         'host/command',
         {
           command: 'undo',
@@ -738,19 +747,26 @@ export class DiscordMcplServer {
           requesterName: interaction.user.username,
         },
         30000,
-      )) as {
-        ok?: boolean;
-        error?: string;
-        messagesRemoved?: number;
-        markers?: MarkersReceipt;
-        lastVisible?: { participant?: string; role?: string; preview?: string } | null;
-      };
+      )) as typeof result;
+    } catch (err) {
+      // The request may have reached the host before this failed: what it
+      // did is unknown, not undone.
+      dbg('slash:undo-failed', { error: (err as Error).message });
+      await this.acknowledge(interaction, boundedReply(
+        `⚠️ Undo outcome unknown (${(err as Error).message}): the host may or may not have applied it. ` +
+          "Check the agent's context before trying again.",
+      ));
+      return;
+    }
 
-      if (!result?.ok) {
-        await interaction.editReply(`⚠️ Undo failed: ${result?.error ?? 'unknown error'}`);
-        return;
-      }
+    if (!result?.ok) {
+      await this.acknowledge(interaction, boundedReply(
+        `⚠️ Undo failed${result?.code ? ` (${result.code})` : ''}: ${result?.error ?? 'unknown error'}`,
+      ));
+      return;
+    }
 
+    {
       const lines: string[] = [];
       const removed = result.messagesRemoved ?? 0;
       lines.push(
@@ -768,10 +784,36 @@ export class DiscordMcplServer {
       } else {
         lines.push('(Could not render the post-undo context preview.)');
       }
-      await interaction.editReply(lines.join('\n'));
+      // The undo is applied: a reply that can't be shown never reads as its failure.
+      await this.acknowledge(
+        interaction,
+        boundedReply(lines.join('\n'), result),
+        `🗑️ Undo applied: removed ${removed} context message${removed === 1 ? '' : 's'}.`,
+      );
+    }
+  }
+
+  /**
+   * Show a command's reply. If Discord refuses it, say so — with `applied`,
+   * the short account of an operation that did happen, so the operation's
+   * outcome is never misreported as a failure to show its acknowledgment.
+   */
+  private async acknowledge(
+    interaction: ChatInputCommandInteraction,
+    reply: BoundedReply,
+    applied?: string,
+  ): Promise<void> {
+    try {
+      await interaction.editReply(reply);
     } catch (err) {
-      dbg('slash:undo-failed', { error: (err as Error).message });
-      await interaction.editReply(`⚠️ Undo failed: ${(err as Error).message}`);
+      dbg('slash:reply-failed', { error: (err as Error).message });
+      try {
+        await interaction.editReply(boundedReply(
+          `${applied ? `${applied} ` : ''}(The full reply couldn't be shown: ${(err as Error).message}.)`,
+        ));
+      } catch (again) {
+        dbg('slash:reply-failed-again', { error: (again as Error).message });
+      }
     }
   }
 
@@ -833,9 +875,9 @@ export class DiscordMcplServer {
 
     const support = await this.hostMarksSupport(conn);
     if (support !== true) {
-      await interaction.editReply(support === false
+      await this.acknowledge(interaction, boundedReply(support === false
         ? "This host doesn't have awareness-mark controls (no `marks` host command). Upgrade the host to use `/marks`."
-        : `Couldn't reach the host's awareness-mark controls (${support.reason}). Try again.`);
+        : `Couldn't reach the host's awareness-mark controls (${support.reason}). Try again.`));
       return;
     }
     try {
@@ -852,7 +894,7 @@ export class DiscordMcplServer {
         30000,
       )) as { ok?: boolean; error?: string; code?: string; awareness?: unknown };
       if (!result?.ok) {
-        await interaction.editReply(boundedReply(
+        await this.acknowledge(interaction, boundedReply(
           `⚠️ /marks ${action} failed${result?.code ? ` (${result.code})` : ''}: ${result?.error ?? 'unknown error'}`,
         ));
         return;
@@ -861,15 +903,15 @@ export class DiscordMcplServer {
       if (action === 'list') {
         const views = Array.isArray(answer) && answer.every(isView) ? answer : null;
         if (!views) {
-          await interaction.editReply(boundedReply(unreadable('the journal', answer), answer));
+          await this.acknowledge(interaction, boundedReply(unreadable('the journal', answer), answer));
           return;
         }
         if (target) {
           const shown = views.filter((v) => v.id === target);
-          await interaction.editReply(boundedReply(renderEntry(views, target), shown.length ? shown : undefined));
+          await this.acknowledge(interaction, boundedReply(renderEntry(views, target), shown.length ? shown : undefined));
           return;
         }
-        await interaction.editReply(renderListPage(views, page));
+        await this.acknowledge(interaction, renderListPage(views, page));
         return;
       }
       const text = action === 'cancel' && isCancelReceipt(answer)
@@ -879,10 +921,10 @@ export class DiscordMcplServer {
           : action === 'release' && isReleaseReceipt(answer)
             ? describeRelease(answer)
             : unreadable(`/marks ${action}`, answer);
-      await interaction.editReply(boundedReply(text, answer));
+      await this.acknowledge(interaction, boundedReply(text, answer));
     } catch (err) {
       dbg('slash:marks-failed', { error: (err as Error).message });
-      await interaction.editReply(boundedReply(`⚠️ /marks ${action} failed: ${(err as Error).message}`));
+      await this.acknowledge(interaction, boundedReply(`⚠️ /marks ${action} failed: ${(err as Error).message}`));
     }
   }
 
@@ -940,22 +982,31 @@ export class DiscordMcplServer {
     // messages addressed the agent, so `addressed` is refused there).
     const support = await this.hostMarksSupport(conn);
     if (support !== true && support !== false) {
-      await interaction.editReply(
+      await this.acknowledge(interaction, boundedReply(
         `⚠️ Hide not sent: couldn't confirm whether this host makes awareness marks a choice (${support.reason}). ` +
           'Nothing was changed; try again.',
-      );
+      ));
       return;
     }
     if (!support && marks === 'addressed') {
-      await interaction.editReply(
+      await this.acknowledge(interaction, boundedReply(
         "⚠️ Hide not sent: this host can't tell which hidden messages addressed the agent, so `marks: addressed` " +
           "isn't available here. Choose `all`, or leave marks out.",
-      );
+      ));
       return;
     }
 
+    let result: {
+      ok?: boolean;
+      error?: string;
+      code?: string;
+      hidden?: number;
+      hiddenRefs?: Array<{ channelId: string; messageId: string }>;
+      markers?: MarkersReceipt;
+      lastVisible?: { participant?: string; role?: string; preview?: string } | null;
+    };
     try {
-      const result = (await conn.sendRequest(
+      result = (await conn.sendRequest(
         'host/command',
         {
           command: 'hide',
@@ -966,19 +1017,24 @@ export class DiscordMcplServer {
           requesterName: interaction.user.username,
         },
         30000,
-      )) as {
-        ok?: boolean;
-        error?: string;
-        hidden?: number;
-        hiddenRefs?: Array<{ channelId: string; messageId: string }>;
-        markers?: MarkersReceipt;
-        lastVisible?: { participant?: string; role?: string; preview?: string } | null;
-      };
+      )) as typeof result;
+    } catch (err) {
+      dbg('slash:hide-failed', { error: (err as Error).message });
+      await this.acknowledge(interaction, boundedReply(
+        `⚠️ Hide outcome unknown (${(err as Error).message}): the host may or may not have applied it. ` +
+          "Check the agent's context before trying again.",
+      ));
+      return;
+    }
 
-      if (!result?.ok) {
-        await interaction.editReply(`⚠️ Hide failed: ${result?.error ?? 'unknown error'}`);
-        return;
-      }
+    if (!result?.ok) {
+      await this.acknowledge(interaction, boundedReply(
+        `⚠️ Hide failed${result?.code ? ` (${result.code})` : ''}: ${result?.error ?? 'unknown error'}`,
+      ));
+      return;
+    }
+
+    {
 
       // This server's own 💤 reactions only on a host positively known to
       // lack the verb, where the operator chose `all` and the framework
@@ -1020,10 +1076,12 @@ export class DiscordMcplServer {
         const who = lv.participant ?? lv.role ?? '?';
         lines.push(`Last message now visible to the agent — **${who}**: *(empty message)*`);
       }
-      await interaction.editReply(lines.join('\n'));
-    } catch (err) {
-      dbg('slash:hide-failed', { error: (err as Error).message });
-      await interaction.editReply(`⚠️ Hide failed: ${(err as Error).message}`);
+      // The hide is applied: a reply that can't be shown never reads as its failure.
+      await this.acknowledge(
+        interaction,
+        boundedReply(lines.join('\n'), result),
+        `🙈 Hide applied: removed ${n} message${n === 1 ? '' : 's'} from the agent's context.`,
+      );
     }
   }
 

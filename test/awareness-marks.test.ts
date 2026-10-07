@@ -59,7 +59,8 @@ function serverWith(conn: unknown) {
 }
 
 /** A slash interaction from an admin, recording what it was answered. */
-function interaction(commandName: string, options: Record<string, string | number | undefined>) {
+function interaction(commandName: string, options: Record<string, string | number | undefined>, opts: { rejectFirstEdit?: boolean } = {}) {
+  let rejectNext = opts.rejectFirstEdit === true;
   const out: { replies: string[]; files: Array<{ attachment: Buffer; name: string }[]>; deferred?: unknown; ephemeral: boolean[] } = {
     replies: [],
     files: [],
@@ -81,6 +82,12 @@ function interaction(commandName: string, options: Record<string, string | numbe
       },
       deferReply: async (o?: { flags?: unknown }) => { out.deferred = o ?? {}; },
       editReply: async (o: string | { content: string; files: Array<{ attachment: Buffer; name: string }> }) => {
+        const content = typeof o === 'string' ? o : o.content;
+        // Discord refuses a reply over its limit; a test can also refuse the first one outright.
+        if (rejectNext || content.length > REPLY_LIMIT) {
+          rejectNext = false;
+          throw new Error(content.length > REPLY_LIMIT ? 'Invalid Form Body: content too long' : 'Unknown interaction');
+        }
         if (typeof o === 'string') out.replies.push(o);
         else { out.replies.push(o.content); out.files.push(o.files); }
       },
@@ -151,6 +158,61 @@ describe('/undo and the marks choice', () => {
     const reply = i.out.replies.at(-1)!;
     assert.match(reply, /3 💤 marks requested \(addressed; batch `b-7`\) — not yet confirmed on Discord/);
     assert.match(reply, /1 removed message outside that scope left unmarked/);
+  });
+});
+
+describe('replies stay within one message, and never misreport an applied surgery', () => {
+  it('bounds a probe refusal carrying a long host error', async () => {
+    const longError = 'e'.repeat(2300);
+    const conn = { sendRequest: async () => ({ ok: false, error: longError }) };
+    const { server } = serverWith(conn);
+    for (const name of ['marks', 'undo', 'hide']) {
+      const i = interaction(name, name === 'marks' ? { action: 'list' } : name === 'hide' ? { message: '111111111111111111' } : {});
+      await asAdmin(() => server.handleSlashCommand(i.value));
+      const reply = i.out.replies.at(-1)!;
+      assert.ok(reply.length <= REPLY_LIMIT, `${name}: ${reply.length}`);
+      assert.match(reply, /cut to fit one message/, name);
+    }
+  });
+
+  it('shows a long successful undo receipt bounded, with the result attached', async () => {
+    const markers = { scope: 'all', unmarked: 0, notRemoved: 0, status: 'unresolved', queued: 0, batchId: 'b-1', error: 'j'.repeat(500) + ' / ' + 'k'.repeat(500) };
+    const preview = Array.from({ length: 8 }, (_, n) => `line ${n} ${'p'.repeat(40)}`).join('\n');
+    const h = host({ marksVerb: 'yes', answer: (p) => (p.command === 'undo' ? { ok: true, messagesRemoved: 3, markers, lastVisible: { participant: 'Lena', preview: preview + 'q'.repeat(600) } } : { ok: true }) });
+    const { server } = serverWith(h.conn);
+    const i = interaction('undo', { messages: 3, marks: 'all' });
+    await asAdmin(() => server.handleSlashCommand(i.value));
+    const reply = i.out.replies.at(-1)!;
+    assert.ok(reply.length <= REPLY_LIMIT, `${reply.length}`);
+    assert.match(reply, /^🗑️ Removed the last \*\*3\*\*/);
+    assert.doesNotMatch(reply, /Undo failed/);
+    assert.equal(JSON.parse(i.out.files.at(-1)![0]!.attachment.toString('utf8')).markers.error, markers.error);
+  });
+
+  it('says an applied undo or hide happened when Discord refuses its reply', async () => {
+    const h = host({ marksVerb: 'yes', answer: (p) => (p.command === 'undo'
+      ? { ok: true, messagesRemoved: 2, markers: { scope: 'none', unmarked: 0, notRemoved: 0, status: 'none', queued: 0 }, lastVisible: null }
+      : p.command === 'hide' ? { ok: true, hidden: 1, hiddenRefs: [], markers: { scope: 'none', unmarked: 0, notRemoved: 0, status: 'none', queued: 0 } } : { ok: true }) });
+    const { server } = serverWith(h.conn);
+    const u = interaction('undo', { messages: 2 }, { rejectFirstEdit: true });
+    await asAdmin(() => server.handleSlashCommand(u.value));
+    assert.match(u.out.replies.at(-1)!, /^🗑️ Undo applied: removed 2 context messages\. \(The full reply couldn't be shown: Unknown interaction\.\)$/);
+    const hd = interaction('hide', { message: '111111111111111111' }, { rejectFirstEdit: true });
+    await asAdmin(() => server.handleSlashCommand(hd.value));
+    assert.match(hd.out.replies.at(-1)!, /^🙈 Hide applied: removed 1 message from the agent's context\. \(The full reply couldn't be shown/);
+  });
+
+  it('calls a surgery whose request failed in transit unknown, not failed', async () => {
+    const conn = {
+      sendRequest: async (_m: string, p: Sent) => {
+        if (p.command === 'marks') return { ok: true, awareness: [] };
+        throw new Error('request timed out');
+      },
+    };
+    const { server } = serverWith(conn);
+    const i = interaction('undo', {});
+    await asAdmin(() => server.handleSlashCommand(i.value));
+    assert.match(i.out.replies.at(-1)!, /Undo outcome unknown \(request timed out\): the host may or may not have applied it/);
   });
 });
 
