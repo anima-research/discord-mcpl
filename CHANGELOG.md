@@ -148,6 +148,26 @@ in the git log and PR descriptions.
   Raising the cap intentionally restores the prior always-inline behavior.
   Images are unaffected: they inline as native image blocks under their own
   ceilings. (issue #30, PR #12)
+- **The admin commands make 💤 awareness marks an explicit choice.** On a
+  host whose agent framework has the `marks` host command
+  (anima-research/agent-framework#250), `/undo` and `/hide` take an optional
+  `marks` choice: `none` (the default), `addressed` or `all`. The host places
+  the marks and returns a `markers` receipt, and the reply says what it
+  scheduled: requested, not yet seen on Discord. A new admin command,
+  `/marks list|cancel|retract|release [target]`, shows the host's journal
+  and acts on it, ephemerally. Each connection probes the host once
+  (`marks list`) to learn which kind it is.
+  - On a host without the verb, `/undo` is **refused** whatever the option.
+    Such a host's undo places marks that follow branches: they are
+    re-applied on every switch, with no frozen audience and no cancel, so no
+    choice here can authorize them as a one-shot act. The web UI refuses the
+    same way.
+  - On such a host, `/hide` no longer reacts 💤 on every hidden message. It
+    reacts itself only for `marks: all`, and refuses `addressed`, since it
+    can't tell which messages addressed the agent. With no choice, nothing
+    is marked.
+  - A probe that proves nothing either way (a timeout, another error) stops
+    the command with nothing changed, and the next command asks again.
 
 ### Fixed
 
