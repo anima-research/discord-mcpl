@@ -788,13 +788,52 @@ describe('DiscordMcplServer', () => {
       mentions: ['bot_123'], attachments: [], timestamp: new Date(),
     });
     const inMsg = await client.nextMessage();
+    assert.equal(inMsg.type, 'request');
     if (inMsg.type === 'request') {
+      assert.equal(inMsg.request.method, 'channels/incoming');
       const m = (inMsg.request.params as ChannelsIncomingParams).messages[0] as unknown as Record<string, unknown>;
       assert.equal('threadId' in m, false);
       assert.equal((m.tags as string[]).includes('chat:thread'), false);
       const text = (m.content as Array<{ text: string }>)[0].text;
       assert.ok(text.includes('[#general in Test Server]'), text);
       client.sendResponse(inMsg.request.id, { results: [{ messageId: 'starter', accepted: true }] });
+    }
+    client.close();
+    await serverPromise;
+  });
+
+  it('pushes a mention in a closed thread under the thread\'s own channel, without an MCPL threadId', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    // Nothing is open, so the mention arrives as push/event, whose origin is
+    // built apart from channels/incoming. The thread is its own channel (th1),
+    // hanging off #general.
+    discord.simulateMessage({
+      id: 'th-push', content: 'in the closed thread', cleanContent: 'in the closed thread',
+      authorId: 'u1', authorName: 'Bob', isBot: false,
+      channelId: 'th1', channelName: 'design-chat', guildId: 'g1', guildName: 'Test Server',
+      threadId: 'th1', threadName: 'design-chat', threadParentName: 'general',
+      mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+    });
+    const pushMsg = await client.nextMessage();
+    assert.equal(pushMsg.type, 'request');
+    if (pushMsg.type === 'request') {
+      assert.equal(pushMsg.request.method, 'push/event');
+      const p = pushMsg.request.params as PushEventParams;
+      const origin = p.origin as Record<string, unknown>;
+      assert.equal('threadId' in origin, false, 'a Discord thread is its own channel: no MCPL threadId');
+      assert.equal(origin.mcplChannelId, 'discord:g1:th1');
+      assert.equal(origin.threadName, 'design-chat');
+      assert.equal(origin.threadParentName, 'general');
+      assert.ok(p.tags?.includes('chat:thread'));
+      const text = (p.payload.content[0] as { text?: string }).text ?? '';
+      assert.ok(text.includes('[#general thread "design-chat" in Test Server]'), text);
+      client.sendResponse(pushMsg.request.id, { accepted: true });
     }
     client.close();
     await serverPromise;
