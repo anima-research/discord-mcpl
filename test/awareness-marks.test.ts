@@ -16,7 +16,7 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { DiscordMcplServer } from '../src/server.js';
 import type { DiscordAdapter } from '../src/discord-adapter.js';
-import { describeMarkers, renderAwareness } from '../src/awareness-marks.js';
+import { boundedReply, describeMarkers, paginate, renderListPage, REPLY_LIMIT, type AwarenessView } from '../src/awareness-marks.js';
 
 type Sent = Record<string, unknown>;
 
@@ -60,7 +60,11 @@ function serverWith(conn: unknown) {
 
 /** A slash interaction from an admin, recording what it was answered. */
 function interaction(commandName: string, options: Record<string, string | number | undefined>) {
-  const out: { replies: string[]; deferred?: unknown; ephemeral: boolean[] } = { replies: [], ephemeral: [] };
+  const out: { replies: string[]; files: Array<{ attachment: Buffer; name: string }[]>; deferred?: unknown; ephemeral: boolean[] } = {
+    replies: [],
+    files: [],
+    ephemeral: [],
+  };
   return {
     out,
     value: {
@@ -76,7 +80,10 @@ function interaction(commandName: string, options: Record<string, string | numbe
         },
       },
       deferReply: async (o?: { flags?: unknown }) => { out.deferred = o ?? {}; },
-      editReply: async (content: string) => { out.replies.push(content); },
+      editReply: async (o: string | { content: string; files: Array<{ attachment: Buffer; name: string }> }) => {
+        if (typeof o === 'string') out.replies.push(o);
+        else { out.replies.push(o.content); out.files.push(o.files); }
+      },
       reply: async (o: { content: string; flags?: unknown }) => { out.replies.push(o.content); out.ephemeral.push(o.flags !== undefined); },
     },
   };
@@ -165,6 +172,15 @@ describe('/hide and the marks choice', () => {
     assert.match(i.out.replies.at(-1)!, /2 💤 marks requested \(all; batch `b-9`\)/);
   });
 
+  it('on a host with the verb that omits its receipt, reports marks unreported and never supplements them', async () => {
+    const h = host({ marksVerb: 'yes', answer: (p) => (p.command === 'hide' ? { ok: true, hidden: 2, hiddenRefs: hidden } : { ok: true }) });
+    const { server, reactions } = serverWith(h.conn);
+    const i = interaction('hide', { message: '111111111111111111', marks: 'all' });
+    await asAdmin(() => server.handleSlashCommand(i.value));
+    assert.deepEqual(reactions, []);
+    assert.match(i.out.replies.at(-1)!, /Marks: this host reported nothing about 💤 marks\./);
+  });
+
   it('on an older host, reacts itself only for `all`, refuses `addressed`, and marks nothing otherwise', async () => {
     const answer = (p: Sent) => (p.command === 'hide' ? { ok: true, hidden: 2, hiddenRefs: hidden } : { ok: true });
 
@@ -192,38 +208,166 @@ describe('/hide and the marks choice', () => {
   });
 });
 
-describe('/marks', () => {
-  const journal = [
-    { kind: 'batch', id: 'b-1', status: 'active', scope: 'all', agentName: 'lena', refs: 3, adds: { delivered: 2, queued: 1 }, removals: {}, unresolvedAttempts: 0 },
-    { kind: 'retract', id: 'r-1', target: 'b-0', removals: { delivered: 4 }, unresolvedAttempts: 1 },
-  ];
+// Shapes as agent-framework#250 (dc2928c, unchanged at 485a3c7) produces them:
+// DiscordAwarenessBatchView / RetractView, and each action's receipt.
+const batch = (n: number, extra: Partial<Record<string, unknown>> = {}): AwarenessView => ({
+  kind: 'batch',
+  id: `batch-${String(n).padStart(4, '0')}-1f2e3d4c-5b6a-4789-9abc-def012345678`,
+  status: 'active',
+  scope: 'all',
+  agentName: 'lena',
+  sourceBranch: 'main',
+  targetBranch: `undo-msgs/lena/${1760000000000 + n}`,
+  emoji: '💤',
+  createdAt: 1760000000000 + n * 1000,
+  refs: 3,
+  adds: { requested: 1, dispatching: 0, confirmed: 2, failed: 0, unknown: 0, cancelled: 0 },
+  removals: { requested: 0, dispatching: 0, confirmed: 0, failed: 0, unknown: 0, cancelled: 0 },
+  unresolvedAttempts: 0,
+  ...extra,
+} as AwarenessView);
+const retractView = (at: number): AwarenessView => ({
+  kind: 'retract',
+  id: 'retract-9f8e7d6c-5b4a-4321-8fed-cba987654321',
+  target: 'all',
+  at,
+  by: 'Admin',
+  removals: { requested: 2, dispatching: 0, confirmed: 4, failed: 0, unknown: 1, cancelled: 0 },
+  unresolvedAttempts: 1,
+});
 
-  it('lists the journal, ephemerally', async () => {
-    const h = host({ marksVerb: 'yes', answer: (p) => (p.action === 'list' ? { ok: true, awareness: journal } : { ok: true }) });
+describe('/marks', () => {
+  const listing = (views: AwarenessView[]) => (p: Sent) => (p.action === 'list' ? { ok: true, awareness: views } : { ok: true });
+
+  it('lists the journal newest first, ephemerally, keeping imported evidence', async () => {
+    const views = [
+      batch(1, { legacy: { entries: 2, lastAddConfirmed: 1, lastRemoveConfirmed: 0, outcomesUnrecorded: 3 } }),
+      batch(2, { status: 'held', held: { reason: 'branch switched while prepared', at: 1760000005000, releaseActions: 2 } }),
+      retractView(1760000009000),
+    ];
+    const h = host({ marksVerb: 'yes', answer: listing(views) });
     const { server } = serverWith(h.conn);
     const i = interaction('marks', { action: 'list' });
     await asAdmin(() => server.handleSlashCommand(i.value));
     assert.ok(i.out.deferred && (i.out.deferred as { flags?: unknown }).flags !== undefined, 'deferred ephemerally');
     const reply = i.out.replies.at(-1)!;
-    assert.match(reply, /batch `b-1` — active, all, 3 messages \(lena\): adds delivered 2, queued 1; removals none/);
-    assert.match(reply, /retract `r-1` → b-0: removals delivered 4; 1 unresolved/);
+    const lines = reply.split('\n');
+    assert.match(lines[0]!, /page 1 of 1, 3 entries, newest first/);
+    assert.match(lines[1]!, /retract `retract-9f8e.*` → all: removals requested 2, confirmed 4, unknown 1; 1 unresolved/);
+    assert.match(lines[2]!, /batch `batch-0002.*` — held, all, 3 messages \(lena\): adds requested 1, confirmed 2; removals none; held: branch switched/);
+    assert.match(lines[3]!, /batch `batch-0001.*imported history \(3 unrecorded outcomes\)/);
+    assert.ok(reply.length <= REPLY_LIMIT);
   });
 
-  it('passes an action and its target, and needs a target for anything but list', async () => {
-    const h = host({ marksVerb: 'yes', answer: (p) => (p.action === 'retract' ? { ok: true, awareness: [journal[1]] } : { ok: true }) });
+  it('pages a long journal within one reply each, every entry reachable', async () => {
+    const reason = 'x'.repeat(600);
+    const views = [
+      ...Array.from({ length: 13 }, (_, n) => batch(n + 1, { status: 'held', held: { reason, at: 1, releaseActions: 1 } })),
+      retractView(1),
+    ];
+    const pages = paginate(views);
+    assert.ok(pages.length > 1);
+    const shown = new Set<string>();
+    for (let p = 1; p <= pages.length; p++) {
+      const page = renderListPage(views, p);
+      assert.ok(page.length <= REPLY_LIMIT, `page ${p}: ${page.length} chars`);
+      for (const v of views) if (page.includes(`\`${v.id}\``)) shown.add(v.id);
+      assert.match(page, p < pages.length ? /`\/marks list page:\d+` for the next page/ : /for the first page/);
+    }
+    assert.equal(shown.size, views.length, 'every batch and the retract appear on some page');
+    assert.match(renderListPage(views, 1), /batch-0013/, 'the newest batch leads');
+    assert.match(renderListPage(views, pages.length + 1), /there is no page/);
+
+    const h = host({ marksVerb: 'yes', answer: listing(views) });
     const { server } = serverWith(h.conn);
+    const i = interaction('marks', { action: 'list', page: 2 });
+    await asAdmin(() => server.handleSlashCommand(i.value));
+    assert.match(i.out.replies.at(-1)!, /page 2 of/);
+    assert.equal('target' in h.commands()[0]!, false, 'the host lists everything; paging is here');
+  });
+
+  it('shows one entry in full by id, cutting a long one visibly with the record attached', async () => {
+    const long = batch(5, {
+      status: 'held',
+      held: { reason: 'r'.repeat(2500), at: 1760000005000, releaseActions: 2 },
+      legacy: { entries: 1, lastAddConfirmed: 1, lastRemoveConfirmed: 0, outcomesUnrecorded: 2 },
+    });
+    const views = [batch(4), long];
+    const h = host({ marksVerb: 'yes', answer: listing(views) });
+    const { server } = serverWith(h.conn);
+
+    const short = interaction('marks', { action: 'list', target: views[0]!.id });
+    await asAdmin(() => server.handleSlashCommand(short.value));
+    assert.match(short.out.replies.at(-1)!, /\*\*Batch `batch-0004.*`\*\* — active; all for lena; 3 messages/);
+    assert.equal(short.out.files.length, 0);
+
+    const i = interaction('marks', { action: 'list', target: long.id });
+    await asAdmin(() => server.handleSlashCommand(i.value));
+    const reply = i.out.replies.at(-1)!;
+    assert.ok(reply.length <= REPLY_LIMIT, `${reply.length} chars`);
+    assert.match(reply, /cut to fit one message; the whole answer is attached as JSON/);
+    const attached = JSON.parse(i.out.files.at(-1)![0]!.attachment.toString('utf8'));
+    assert.equal(attached[0].held.reason.length, 2500);
+    assert.deepEqual(attached[0].legacy, { entries: 1, lastAddConfirmed: 1, lastRemoveConfirmed: 0, outcomesUnrecorded: 2 });
+
+    const missing = interaction('marks', { action: 'list', target: 'nope' });
+    await asAdmin(() => server.handleSlashCommand(missing.value));
+    assert.match(missing.out.replies.at(-1)!, /No batch or retract `nope` in the journal/);
+  });
+
+  it("renders cancel's receipt, keeping what cancel can't undo", async () => {
+    const receipt = { target: 'batch-1', kind: 'batch', cancelled: 2, heldDropped: 1, inFlight: 1, unknown: 1, confirmed: 3, unresolvedAttempts: 2, legacyOutcomesUnrecorded: 1 };
+    const h = host({ marksVerb: 'yes', answer: (p) => (p.action === 'cancel' ? { ok: true, awareness: receipt } : { ok: true }) });
+    const { server } = serverWith(h.conn);
+    const i = interaction('marks', { action: 'cancel', target: 'batch-1' });
+    await asAdmin(() => server.handleSlashCommand(i.value));
+    assert.equal(h.commands()[0]!.target, 'batch-1');
+    const reply = i.out.replies.at(-1)!;
+    assert.match(reply, /Cancelled batch `batch-1`: 2 requests will now never be sent, and 1 held release action dropped\./);
+    assert.match(reply, /Cancel removes nothing from Discord: 3 already confirmed on Discord stay as they are; 1 on the wire may still land; 1 with unknown outcome may have landed; 2 unresolved attempts in all; 1 imported attempt with unrecorded outcomes may have landed\./);
+    assert.match(reply, /`\/marks retract target:batch-1`/);
+  });
+
+  it("renders retract's and release's receipts as requested, not confirmed", async () => {
+    const retract = { requestId: 'r-1', removalsQueued: 4, addsSuperseded: 1, keysWithUnresolvedAdds: 2, unresolvedAddAttempts: 3, keysWithLegacyUncertainty: 1 };
+    const release = { batchId: 'b-1', addsQueued: 2, removalsQueued: 0 };
+    const h = host({
+      marksVerb: 'yes',
+      answer: (p) => (p.action === 'retract' ? { ok: true, awareness: retract } : p.action === 'release' ? { ok: true, awareness: release } : { ok: true }),
+    });
+    const { server } = serverWith(h.conn);
+
     const missing = interaction('marks', { action: 'retract' });
     await asAdmin(() => server.handleSlashCommand(missing.value));
     assert.match(missing.out.replies.at(-1)!, /needs a target: a batch id, or `all`/);
     assert.equal(h.commands().length, 0);
 
-    const i = interaction('marks', { action: 'retract', target: 'all' });
-    await asAdmin(() => server.handleSlashCommand(i.value));
+    const r = interaction('marks', { action: 'retract', target: 'all' });
+    await asAdmin(() => server.handleSlashCommand(r.value));
     assert.deepEqual(
-      { command: h.commands()[0].command, action: h.commands()[0].action, target: h.commands()[0].target },
+      { command: h.commands()[0]!.command, action: h.commands()[0]!.action, target: h.commands()[0]!.target },
       { command: 'marks', action: 'retract', target: 'all' },
     );
-    assert.match(i.out.replies.at(-1)!, /✅ \/marks retract `all` done\./);
+    const rr = r.out.replies.at(-1)!;
+    assert.match(rr, /Retract `r-1`: 4 💤 removals requested — not yet confirmed on Discord; 1 unsent add superseded\./);
+    assert.match(rr, /2 messages have earlier add attempts still unresolved \(3 attempts\): such an add may land after its removal\./);
+    assert.match(rr, /1 message has imported history with unrecorded outcomes\./);
+
+    const l = interaction('marks', { action: 'release', target: 'b-1' });
+    await asAdmin(() => server.handleSlashCommand(l.value));
+    assert.match(l.out.replies.at(-1)!, /Released held batch `b-1`: 2 adds and 0 removals requested — not yet confirmed on Discord\./);
+  });
+
+  it('shows a shape it cannot read as sent, bounded, never misread', async () => {
+    const odd = { batchId: 'b-1', something: 'new'.repeat(900) };
+    const h = host({ marksVerb: 'yes', answer: (p) => (p.action === 'cancel' ? { ok: true, awareness: odd } : { ok: true }) });
+    const { server } = serverWith(h.conn);
+    const i = interaction('marks', { action: 'cancel', target: 'b-1' });
+    await asAdmin(() => server.handleSlashCommand(i.value));
+    const reply = i.out.replies.at(-1)!;
+    assert.match(reply, /answered \/marks cancel in a shape this server can't read/);
+    assert.ok(reply.length <= REPLY_LIMIT);
+    assert.deepEqual(JSON.parse(i.out.files.at(-1)![0]!.attachment.toString('utf8')), odd);
   });
 
   it("reports the host's refusal with its code, and explains an older host", async () => {
@@ -249,11 +393,13 @@ describe('rendering', () => {
     assert.match(describeMarkers({ scope: 'all', unmarked: 0, notRemoved: 0, status: 'unresolved', queued: 0, batchId: 'b-2', error: 'disk' }), /may still be delivered later/);
   });
 
-  it('caps a long journal', () => {
-    const views = Array.from({ length: 20 }, (_, n) => ({ kind: 'retract' as const, id: `r-${n}`, target: 'all', removals: {} }));
-    const text = renderAwareness(views);
-    assert.match(text, /… and 8 more$/);
-    assert.equal(renderAwareness([]), 'No awareness-mark batches or retracts in the journal.');
+  it('fits a long reply into one message, cut visibly with the whole text attached', () => {
+    assert.equal(boundedReply('short'), 'short');
+    const long = boundedReply('y'.repeat(5000));
+    assert.ok(typeof long !== 'string');
+    assert.ok(long.content.length <= REPLY_LIMIT);
+    assert.match(long.content, /cut to fit one message; the whole reply is attached\)$/);
+    assert.equal(long.files[0]!.attachment.toString('utf8').length, 5000);
   });
 });
 
@@ -273,5 +419,6 @@ describe('registration', () => {
     const marksCommand = registered.find((c) => c.name === 'marks');
     assert.deepEqual(marksCommand?.options?.find((o) => o.name === 'action')?.choices?.map((c) => c.value), ['list', 'cancel', 'retract', 'release']);
     assert.ok(marksCommand?.options?.some((o) => o.name === 'target'));
+    assert.ok(marksCommand?.options?.some((o) => o.name === 'page'));
   });
 });

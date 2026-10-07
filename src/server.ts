@@ -49,7 +49,23 @@ import type {
 import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, OutgoingFile, ReactionSummary, MessageEventInfo } from './discord-adapter.js';
 import type { ChatInputCommandInteraction } from 'discord.js';
 import { MessageFlags } from 'discord.js';
-import { describeMarkers, MARKS_OPTION, readMarksChoice, renderAwareness, type AwarenessView, type MarkersReceipt } from './awareness-marks.js';
+import {
+  boundedReply,
+  describeCancel,
+  describeMarkers,
+  describeRelease,
+  describeRetract,
+  isCancelReceipt,
+  isReleaseReceipt,
+  isRetractReceipt,
+  isView,
+  MARKS_OPTION,
+  readMarksChoice,
+  renderEntry,
+  renderListPage,
+  unreadable,
+  type MarkersReceipt,
+} from './awareness-marks.js';
 import { toolDefinitions } from './tools.js';
 import { withToolClasses } from './tool-classes.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
@@ -610,8 +626,15 @@ export class DiscordMcplServer {
           {
             type: 3, // STRING
             name: 'target',
-            description: 'A batch id; for cancel, also a retract request id; for retract, also "all"',
+            description: 'A batch or retract id (list: show it in full); retract also takes "all"',
             required: false,
+          },
+          {
+            type: 4, // INTEGER
+            name: 'page',
+            description: 'list: which page of the journal (newest first; default 1)',
+            required: false,
+            min_value: 1,
           },
         ],
       },
@@ -777,14 +800,18 @@ export class DiscordMcplServer {
   }
 
   /**
-   * `/marks action [target]` — the awareness journal's operator controls
-   * (agent-framework `host/command` `marks`): list batches and retracts, and
-   * cancel, retract or release one. Ephemeral: the marks themselves are the
+   * `/marks action [target] [page]` — the awareness journal's operator
+   * controls (agent-framework `host/command` `marks`). list shows the
+   * journal newest first, a page at a time, or one entry in full by its id;
+   * cancel, retract and release each answer with what the host's receipt
+   * says. Every reply fits one Discord message: a longer one is cut visibly
+   * with the full answer attached. Ephemeral: the marks themselves are the
    * public part.
    */
   private async handleMarksCommand(interaction: ChatInputCommandInteraction): Promise<void> {
     const action = interaction.options.getString('action', true);
     const target = interaction.options.getString('target')?.trim() || undefined;
+    const page = interaction.options.getInteger('page') ?? 1;
     const conn = this.conn;
     if (!conn) {
       await interaction.reply({ content: 'Host is not connected.', flags: MessageFlags.Ephemeral });
@@ -817,22 +844,45 @@ export class DiscordMcplServer {
         {
           command: 'marks',
           action,
-          ...(target ? { target } : {}),
+          // list's target picks an entry here; the host lists everything.
+          ...(target && action !== 'list' ? { target } : {}),
           requesterId: interaction.user.id,
           requesterName: interaction.user.username,
         },
         30000,
-      )) as { ok?: boolean; error?: string; code?: string; awareness?: AwarenessView[] | AwarenessView };
+      )) as { ok?: boolean; error?: string; code?: string; awareness?: unknown };
       if (!result?.ok) {
-        await interaction.editReply(`⚠️ /marks ${action} failed${result?.code ? ` (${result.code})` : ''}: ${result?.error ?? 'unknown error'}`);
+        await interaction.editReply(boundedReply(
+          `⚠️ /marks ${action} failed${result?.code ? ` (${result.code})` : ''}: ${result?.error ?? 'unknown error'}`,
+        ));
         return;
       }
-      const views = Array.isArray(result.awareness) ? result.awareness : result.awareness ? [result.awareness] : [];
-      const head = action === 'list' ? '' : `✅ /marks ${action}${target ? ` \`${target}\`` : ''} done.\n`;
-      await interaction.editReply(head + renderAwareness(views));
+      const answer = result.awareness;
+      if (action === 'list') {
+        const views = Array.isArray(answer) && answer.every(isView) ? answer : null;
+        if (!views) {
+          await interaction.editReply(boundedReply(unreadable('the journal', answer), answer));
+          return;
+        }
+        if (target) {
+          const shown = views.filter((v) => v.id === target);
+          await interaction.editReply(boundedReply(renderEntry(views, target), shown.length ? shown : undefined));
+          return;
+        }
+        await interaction.editReply(renderListPage(views, page));
+        return;
+      }
+      const text = action === 'cancel' && isCancelReceipt(answer)
+        ? describeCancel(answer)
+        : action === 'retract' && isRetractReceipt(answer)
+          ? describeRetract(answer)
+          : action === 'release' && isReleaseReceipt(answer)
+            ? describeRelease(answer)
+            : unreadable(`/marks ${action}`, answer);
+      await interaction.editReply(boundedReply(text, answer));
     } catch (err) {
       dbg('slash:marks-failed', { error: (err as Error).message });
-      await interaction.editReply(`⚠️ /marks ${action} failed: ${(err as Error).message}`);
+      await interaction.editReply(boundedReply(`⚠️ /marks ${action} failed: ${(err as Error).message}`));
     }
   }
 
@@ -930,11 +980,14 @@ export class DiscordMcplServer {
         return;
       }
 
-      // This server's own 💤 reactions only where the operator chose `all`
-      // and the framework marked nothing itself (it returned no `markers`).
-      // Best-effort, in parallel.
+      // This server's own 💤 reactions only on a host positively known to
+      // lack the verb, where the operator chose `all` and the framework
+      // reported no marks of its own. A host with the verb that omits its
+      // receipt is reported as such, never supplemented: reactions placed
+      // here would bypass its journal and its cancel. Best-effort, in
+      // parallel.
       let reacted = 0;
-      const refs = marks === 'all' && !result.markers ? result.hiddenRefs ?? [] : [];
+      const refs = support === false && marks === 'all' && !result.markers ? result.hiddenRefs ?? [] : [];
       await Promise.all(
         refs.map(async (ref) => {
           // channelId may be raw or the "discord:guild:channel" composite.
@@ -952,7 +1005,7 @@ export class DiscordMcplServer {
       const n = result.hidden ?? 0;
       const lines = [
         `🙈 Removed **${n}** message${n === 1 ? '' : 's'} from the agent's context (redacted in place).`,
-        result.markers
+        result.markers || support
           ? describeMarkers(result.markers)
           : marks === 'all'
             ? `Marks: this host doesn't place them, so this server reacted 💤 itself on ${reacted} of ${refs.length}.`
