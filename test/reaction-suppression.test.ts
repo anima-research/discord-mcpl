@@ -865,7 +865,7 @@ describe('server integration', () => {
     let reactionHandler: ((ev: Record<string, unknown>) => void) | undefined;
     const noop = () => {};
     s.discord = {
-      onMessage: noop, onMessageEdit: noop, onMessageDelete: noop, onDmRefused: noop,
+      onMessage: noop, onMessageEdit: noop, onMessageDelete: noop,
       onChannelCreate: noop, onChannelDelete: noop, onGuildCreate: noop,
       onChannelAvailable: noop,
       onReaction: (h: (ev: Record<string, unknown>) => void) => { reactionHandler = h; },

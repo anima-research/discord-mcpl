@@ -126,9 +126,13 @@ async function main(): Promise<void> {
   }
 
   const server = new DiscordMcplServer(discord, voice);
-  // Refused-DM notice state: opened now. A new state's floor is the server's
-  // construction, before anything is listened to or swept.
-  server.openDmNoticeState();
+  // Refused DMs are handled from here on, whether or not a host is connected
+  // (TCP mode waits for its first client): each gets its notice decision and
+  // operator log line. A new notice state's floor is the server's
+  // construction, just above. Discord connected earlier, so a refusal it
+  // reported before then went unheard; it predates the floor, so it would
+  // get no notice either way, and the sweep may still log it.
+  await server.setupDmRefusals();
 
   // The filters plane state (whitelists + reaction suppression share one
   // desired/effective/status lifecycle): hand it the startup filters, or

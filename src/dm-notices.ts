@@ -11,8 +11,9 @@
  *     as a Discord snowflake. A message older than that never notifies, on
  *     any path: a gateway event can carry an older message as well as the
  *     catch-up sweep can, and deploying this mustn't notify everyone whose
- *     DMs were refused before. The server captures the boundary before it
- *     starts listening, so a state file created later still uses it.
+ *     DMs were refused before. The server captures the boundary when it is
+ *     constructed, before it handles any refusal, so a state file created
+ *     later still uses it.
  *   - per sender, lastHandledId: the newest refused message already handled.
  *     A message whose id isn't newer never notifies again.
  *   - per sender, lastNotice: the last notice's message, when it was
@@ -29,18 +30,14 @@
  * The state lives in its own file, separate from the filters file. If it
  * can't be read or written, notices are suspended rather than sent without a
  * durable limit; refusals themselves are unaffected.
+ *
+ * The file is read and written asynchronously, so a slow disk never stalls
+ * the gateway, and the state's operations (open, decide, recordOutcome,
+ * setEnabled) run one at a time, in the order they were called: each sees the
+ * state the one before it left. Every change rewrites the whole file, which
+ * holds one small entry per sender ever refused.
  */
-import {
-  closeSync,
-  existsSync,
-  fchmodSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdir, open, readFile, rename, type FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -146,63 +143,103 @@ function parseNoticeFile(raw: unknown): NoticeFile | null {
   return { version: 1, floorId: r.floorId, enabled: r.enabled, senders };
 }
 
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** A write that failed after the new file replaced the old one: the file
+ *  holds the new state, but its directory couldn't be flushed, so the
+ *  replacement may not survive a host crash. */
+class UnflushedReplace extends Error {}
+
 export class DmNoticeState {
+  /** The state as the file holds it (see commit), or null while it can't be read. */
   private file: NoticeFile | null = null;
   private path: string | null = null;
   private floorAt: number | undefined;
   private error: string | null = 'not opened yet (the bot user id is not known)';
+  /** Settles when the last operation called so far has finished. */
+  private tail: Promise<void> = Promise.resolve();
   private readonly now: () => number;
-  private readonly fsync: (fd: number) => void;
+  private readonly sync: (handle: FileHandle, what: 'file' | 'directory') => Promise<void>;
   private readonly onInterrupted: (i: DmNoticeInterruption) => void;
 
   /** `onInterrupted` hears about each reservation found still pending when
    *  the state is opened, every time it is opened (startup, or a reopen once
-   *  a broken file is repaired). `now` and `fsync` are injectable for tests. */
+   *  a broken file is repaired). `now` and `sync` (which flushes the state
+   *  file, or its directory after the rename) are injectable for tests. */
   constructor(opts: {
     now?: () => number;
-    fsync?: (fd: number) => void;
+    sync?: (handle: FileHandle, what: 'file' | 'directory') => Promise<void>;
     onInterrupted?: (i: DmNoticeInterruption) => void;
   } = {}) {
     this.now = opts.now ?? Date.now;
-    this.fsync = opts.fsync ?? fsyncSync;
+    this.sync = opts.sync ?? ((handle) => handle.sync());
     this.onInterrupted = opts.onInterrupted ?? (() => {});
+  }
+
+  /** Run `op` once every operation called before it has finished. */
+  private serially<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(op);
+    this.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   /** Open the state at `path`. A new file gets its floor at `floorAt` (the
    *  caller's startup boundary, epoch ms), else now; an existing file keeps
    *  its own. An unreadable or invalid file is left untouched and suspends
-   *  notices until an operator repairs or removes it. */
-  open(path: string, opts: { floorAt?: number } = {}): void {
-    this.floorAt = opts.floorAt ?? this.floorAt;
+   *  notices until an operator repairs or removes it; the next decision or
+   *  setting change tries it again. */
+  open(path: string, opts: { floorAt?: number } = {}): Promise<void> {
+    return this.serially(() => this.load(path, opts.floorAt));
+  }
+
+  private async load(path: string, floorAt?: number): Promise<void> {
+    this.floorAt = floorAt ?? this.floorAt;
     this.path = path;
+    this.file = null;
+    let text: string | null = null;
     try {
-      if (existsSync(path)) {
-        const parsed = parseNoticeFile(JSON.parse(readFileSync(path, 'utf-8')));
-        if (!parsed) throw new Error(`${path} is not a valid DM notice state file`);
-        // A reservation still pending was interrupted between reserving and
-        // recording its outcome: settle it as unknown (never retried).
-        const pending = Object.entries(parsed.senders).filter(([, v]) => v.lastNotice?.outcome === 'pending');
-        if (pending.length) {
-          const senders = { ...parsed.senders };
-          for (const [authorId, v] of pending) {
-            senders[authorId] = { ...v, lastNotice: { ...v.lastNotice!, outcome: 'unknown' } };
-          }
-          this.write({ ...parsed, senders });
-          this.file = { ...parsed, senders };
-          for (const [authorId, v] of pending) {
-            this.onInterrupted({ authorId, messageId: v.lastNotice!.messageId, at: v.lastNotice!.at });
-          }
-        } else {
-          this.file = parsed;
-        }
-      } else {
-        this.file = { version: 1, floorId: snowflakeAt(this.floorAt ?? this.now()), enabled: true, senders: {} };
-        this.write(this.file);
-      }
-      this.error = null;
+      text = await readFile(path, 'utf-8');
     } catch (err) {
-      this.file = null;
-      this.error = err instanceof Error ? err.message : String(err);
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.error = errorText(err);
+        return;
+      }
+    }
+    if (text === null) {
+      await this.commit({ version: 1, floorId: snowflakeAt(this.floorAt ?? this.now()), enabled: true, senders: {} });
+      return;
+    }
+    let parsed: NoticeFile | null = null;
+    try {
+      parsed = parseNoticeFile(JSON.parse(text));
+    } catch {
+      // not JSON: invalid, as below
+    }
+    if (!parsed) {
+      this.error = `${path} is not a valid DM notice state file`;
+      return;
+    }
+    // A reservation still pending was interrupted between reserving and
+    // recording its outcome: settle it as unknown (never retried), and report
+    // it once the file says so. Until then the state stays closed, so the
+    // next use tries again.
+    const pending = Object.entries(parsed.senders).filter(([, v]) => v.lastNotice?.outcome === 'pending');
+    if (!pending.length) {
+      this.file = parsed;
+      this.error = null;
+      return;
+    }
+    const senders = { ...parsed.senders };
+    for (const [authorId, v] of pending) {
+      senders[authorId] = { ...v, lastNotice: { ...v.lastNotice!, outcome: 'unknown' } };
+    }
+    await this.commit({ ...parsed, senders });
+    if (!this.file) return;
+    for (const [authorId, v] of pending) {
+      this.onInterrupted({ authorId, messageId: v.lastNotice!.messageId, at: v.lastNotice!.at });
     }
   }
 
@@ -215,113 +252,135 @@ export class DmNoticeState {
     };
   }
 
-  /** Settle a reserved notice's outcome. If it can't be written, the
-   *  reservation stays pending on disk and is reported as interrupted
+  /** Settle a reserved notice's outcome. Resolves to null once that is
+   *  durable, else to why not. If the file couldn't be replaced, the
+   *  reservation stays pending there and is reported as interrupted
    *  (unknown) the next time the state is opened. */
-  recordOutcome(authorId: string, messageId: string, outcome: Exclude<DmNoticeOutcome, 'pending'>): void {
-    const file = this.file;
-    const prev = file?.senders[authorId];
-    if (!file || !prev?.lastNotice || prev.lastNotice.messageId !== messageId) return;
-    const next: NoticeFile = {
-      ...file,
-      senders: { ...file.senders, [authorId]: { ...prev, lastNotice: { ...prev.lastNotice, outcome } } },
-    };
-    try {
-      this.write(next);
-      this.file = next;
-      this.error = null;
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
-    }
+  recordOutcome(
+    authorId: string,
+    messageId: string,
+    outcome: Exclude<DmNoticeOutcome, 'pending'>,
+  ): Promise<string | null> {
+    return this.serially(async () => {
+      const file = this.file;
+      const prev = file?.senders[authorId];
+      if (!file || !prev?.lastNotice || prev.lastNotice.messageId !== messageId) {
+        return 'its reservation is no longer in the notice state';
+      }
+      return this.commit({
+        ...file,
+        senders: { ...file.senders, [authorId]: { ...prev, lastNotice: { ...prev.lastNotice, outcome } } },
+      });
+    });
   }
 
-  /** Persist the resident's setting. Throws when it can't be written, so the
-   *  caller can say the change didn't take. */
-  setEnabled(enabled: boolean): void {
-    if (!this.file && this.path) this.open(this.path);
-    if (!this.file) throw new Error(`DM notice state is unavailable: ${this.error ?? 'no path'}`);
-    const next: NoticeFile = { ...this.file, enabled };
-    try {
-      this.write(next);
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
-      throw new Error(`could not save the DM notice setting: ${this.error}`);
-    }
-    this.file = next;
-    this.error = null;
+  /** Save the resident's setting. Rejects when it didn't take effect, so the
+   *  caller can say so. Resolves to null once it is durable, or to why it
+   *  may not be: the file was replaced, so the setting is in effect, but its
+   *  directory couldn't be flushed. */
+  setEnabled(enabled: boolean): Promise<string | null> {
+    return this.serially(async () => {
+      if (!this.file && this.path) await this.load(this.path);
+      if (!this.file) throw new Error(`DM notice state is unavailable: ${this.error ?? 'no path'}`);
+      const next: NoticeFile = { ...this.file, enabled };
+      const error = await this.commit(next);
+      if (error && this.file !== next) throw new Error(`could not save the DM notice setting: ${error}`);
+      return error;
+    });
   }
 
   /**
    * Decide one refused DM's notice and record it durably. Every refusal the
    * state can see advances its sender's lastHandledId, silenced or not, so a
    * later catch-up of the same message can't notify. A `notify` result is
-   * returned only after the reservation reached disk.
+   * returned only after the reservation is durable; while the file can't be
+   * written durably, notices are suspended (checked again on the next
+   * refusal).
    */
-  decide(messageId: string, authorId: string): DmNoticeDecision {
-    // A file that couldn't be opened may have been repaired or removed since.
-    if (!this.file && this.path) this.open(this.path);
-    const file = this.file;
-    if (!file) return 'suspended';
-    const silenced = !file.enabled;
-    if (!SNOWFLAKE_RE.test(messageId) || BigInt(messageId) < BigInt(file.floorId)) return 'before-floor';
-    const prev = file.senders[authorId];
-    if (prev && BigInt(messageId) <= BigInt(prev.lastHandledId)) return 'already-handled';
+  decide(messageId: string, authorId: string): Promise<DmNoticeDecision> {
+    return this.serially(async () => {
+      // A file that couldn't be opened may have been repaired or removed since.
+      if (!this.file && this.path) await this.load(this.path);
+      const file = this.file;
+      if (!file) return 'suspended';
+      const silenced = !file.enabled;
+      if (!SNOWFLAKE_RE.test(messageId) || BigInt(messageId) < BigInt(file.floorId)) return 'before-floor';
+      const prev = file.senders[authorId];
+      if (prev && BigInt(messageId) <= BigInt(prev.lastHandledId)) return 'already-handled';
 
-    const now = this.now();
-    const inWindow = prev?.lastNotice !== undefined && now - prev.lastNotice.at < DM_NOTICE_WINDOW_MS;
-    const reserve = !silenced && !inWindow;
-    const lastNotice: LastNotice | undefined = reserve
-      ? { messageId, at: now, outcome: 'pending' }
-      : prev?.lastNotice;
-    const next: NoticeFile = {
-      ...file,
-      senders: {
-        ...file.senders,
-        [authorId]: { lastHandledId: messageId, ...(lastNotice ? { lastNotice } : {}) },
-      },
-    };
+      const now = this.now();
+      const inWindow = prev?.lastNotice !== undefined && now - prev.lastNotice.at < DM_NOTICE_WINDOW_MS;
+      const reserve = !silenced && !inWindow;
+      const lastNotice: LastNotice | undefined = reserve
+        ? { messageId, at: now, outcome: 'pending' }
+        : prev?.lastNotice;
+      const next: NoticeFile = {
+        ...file,
+        senders: {
+          ...file.senders,
+          [authorId]: { lastHandledId: messageId, ...(lastNotice ? { lastNotice } : {}) },
+        },
+      };
+      if (await this.commit(next)) return silenced ? 'silenced' : 'suspended';
+      if (silenced) return 'silenced';
+      return reserve ? 'notify' : 'rate-limited';
+    });
+  }
+
+  /** Write `next` and make it the state. The state always matches what the
+   *  file holds: a write that failed before replacing the file changes
+   *  nothing, and one that replaced the file but couldn't flush its
+   *  directory still leaves `next` as the state (this is the file's only
+   *  writer, so a reread would return the same), with the error kept until
+   *  a later write is durable. Resolves to null once `next` is durable, else
+   *  to the error. */
+  private async commit(next: NoticeFile): Promise<string | null> {
     try {
-      this.write(next);
+      await this.write(next);
+      this.file = next;
+      this.error = null;
+      return null;
     } catch (err) {
-      // Keep the last state that reached disk in memory; stop notifying until
-      // the file can be written again (checked on the next refusal).
-      this.error = err instanceof Error ? err.message : String(err);
-      return silenced ? 'silenced' : 'suspended';
+      if (err instanceof UnflushedReplace) this.file = next;
+      this.error = errorText(err);
+      return this.error;
     }
-    this.file = next;
-    this.error = null;
-    if (silenced) return 'silenced';
-    return reserve ? 'notify' : 'rate-limited';
   }
 
   /** Durable replace: the new content is flushed before it takes the old
    *  file's place, and the rename is flushed with its directory, so a
    *  reservation that returned has survived a host crash. Private to the
-   *  bot's user (0600 file, 0700 directory). Any failure throws, and callers
-   *  treat it as a persistence failure (notices suspended). */
-  private write(file: NoticeFile): void {
+   *  bot's user (0600 file, 0700 directory). A failure before the rename
+   *  leaves the old file in place; one after it is an UnflushedReplace. */
+  private async write(file: NoticeFile): Promise<void> {
     if (!this.path) throw new Error('DM notice state has no path');
-    const dir = dirname(this.path);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const tmp = `${this.path}.tmp`;
-    const fd = openSync(tmp, 'w', 0o600);
+    const path = this.path;
+    const dir = dirname(path);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const tmp = `${path}.tmp`;
+    const handle = await open(tmp, 'w', 0o600);
     try {
-      fchmodSync(fd, 0o600); // a stale tmp keeps its old mode otherwise
-      // writeFileSync on a descriptor loops until every byte is written, so
-      // a short write can't pass for a durable reservation.
-      writeFileSync(fd, JSON.stringify(file, null, 2) + '\n');
-      this.fsync(fd);
+      await handle.chmod(0o600); // a stale tmp keeps its old mode otherwise
+      // writeFile on a handle loops until every byte is written, so a short
+      // write can't pass for a durable reservation.
+      await handle.writeFile(JSON.stringify(file, null, 2) + '\n');
+      await this.sync(handle, 'file');
     } finally {
-      closeSync(fd);
+      await handle.close();
     }
-    renameSync(tmp, this.path);
-    if (process.platform !== 'win32') {
-      const dfd = openSync(dir, 'r');
+    await rename(tmp, path);
+    if (process.platform === 'win32') return;
+    try {
+      const dirHandle = await open(dir, 'r');
       try {
-        this.fsync(dfd);
+        await this.sync(dirHandle, 'directory');
       } finally {
-        closeSync(dfd);
+        await dirHandle.close();
       }
+    } catch (err) {
+      throw new UnflushedReplace(
+        `${path} was replaced, but flushing its directory failed, so the change may not survive a host crash: ${errorText(err)}`,
+      );
     }
   }
 }

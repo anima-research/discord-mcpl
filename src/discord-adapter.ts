@@ -782,9 +782,15 @@ export class DiscordAdapter {
    *  mention resolution, and no mentions allowed to ping. `nonce` is
    *  enforced, so the REST layer's own retries after a lost response can't
    *  post a second copy (Discord returns the first instead). An error that
-   *  carries `notPosted: true` was raised before anything was sent. */
+   *  carries `notPosted: true` was raised before anything was sent: the
+   *  channel lookup failed or found no text channel. */
   async sendDmNotice(channelId: string, content: string, nonce: string): Promise<{ messageId: string }> {
-    const channel = await this.client.channels.fetch(channelId);
+    const channel = await this.client.channels.fetch(channelId).catch((err: unknown) => {
+      throw Object.assign(
+        new Error(`could not look up channel ${channelId}: ${err instanceof Error ? err.message : String(err)}`),
+        { notPosted: true },
+      );
+    });
     if (!channel || !('send' in channel)) {
       throw Object.assign(new Error(`Channel ${channelId} not found or not a text channel`), { notPosted: true });
     }
