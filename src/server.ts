@@ -51,6 +51,7 @@ import type { ChatInputCommandInteraction } from 'discord.js';
 import { MessageFlags } from 'discord.js';
 import {
   boundedReply,
+  controlOutcomeUnknown,
   describeCancel,
   describeMarkers,
   describeRelease,
@@ -63,6 +64,7 @@ import {
   readMarksChoice,
   renderEntry,
   renderListPage,
+  summarizeControl,
   unreadable,
   type BoundedReply,
   type MarkersReceipt,
@@ -880,8 +882,9 @@ export class DiscordMcplServer {
         : `Couldn't reach the host's awareness-mark controls (${support.reason}). Try again.`));
       return;
     }
+    let result: { ok?: boolean; error?: string; code?: string; awareness?: unknown };
     try {
-      const result = (await conn.sendRequest(
+      result = (await conn.sendRequest(
         'host/command',
         {
           command: 'marks',
@@ -892,40 +895,46 @@ export class DiscordMcplServer {
           requesterName: interaction.user.username,
         },
         30000,
-      )) as { ok?: boolean; error?: string; code?: string; awareness?: unknown };
-      if (!result?.ok) {
-        await this.acknowledge(interaction, boundedReply(
-          `⚠️ /marks ${action} failed${result?.code ? ` (${result.code})` : ''}: ${result?.error ?? 'unknown error'}`,
-        ));
-        return;
-      }
-      const answer = result.awareness;
-      if (action === 'list') {
-        const views = Array.isArray(answer) && answer.every(isView) ? answer : null;
-        if (!views) {
-          await this.acknowledge(interaction, boundedReply(unreadable('the journal', answer), answer));
-          return;
-        }
-        if (target) {
-          const shown = views.filter((v) => v.id === target);
-          await this.acknowledge(interaction, boundedReply(renderEntry(views, target), shown.length ? shown : undefined));
-          return;
-        }
-        await this.acknowledge(interaction, renderListPage(views, page));
-        return;
-      }
-      const text = action === 'cancel' && isCancelReceipt(answer)
-        ? describeCancel(answer)
-        : action === 'retract' && isRetractReceipt(answer)
-          ? describeRetract(answer)
-          : action === 'release' && isReleaseReceipt(answer)
-            ? describeRelease(answer)
-            : unreadable(`/marks ${action}`, answer);
-      await this.acknowledge(interaction, boundedReply(text, answer));
+      )) as typeof result;
     } catch (err) {
-      dbg('slash:marks-failed', { error: (err as Error).message });
-      await this.acknowledge(interaction, boundedReply(`⚠️ /marks ${action} failed: ${(err as Error).message}`));
+      dbg('slash:marks-failed', { action, error: (err as Error).message });
+      // A read that failed changed nothing. A control may have reached the
+      // host first: its outcome is unknown, never "failed".
+      await this.acknowledge(interaction, boundedReply(action === 'list'
+        ? `⚠️ /marks list failed: ${(err as Error).message}`
+        : controlOutcomeUnknown(action, target, (err as Error).message)));
+      return;
     }
+    if (!result?.ok) {
+      await this.acknowledge(interaction, boundedReply(
+        `⚠️ /marks ${action} failed${result?.code ? ` (${result.code})` : ''}: ${result?.error ?? 'unknown error'}`,
+      ));
+      return;
+    }
+    const answer = result.awareness;
+    if (action === 'list') {
+      const views = Array.isArray(answer) && answer.every(isView) ? answer : null;
+      if (!views) {
+        await this.acknowledge(interaction, boundedReply(unreadable('the journal', answer), answer));
+        return;
+      }
+      if (target) {
+        const shown = views.filter((v) => v.id === target);
+        await this.acknowledge(interaction, boundedReply(renderEntry(views, target), shown.length ? shown : undefined));
+        return;
+      }
+      await this.acknowledge(interaction, renderListPage(views, page));
+      return;
+    }
+    const text = action === 'cancel' && isCancelReceipt(answer)
+      ? describeCancel(answer)
+      : action === 'retract' && isRetractReceipt(answer)
+        ? describeRetract(answer)
+        : action === 'release' && isReleaseReceipt(answer)
+          ? describeRelease(answer)
+          : unreadable(`/marks ${action}`, answer);
+    // The control is accepted: a reply that can't be shown still says what was requested.
+    await this.acknowledge(interaction, boundedReply(text, answer), summarizeControl(action, target, answer));
   }
 
   /**

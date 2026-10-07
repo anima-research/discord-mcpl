@@ -432,6 +432,38 @@ describe('/marks', () => {
     assert.deepEqual(JSON.parse(i.out.files.at(-1)![0]!.attachment.toString('utf8')), odd);
   });
 
+  it('calls a control whose request failed in transit unknown, pointing at the journal', async () => {
+    const conn = {
+      sendRequest: async (_m: string, p: Sent) => {
+        if (!p.requesterId) return { ok: true, awareness: [] };
+        throw new Error('connection lost');
+      },
+    };
+    const { server } = serverWith(conn);
+    const r = interaction('marks', { action: 'retract', target: 'b-1' });
+    await asAdmin(() => server.handleSlashCommand(r.value));
+    assert.match(r.out.replies.at(-1)!, /^⚠️ \/marks retract outcome unknown \(connection lost\): the host may already have queued the removals\. Check `\/marks list target:b-1` before trying again\.$/);
+    const all = interaction('marks', { action: 'retract', target: 'all' });
+    await asAdmin(() => server.handleSlashCommand(all.value));
+    assert.match(all.out.replies.at(-1)!, /Check `\/marks list` before trying again/);
+    const list = interaction('marks', { action: 'list' });
+    await asAdmin(() => server.handleSlashCommand(list.value));
+    assert.match(list.out.replies.at(-1)!, /^⚠️ \/marks list failed: connection lost$/);
+  });
+
+  it('keeps what an accepted control requested when its reply is refused', async () => {
+    const retract = { requestId: 'r-1', removalsQueued: 4, addsSuperseded: 0, keysWithUnresolvedAdds: 0, unresolvedAddAttempts: 0, keysWithLegacyUncertainty: 0 };
+    const cancel = { target: 'b-2', kind: 'batch', cancelled: 3, heldDropped: 0, inFlight: 0, unknown: 0, confirmed: 1, unresolvedAttempts: 0, legacyOutcomesUnrecorded: 0 };
+    const h = host({ marksVerb: 'yes', answer: (p) => (p.action === 'retract' ? { ok: true, awareness: retract } : p.action === 'cancel' ? { ok: true, awareness: cancel } : { ok: true }) });
+    const { server } = serverWith(h.conn);
+    const r = interaction('marks', { action: 'retract', target: 'b-1' }, { rejectFirstEdit: true });
+    await asAdmin(() => server.handleSlashCommand(r.value));
+    assert.match(r.out.replies.at(-1)!, /^✅ Retract `r-1`: 4 removals requested, not yet confirmed on Discord\. \(The full reply couldn't be shown/);
+    const c = interaction('marks', { action: 'cancel', target: 'b-2' }, { rejectFirstEdit: true });
+    await asAdmin(() => server.handleSlashCommand(c.value));
+    assert.match(c.out.replies.at(-1)!, /^✅ Cancelled batch `b-2`: 3 requests will never be sent; cancel removes nothing from Discord\. \(The full reply/);
+  });
+
   it("reports the host's refusal with its code, and explains an older host", async () => {
     const busy = host({ marksVerb: 'yes', answer: () => ({ ok: false, error: 'an agent sharing the store is mid-turn', code: 'agent-busy' }) });
     const a = serverWith(busy.conn);

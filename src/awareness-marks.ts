@@ -356,3 +356,32 @@ export function boundedReply(text: string, full?: unknown, budget = REPLY_LIMIT)
     ],
   };
 }
+
+/**
+ * The short account of an accepted control, for when its full reply can't be
+ * shown: the action, its target or request id, and what was requested —
+ * never what Discord confirmed.
+ */
+export function summarizeControl(action: string, target: string | undefined, answer: unknown): string {
+  if (action === 'cancel' && isCancelReceipt(answer)) {
+    return `✅ Cancelled ${answer.kind} \`${answer.target}\`: ${plural(answer.cancelled, 'request')} will never be sent; cancel removes nothing from Discord.`;
+  }
+  if (action === 'retract' && isRetractReceipt(answer)) {
+    return `✅ Retract \`${answer.requestId}\`: ${plural(answer.removalsQueued, 'removal')} requested, not yet confirmed on Discord.`;
+  }
+  if (action === 'release' && isReleaseReceipt(answer)) {
+    return `✅ Released \`${answer.batchId}\`: ${plural(answer.addsQueued, 'add')} and ${plural(answer.removalsQueued, 'removal')} requested, not yet confirmed on Discord.`;
+  }
+  return `✅ The host accepted /marks ${action}${target ? ` \`${target}\`` : ''} (its receipt couldn't be read).`;
+}
+
+/** A control whose request failed in transit: it may have been applied. */
+export function controlOutcomeUnknown(action: string, target: string | undefined, error: string): string {
+  const effect = action === 'cancel'
+    ? 'already have cancelled it'
+    : action === 'retract'
+      ? 'already have queued the removals'
+      : 'already have queued the release';
+  const look = target && target !== 'all' ? `\`/marks list target:${target}\`` : '`/marks list`';
+  return `⚠️ /marks ${action} outcome unknown (${error}): the host may ${effect}. Check ${look} before trying again.`;
+}
