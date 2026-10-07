@@ -6,7 +6,7 @@
  */
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import type { Client } from 'discord.js';
+import { ChannelType, type Client } from 'discord.js';
 import { DiscordAdapter, type DmSendFailure } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
 import { toDescriptor, toDmDescriptor } from '../src/channels.js';
@@ -140,6 +140,22 @@ describe('DMs are named wherever they are known, not only from inbound DM state'
     const items = await f.call('fetch_history', { channelId: DM });
     assert.equal(items[0].source, `[source: discord:dm:${DM}]`);
     assert.equal(items[0].channelLabel, null);
+  });
+
+  it('has the adapter read a cached DM\'s recipient, and answer null when reading it throws', (t) => {
+    const adapter = new DiscordAdapter({ token: 'unused' });
+    const client = (adapter as unknown as { client: Client }).client;
+    t.after(() => client.destroy());
+    const cache = client.channels.cache as unknown as Map<string, unknown>;
+    cache.set(DM, { type: ChannelType.DM, recipient: { username: 'ra', displayName: 'Ra' } });
+    assert.equal(adapter.getCachedDmRecipientName(DM), 'Ra');
+    // discord.js's DMChannel.recipient reads client.user.id, which throws
+    // before login; the label is then left out rather than failing the read.
+    cache.set(DM, {
+      type: ChannelType.DM,
+      get recipient(): never { throw new TypeError("Cannot read properties of null (reading 'id')"); },
+    });
+    assert.equal(adapter.getCachedDmRecipientName(DM), null);
   });
 });
 

@@ -1824,17 +1824,11 @@ export class DiscordMcplServer {
 
   // ── Sticky-reply state mutators ──
 
-  /** Build the tool-result object for a successful send_*. Just the messageId
-   *  now — the old "sticky channel is now X / your text-only replies route
-   *  here" note was tied to the retired per-surface sticky and would be
-   *  misleading under host-owned routing (the host routes plain-text turns to
-   *  the conversational locus, i.e. the most recent *incoming* channel, not
-   *  the last channel this bot sent to). `_shifted` is kept in the signature
-   *  for call-site compatibility but no longer used. */
   /** A send receipt names the destination actually sent to: the canonical
    *  `discord:<guild|dm>:<channel>` id (what the host's registry uses), the
    *  raw Discord id, and the channel's label. It says nothing about where
-   *  later plain speech will go. */
+   *  later plain speech will go; the host owns that routing. `_shifted` is
+   *  kept in the signature for call-site compatibility but no longer used. */
   private async augmentSendResult(
     messageId: string,
     channelId: string,
