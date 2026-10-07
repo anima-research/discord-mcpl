@@ -1,0 +1,244 @@
+/**
+ * Self-contained provenance on Discord's own renderings (shelf-356, Discord
+ * side): fetched history names its channel on every item, channels/open
+ * backscroll items carry their label for the host's header, and send receipts
+ * name the destination actually sent to.
+ */
+import { describe, it } from 'node:test';
+import * as assert from 'node:assert/strict';
+import type { Client } from 'discord.js';
+import { DiscordAdapter, type DmSendFailure } from '../src/discord-adapter.js';
+import { DiscordMcplServer } from '../src/server.js';
+import { toDescriptor, toDmDescriptor } from '../src/channels.js';
+import { toolDefinitions } from '../src/tools.js';
+
+const item = (id: string, text: string) => ({
+  id, authorId: 'u1', authorName: 'Alice', isBot: false, content: text, cleanContent: text,
+  attachments: [], mentionsBot: false, timestamp: new Date('2026-10-07T08:00:00Z'), reactions: [],
+});
+
+type Meta = { name: string | null; guildId: string | null; guildName: string | null; isDM: boolean };
+
+function fixture(opts: {
+  cached?: Record<string, Meta>;
+  names?: Record<string, string>;
+  dmRecipients?: Record<string, string>;
+} = {}) {
+  const sent: Array<{ channelId: string; options?: unknown }> = [];
+  const adapter = {
+    botUserId: 'bot',
+    resolveChannelRef: (given: string) => {
+      const id = opts.names?.[given];
+      return id ? { ok: true, id } : { ok: false, message: `unknown ${given}` };
+    },
+    getCachedChannelMeta: (id: string) => opts.cached?.[id] ?? null,
+    getCachedDmRecipientName: (id: string) => opts.dmRecipients?.[id] ?? null,
+    async fetchHistory() { return [item('901', 'first'), item('902', 'second')]; },
+    async fetchAround() { return [item('905', 'around')]; },
+    async sendMessage(channelId: string, _content: string, options?: unknown) {
+      sent.push({ channelId, options });
+      return { messageId: '700' };
+    },
+    async sendDM() { return { messageId: '701', channelId: '160000000000000009', recipientName: 'Ra' }; },
+  };
+  const server = new DiscordMcplServer(adapter as unknown as DiscordAdapter) as unknown as {
+    channelManager: { register(d: unknown): void };
+    dmChannelIds: Set<string>;
+    subscriptionsLoaded: boolean;
+    reactionChannelsLoaded: boolean;
+    mutedLoaded: boolean;
+    handleToolCall(name: string, args: Record<string, unknown>): Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+    handleChannelOpen(params: Record<string, unknown>): Promise<{ history?: Array<Record<string, unknown>> }>;
+  };
+  server.subscriptionsLoaded = true;
+  server.reactionChannelsLoaded = true;
+  server.mutedLoaded = true;
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const res = await server.handleToolCall(name, args);
+    assert.ok(!res.isError, res.content[0]?.text);
+    return JSON.parse(res.content[0].text);
+  };
+  const callError = async (name: string, args: Record<string, unknown>) => {
+    const res = await server.handleToolCall(name, args);
+    assert.equal(res.isError, true, res.content[0]?.text);
+    return res.content[0].text;
+  };
+  return { server, sent, call, callError, adapter: adapter as Record<string, unknown> };
+}
+
+describe('fetched history names its channel on every item', () => {
+  it('stamps each message, consecutive ones included, with the registry label', async () => {
+    const f = fixture({ cached: { '110000000000000001': { name: 'general', guildId: 'g1', guildName: 'Guild One', isDM: false } } });
+    f.server.channelManager.register(toDescriptor('g1', 'Guild One', { id: '110000000000000001', name: 'general', type: 'text', label: '#general (Guild One)' }));
+    const items = await f.call('fetch_history', { channelId: '110000000000000001' });
+    assert.equal(items.length, 2);
+    for (const m of items) {
+      assert.equal(m.source, '[source: discord:g1:110000000000000001 · #general (Guild One)]');
+      assert.equal(m.channelId, 'discord:g1:110000000000000001');
+      assert.equal(m.channelLabel, '#general (Guild One)');
+    }
+    assert.deepEqual(items.map((m: { cleanContent: string }) => m.cleanContent), ['first', 'second'], 'bodies unchanged');
+    const around = await f.call('fetch_around', { channelId: '110000000000000001', messageId: '905' });
+    assert.equal(around[0].source, '[source: discord:g1:110000000000000001 · #general (Guild One)]');
+  });
+
+  it('keeps same-named channels in different guilds apart', async () => {
+    const f = fixture({
+      cached: {
+        '110000000000000001': { name: 'general', guildId: 'g1', guildName: 'Guild One', isDM: false },
+        '120000000000000002': { name: 'general', guildId: 'g2', guildName: 'Guild Two', isDM: false },
+      },
+    });
+    const one = await f.call('fetch_history', { channelId: '110000000000000001' });
+    const two = await f.call('fetch_history', { channelId: '120000000000000002' });
+    assert.equal(one[0].source, '[source: discord:g1:110000000000000001 · #general (Guild One)]');
+    assert.equal(two[0].source, '[source: discord:g2:120000000000000002 · #general (Guild Two)]');
+  });
+
+  it('names DMs and threads, and leaves out a label it does not know', async () => {
+    const f = fixture({ cached: { '140000000000000004': { name: 'standup-notes', guildId: 'g1', guildName: 'Guild One', isDM: false } } });
+    f.server.dmChannelIds.add('130000000000000003');
+    f.server.channelManager.register(toDmDescriptor('130000000000000003', 'Ra'));
+    const dm = await f.call('fetch_history', { channelId: '130000000000000003' });
+    assert.equal(dm[0].source, '[source: discord:dm:130000000000000003 · DM: Ra]');
+    const thread = await f.call('fetch_history', { channelId: '140000000000000004' });
+    assert.equal(thread[0].source, '[source: discord:g1:140000000000000004 · #standup-notes (Guild One)]');
+    const unknown = await f.call('fetch_history', { channelId: '150000000000000005' });
+    assert.equal(unknown[0].source, '[source: discord:?:150000000000000005]');
+    assert.equal(unknown[0].channelId, null);
+    assert.equal(unknown[0].channelLabel, null);
+  });
+});
+
+describe('DMs are named wherever they are known, not only from inbound DM state', () => {
+  const DM = '170000000000000007';
+
+  it('names a DM known only to the channel cache, in history and in a reply receipt', async () => {
+    const f = fixture({
+      cached: { [DM]: { name: null, guildId: null, guildName: null, isDM: true } },
+      dmRecipients: { [DM]: 'Ra' },
+    });
+    const items = await f.call('fetch_history', { channelId: DM });
+    assert.equal(items[0].source, `[source: discord:dm:${DM} · DM: Ra]`);
+    assert.equal(items[0].channelId, `discord:dm:${DM}`);
+    const reply = await f.call('reply_message', { channelId: DM, messageId: '901', content: 'hi' });
+    assert.deepEqual(reply, { messageId: '700', channelId: `discord:dm:${DM}`, discordChannelId: DM, channelLabel: 'DM: Ra' });
+  });
+
+  it('names a DM the registry knows even when nothing else does', async () => {
+    const f = fixture();
+    f.server.channelManager.register(toDmDescriptor(DM, 'Ra'));
+    const items = await f.call('fetch_history', { channelId: DM });
+    assert.equal(items[0].source, `[source: discord:dm:${DM} · DM: Ra]`);
+    const send = await f.call('send_message', { channelId: DM, content: 'hi' });
+    assert.equal(send.channelId, `discord:dm:${DM}`);
+    assert.equal(send.channelLabel, 'DM: Ra');
+  });
+
+  it('keeps the canonical id of a cached DM whose recipient it cannot read', async () => {
+    const f = fixture({ cached: { [DM]: { name: null, guildId: null, guildName: null, isDM: true } } });
+    const items = await f.call('fetch_history', { channelId: DM });
+    assert.equal(items[0].source, `[source: discord:dm:${DM}]`);
+    assert.equal(items[0].channelLabel, null);
+  });
+});
+
+describe('a failed or uncertain send still names where it was aimed', () => {
+  const partial = () => Object.assign(
+    new Error('Send partially completed — Discord was too slow to finish. POSTED: part 1 (id 200000000000000002). IN FLIGHT: part 2 may still appear.'),
+    { name: 'PartialSendError', sentIds: ['200000000000000002'], stalledIndex: 1, unsentText: 'tail' },
+  );
+
+  it('appends the attempted destination to the outcome text of send_message and reply_message', async () => {
+    const f = fixture({
+      cached: { '110000000000000001': { name: 'general', guildId: 'g1', guildName: 'Guild One', isDM: false } },
+      names: { '#general (Guild One)': '110000000000000001' },
+    });
+    f.adapter.sendMessage = async () => { throw partial(); };
+    for (const [tool, args] of [
+      ['send_message', { channelId: '#general (Guild One)', content: 'long' }],
+      ['reply_message', { channelId: '110000000000000001', messageId: '901', content: 'long' }],
+    ] as const) {
+      const text = await f.callError(tool, args);
+      assert.ok(text.startsWith('Send partially completed — Discord was too slow to finish. POSTED: part 1'), 'the outcome text comes first, unchanged');
+      assert.ok(text.endsWith('\n\nAttempted destination: discord:g1:110000000000000001 · #general (Guild One) (Discord channel 110000000000000001).'), text);
+    }
+  });
+
+  it('names a DM resolved before send_dm failed, and says when none was resolved', async () => {
+    const f = fixture();
+    f.adapter.sendDM = async () => {
+      throw Object.assign(new Error('Request timed out'), { dmChannel: { id: '160000000000000009', recipientName: 'Ra' } });
+    };
+    const resolved = await f.callError('send_dm', { userId: 'ra', content: 'hello' });
+    assert.equal(resolved, 'Request timed out\n\nAttempted destination: discord:dm:160000000000000009 · DM: Ra (Discord channel 160000000000000009).');
+    f.adapter.sendDM = async () => { throw new Error('No Discord user matches "ra"'); };
+    const unresolved = await f.callError('send_dm', { userId: 'ra', content: 'hello' });
+    assert.equal(unresolved, 'No Discord user matches "ra"\n\nAttempted destination: a DM with "ra"; no DM channel was resolved, so no message was sent.');
+  });
+
+  it('has sendDM carry its resolved DM channel on a failure after resolution', async (t) => {
+    const adapter = new DiscordAdapter({ token: 'unused' });
+    const client = (adapter as unknown as { client: Client }).client;
+    t.after(() => client.destroy());
+    const a = adapter as unknown as Record<string, unknown>;
+    a.resolveRecipientId = async () => '100000000000000001';
+    a.resolveOutgoingMentions = async (_dm: unknown, content: string) => content;
+    const user = {
+      id: '100000000000000001', username: 'ra', displayName: 'Ra',
+      createDM: async () => ({ id: '160000000000000009' }),
+      send: async () => { throw new Error('Request timed out'); },
+    };
+    (client.users as unknown as { fetch: unknown }).fetch = async () => user;
+    await assert.rejects(adapter.sendDM('ra', 'hello'), (err: Error & DmSendFailure) => {
+      assert.equal(err.message, 'Request timed out');
+      assert.deepEqual(err.dmChannel, { id: '160000000000000009', recipientName: 'Ra' });
+      return true;
+    });
+  });
+});
+
+describe('channels/open backscroll items carry their label for the host header', () => {
+  it('adds channelLabel beside the canonical channelId, with no header text in the body', async () => {
+    const f = fixture();
+    f.server.channelManager.register(toDescriptor('g1', 'Guild One', { id: '110000000000000001', name: 'general', type: 'text', label: '#general (Guild One)' }));
+    const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:110000000000000001', type: 'discord', history: { limit: 5 } });
+    assert.equal(res.history?.[0].channelId, 'discord:g1:110000000000000001');
+    assert.equal(res.history?.[0].channelLabel, '#general (Guild One)');
+    const text = (res.history?.[0].content as Array<{ text: string }>)[0].text;
+    assert.ok(!text.includes('[source:'), 'the host stamps the header, not the adapter');
+  });
+});
+
+describe('send receipts name the destination actually sent to', () => {
+  it('resolves a channel name to the canonical id and label, not the caller\'s spelling', async () => {
+    const f = fixture({
+      cached: { '110000000000000001': { name: 'general', guildId: 'g1', guildName: 'Guild One', isDM: false } },
+      names: { '#general (Guild One)': '110000000000000001' },
+    });
+    const send = await f.call('send_message', { channelId: '#general (Guild One)', content: 'hi' });
+    assert.deepEqual(send, {
+      messageId: '700', channelId: 'discord:g1:110000000000000001', discordChannelId: '110000000000000001', channelLabel: '#general (Guild One)',
+    });
+    const reply = await f.call('reply_message', { channelId: '110000000000000001', messageId: '901', content: 'hi' });
+    assert.deepEqual(reply, {
+      messageId: '700', channelId: 'discord:g1:110000000000000001', discordChannelId: '110000000000000001', channelLabel: '#general (Guild One)',
+    });
+  });
+
+  it('names the DM channel a send_dm landed in', async () => {
+    const f = fixture();
+    const dm = await f.call('send_dm', { userId: 'ra', content: 'hello' });
+    assert.deepEqual(dm, { messageId: '701', channelId: 'discord:dm:160000000000000009', discordChannelId: '160000000000000009', channelLabel: 'DM: Ra' });
+    f.server.channelManager.register(toDmDescriptor('160000000000000009', 'Ra Registered'));
+    const again = await f.call('send_dm', { userId: 'ra', content: 'hello' });
+    assert.equal(again.channelLabel, 'DM: Ra Registered', 'the registry label wins when there is one');
+  });
+
+  it('states the authority rule in the tool descriptions', () => {
+    for (const name of ['send_message', 'reply_message', 'send_dm', 'fetch_history', 'fetch_around']) {
+      const d = toolDefinitions.find((t) => t.name === name)!.description ?? '';
+      assert.match(d, /The canonical id is authoritative when a label differs\./, name);
+    }
+  });
+});
