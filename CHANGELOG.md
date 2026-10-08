@@ -203,7 +203,8 @@ in the git log and PR descriptions.
   (`origin.mcplChannelId`), so a freshly started host can answer it.
   `channelCreate` registers only channels messages are posted in (text,
   announcement and voice), no longer a category or forum, which hold no
-  messages themselves.
+  messages themselves, nor a channel in a guild the guild filter excludes,
+  whose messages are all dropped.
 - **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
   edit whose author is unknown (uncached message) was forwarded because the
   check required an author; it is now dropped, like creates.
