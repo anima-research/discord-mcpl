@@ -720,9 +720,13 @@ export class DiscordVoiceSink implements PcmSink {
 
   play(item: SinkItem): void {
     this.queue.push(item);
-    // pump() settles every failure it can name as a 'failed' item; this
-    // catch is the last guard, since an unhandled rejection would end the
-    // whole process (Node >= 15).
+    this.kick();
+  }
+
+  /** Start pump() unless it is already running. pump() settles every
+   *  failure it can name as a 'failed' item; this catch is the last guard,
+   *  since an unhandled rejection would end the whole process (Node >= 15). */
+  private kick(): void {
     void this.pump().catch((err) => {
       console.error('[discord-mcpl voice] playback pump:', err);
     });
@@ -821,6 +825,10 @@ export class DiscordVoiceSink implements PcmSink {
       for (const item of this.queue.splice(0)) this.emit({ type: 'failed', id: item.id, playedMs: 0, reason });
     } finally {
       this.playing = false;
+      // A 'failed' listener can queue an item while the drain above runs.
+      // Its play() found the pump still marked as playing, so start the
+      // pump for it here; otherwise it would wait for the next play().
+      if (this.queue.length) this.kick();
     }
   }
 

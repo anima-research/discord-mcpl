@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
+import { createAudioPlayer, NoSubscriberBehavior, type AudioResource } from '@discordjs/voice';
 import {
   DiscordVoiceSink, VoiceOutput,
   type PcmSink, type SinkEvent, type SinkItem, type UtteranceReport,
@@ -59,7 +60,7 @@ function noUnhandledRejections(t: { after: (fn: () => void) => void }): unknown[
 const summary = (events: SinkEvent[]) =>
   events.map((e) => (e.type === 'failed' ? `${e.type}:${e.id}:${e.playedMs}:${e.reason}` : `${e.type}:${e.id}`));
 
-test('a player that refuses an item settles it as failed, uncleared, and the next item still plays', async (t) => {
+test('a player that refuses an item settles it as failed, uncleared, and the next item still reaches the player', async (t) => {
   noUnhandledRejections(t);
   // @discordjs/voice's AudioPlayer.play throws this for an ended resource.
   const refusal = 'Cannot play a resource that has already ended.';
@@ -79,7 +80,38 @@ test('a player that refuses an item settles it as failed, uncleared, and the nex
   await until(() => internals.playing === false, 'the pump to finish');
 });
 
-test('when nothing more can play, every queued item is settled as failed, and a later item plays again', async (t) => {
+test('after a refusal, a real AudioPlayer plays the next item: cleared, started, finished', async (t) => {
+  noUnhandledRejections(t);
+  // As connect() makes it, without a voice connection: with noSubscriber
+  // Play, @discordjs/voice's audio cycle reads its frames with no one
+  // subscribed. A real player can't be made to refuse a resource the sink
+  // creates fresh, so this one throws on its first play() and is real after.
+  const refusal = 'Cannot play a resource that has already ended.';
+  const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+  const realPlay = player.play.bind(player);
+  let refusals = 1;
+  player.play = <T>(resource: AudioResource<T>): void => {
+    if (refusals-- > 0) throw new Error(refusal);
+    realPlay(resource);
+  };
+  const { sink, internals, events } = sinkWith(player);
+  // 200 ms of 48 kHz stereo s16le silence: ten 20 ms frames, all written
+  // before the item plays.
+  const pcm = new PassThrough();
+  pcm.end(Buffer.alloc(48_000 * 2 * 2 / 5));
+  sink.play(item('u1'));
+  sink.play({ id: 'u2', stream: pcm });
+  await until(() => events.some((e) => e.type === 'finished'), 'the second item to finish');
+  // The order the billing gate relies on: 'cleared' only once the player
+  // has accepted the item, then the real player's Playing and Idle.
+  assert.deepEqual(summary(events), [`failed:u1:0:${refusal}`, 'cleared:u2', 'started:u2', 'finished:u2']);
+  const finished = events[3] as Extract<SinkEvent, { type: 'finished' }>;
+  assert.equal(finished.playedMs, 200, 'all ten frames played');
+  assert.equal(internals.current, null);
+  await until(() => internals.playing === false, 'the pump to finish');
+});
+
+test('when nothing more can play, every queued item is settled as failed, and a later item is pumped again', async (t) => {
   noUnhandledRejections(t);
   let broken = true;
   const played: unknown[] = [];
@@ -103,6 +135,28 @@ test('when nothing more can play, every queued item is settled as failed, and a 
   await until(() => events.length >= 3, 'the later item to settle');
   assert.deepEqual(summary(events).slice(2), ['failed:u3:0:player refused']);
   assert.equal(played.length, 1);
+});
+
+test('an item a failed listener queues while the queue is being settled is still pumped', async (t) => {
+  noUnhandledRejections(t);
+  let breaks = 1;
+  const played: unknown[] = [];
+  const player = {
+    play(resource: unknown) { played.push(resource); throw new Error('player refused'); },
+    stop() {},
+  };
+  const { sink, internals, events } = sinkWith(player, async () => {
+    if (breaks-- > 0) throw new Error('gate broke');
+  });
+  // Queues a replacement from u1's failure, which the drain emits while the
+  // pump is still marked as playing. Only once: this gate has no hold-off to
+  // pace a listener that re-queued on every failure.
+  sink.onEvent((ev) => { if (ev.type === 'failed' && ev.id === 'u1') sink.play(item('u1-again')); });
+  sink.play(item('u1'));
+  await until(() => events.length >= 2, 'the replacement to settle');
+  assert.deepEqual(summary(events), ['failed:u1:0:gate broke', 'failed:u1-again:0:player refused']);
+  assert.equal(played.length, 1, 'the replacement reached the player without another play()');
+  await until(() => internals.playing === false, 'the pump to finish');
 });
 
 // ── VoiceOutput and the server: what a failed item becomes ─────────────────
