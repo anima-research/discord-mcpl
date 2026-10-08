@@ -83,7 +83,9 @@ function makeAdapter(
   internals.client.destroy();
   internals.client = {
     destroy() {},
-    channels: { fetch: async (id: string) => channels[id] ?? null },
+    // As discord.js's client does: guild channels are in the cache too
+    // (the channel allowlist reads a thread's channel from it).
+    channels: { fetch: async (id: string) => channels[id] ?? null, cache: new Map(Object.entries(channels)) },
     users: { fetch: async () => null },
     user: { id: 'bot_1', username: 'bot', displayName: 'Bot', bot: true },
   } as never;

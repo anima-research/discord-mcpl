@@ -1968,8 +1968,16 @@ export class DiscordAdapter {
   }
 
   /** Per-guild channel whitelist check. A guild with no entry in
-   *  `guildChannels` is unrestricted. Threads count as their parent channel
-   *  (a thread under a whitelisted channel is allowed). */
+   *  `guildChannels` is unrestricted. A listed channel admits itself and its
+   *  threads; a listed category admits the channels under it and, through
+   *  them, their threads (a forum's posts included). Threads count as their
+   *  parent channel: a thread is allowed exactly when its channel is.
+   *
+   *  `parentId` is the channel's own parent: a category for a channel, the
+   *  channel for a thread. A thread's channel may itself be admitted only
+   *  through its category, one level further up, so that level is read from
+   *  the client's channel cache (guild channels are always cached under the
+   *  GUILDS intent). An uncached parent stays excluded. */
   private channelAllowed(
     guildId: string | null | undefined,
     channelId: string,
@@ -1978,6 +1986,10 @@ export class DiscordAdapter {
     if (!guildId || !this.guildChannels) return true;
     const allowed = this.guildChannels.get(guildId);
     if (!allowed) return true;
+    if (parentId != null && !allowed.has(channelId) && !allowed.has(parentId)) {
+      const parent = this.client.channels.cache.get(parentId) as { parentId?: string | null } | undefined;
+      if (parent?.parentId != null && allowed.has(parent.parentId)) return true;
+    }
     return allowed.has(channelId) || (parentId != null && allowed.has(parentId));
   }
 
