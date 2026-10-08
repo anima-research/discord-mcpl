@@ -96,7 +96,8 @@ export interface DiscordAdapterConfig {
    *  the listed channel ids (and threads under them) are visible/handled in
    *  that guild. It also bounds deliberate inspection: list_channels leaves
    *  channels outside it out of its listing, and list_channel_members,
-   *  fetch_history and fetch_around refuse them (see inspectionRefusal).
+   *  fetch_history, fetch_around and a channels/open asking for backscroll
+   *  refuse them (see inspectionRefusal).
    *  Guilds without an entry are unrestricted. */
   guildChannels?: Record<string, string[]>;
   /** DM user whitelist. When set, incoming DMs are only handled from these
