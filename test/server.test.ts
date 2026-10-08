@@ -737,10 +737,16 @@ describe('DiscordMcplServer', () => {
     await serverPromise;
   });
 
-  it('marks a message posted in a thread as in that thread, without an MCPL threadId', async () => {
+  it('marks a message posted in a thread as in that thread, without an MCPL threadId', async (t) => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
     const serverPromise = server.serve(serverConn);
+    // Close in t.after rather than after the assertions: a failed assertion
+    // would otherwise leave the serve loop open, and the run would never exit.
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
     await mcplHandshake(client);
     const regMsg = await client.nextMessage();
     if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
@@ -766,14 +772,16 @@ describe('DiscordMcplServer', () => {
       assert.ok(text.includes('[#general thread "design-chat" in Test Server]'), text);
       client.sendResponse(inMsg.request.id, { results: [{ messageId: 'th-msg', accepted: true }] });
     }
-    client.close();
-    await serverPromise;
   });
 
-  it('does not mark a message that merely started a thread as being in one', async () => {
+  it('does not mark a message that merely started a thread as being in one', async (t) => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
     const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
     await mcplHandshake(client);
     const regMsg = await client.nextMessage();
     if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
@@ -798,14 +806,16 @@ describe('DiscordMcplServer', () => {
       assert.ok(text.includes('[#general in Test Server]'), text);
       client.sendResponse(inMsg.request.id, { results: [{ messageId: 'starter', accepted: true }] });
     }
-    client.close();
-    await serverPromise;
   });
 
-  it('pushes a mention in a closed thread under the thread\'s own channel, without an MCPL threadId', async () => {
+  it('pushes a mention in a closed thread under the thread\'s own channel, without an MCPL threadId', async (t) => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
     const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
     await mcplHandshake(client);
     const regMsg = await client.nextMessage();
     if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
@@ -835,8 +845,6 @@ describe('DiscordMcplServer', () => {
       assert.ok(text.includes('[#general thread "design-chat" in Test Server]'), text);
       client.sendResponse(pushMsg.request.id, { accepted: true });
     }
-    client.close();
-    await serverPromise;
   });
 
   it('renders reply target visibly and carries standard metadata on open channels', async () => {

@@ -5,6 +5,16 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Upgrade notes
+
+- **`chat:thread` now marks messages posted in a thread, and no longer marks
+  a message that started one.** A host gate or filter rule keyed on the tag
+  will match different messages after this upgrade: messages inside threads
+  now carry it, forum posts included (a forum post is a thread), and a
+  channel message that spawned a thread no longer does. The old matches were
+  the wrong ones (see "Thread fields name the thread a message was posted
+  in" under Fixed), but a rule tuned to them is worth checking.
+
 ### Added
 
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
