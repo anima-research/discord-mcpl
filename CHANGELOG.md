@@ -166,3 +166,19 @@ in the git log and PR descriptions.
 - **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
   edit whose author is unknown (uncached message) was forwarded because the
   check required an author; it is now dropped, like creates.
+- **A voice item that can't be played no longer ends the process.** The
+  playback sink's fire-and-forget `pump()` had no `catch`: if
+  `createAudioResource` or `AudioPlayer.play` threw (it throws for a resource
+  that has already ended, or one another player is playing), the rejection
+  went unhandled, which ends a Node process. It also left the item marked as
+  playing and its utterance waiting for an outcome. Such an item is now
+  settled with a new terminal sink event, `failed`, and the sink goes on to
+  the next one. A refused item is never `cleared`, so its text is never
+  billed. Any other throw in playback settles the playing and queued items
+  the same way. `VoiceOutput` ends a failed utterance as it does an
+  interrupted one: it stops synthesis and drops the rest of that inference.
+  It reports status `failed` with the reason, and the model is told the
+  message couldn't be played, tagged `voice:failed`. Like `voice:truncated`,
+  that tag is context, not a wake: the text landed in the text channel, and
+  a player that fails is the operator's to fix. Raised in #69's review, the
+  same class as #70's slash-command fix.

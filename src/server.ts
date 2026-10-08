@@ -486,6 +486,7 @@ export class DiscordMcplServer {
     if (r.status === 'spoken' && r.unvoicedText.length === 0) return;
     const interrupted = r.status === 'interrupted';
     const expired = r.status === 'expired';
+    const failed = r.status === 'failed';
     const secs = (r.playedMs / 1000).toFixed(1);
     const who = r.interruptedBy
       ? `@${r.interruptedBy.username ?? r.interruptedBy.userId}${r.interruptedBy.bot ? ' (bot)' : ''}`
@@ -501,6 +502,10 @@ export class DiscordMcplServer {
       : interrupted
         ? `[voice] Your spoken message was interrupted by ${who} after ${secs}s${approx}.\n` +
           `Heard up to: "${tail}"\nNOT heard: "${head}"`
+        : failed
+          ? `[voice] Your spoken message couldn't be played (${r.failure ?? 'playback failed'})` +
+            (r.playedMs > 0 ? ` after ${secs}s${approx}.\nHeard up to: "${tail}"\n` : ' — nothing was heard.\n') +
+            `NOT heard: "${head}"\n(The text was still delivered in the text channel as usual.)`
         : `[voice] Your spoken message was cut short by a synthesis error after ${secs}s${approx}.\n` +
           `Heard up to: "${tail}"\nNOT heard: "${head}"\n(The text was still delivered in the text channel as usual.)`;
     this.conn.sendRequest(method.PUSH_EVENT, {
@@ -529,7 +534,9 @@ export class DiscordMcplServer {
       // is context: the text landed in the text channel, nothing to decide.
       // Third-party speech while recently-engaged (the engagement-window
       // rule) is the floor/gate layer's job, not this transport's.
-      tags: [expired ? 'voice:expired' : interrupted ? 'voice:interrupted' : 'voice:truncated'],
+      // 'voice:failed' is context too: the text landed, and playback
+      // failing is the operator's to fix.
+      tags: [expired ? 'voice:expired' : interrupted ? 'voice:interrupted' : failed ? 'voice:failed' : 'voice:truncated'],
       payload: { content: [textContent(line)] },
     } satisfies PushEventParams).catch(() => {});
   }
