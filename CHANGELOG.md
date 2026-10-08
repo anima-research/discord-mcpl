@@ -5,6 +5,19 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Upgrade notes
+
+- **Upgrade the host's agent framework first, or together with this
+  release.** `/undo` now needs the `marks` host command, which the agent
+  framework gains with anima-research/agent-framework#250. On a host
+  without it, `/undo` is refused for every option, so a deployment that
+  takes this release before its host does loses `/undo` from Discord until
+  the host upgrades. Each connection asks the host again, so `/undo`
+  returns once the upgraded host reconnects.
+- **`/undo` and `/hide` mark nothing unless `marks` is chosen.** `/hide`
+  used to react 💤 on every hidden message by default; choose `marks: all`
+  for that. The admin commands' entry under Changed has the details.
+
 ### Added
 
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
