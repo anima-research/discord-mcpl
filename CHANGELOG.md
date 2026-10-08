@@ -21,7 +21,13 @@ in the git log and PR descriptions.
   adds `Attempted destination: …`, including a DM resolved before the
   failure. DMs are named from the registry, inbound DM state or the channel
   cache, so a fresh outgoing DM has its canonical id too. An unknown label is
-  left out, and the canonical id is authoritative when a label differs.
+  left out, and the canonical id is authoritative when a label differs. A
+  value that could read as header structure is quoted, as the host quotes
+  it: a label holding brackets, `·`, ` / `, quotes, backslashes or control
+  or line-separator characters, or beginning with `thread`, `reply to` or
+  `unscoped`, becomes an escaped string literal, so a guild, thread or
+  display name can't forge a second attribution, and the header stays one
+  line. `channelLabel` keeps the raw label.
 
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
   advertises `eventCoalescing`, a message create carries its stable subject

@@ -48,6 +48,7 @@ import type {
 
 import type { DiscordAdapter, DiscordMessageData, DiscordAttachment, DmSendFailure, OutgoingFile, ReactionSummary, MessageEventInfo } from './discord-adapter.js';
 import type { ChatInputCommandInteraction } from 'discord.js';
+import { renderSourceHeader } from './source-header.js';
 import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { withToolClasses } from './tool-classes.js';
@@ -1856,8 +1857,9 @@ export class DiscordMcplServer {
    *  canonical id, the registry's label (else one built from cached names),
    *  and the visible header `[source: <canonical id> · <label>]`, the same
    *  grammar the host stamps on inbound messages minus the host-only server
-   *  segment. An unknown label is left out; the canonical id is
-   *  authoritative when a label differs. */
+   *  segment, with values that could read as structure quoted as the host
+   *  quotes them (source-header.ts). An unknown label is left out; the
+   *  canonical id is authoritative when a label differs. */
   private channelProvenance(
     discordChannelId: string,
     dm?: { recipientName: string },
@@ -1889,7 +1891,7 @@ export class DiscordMcplServer {
     return {
       channelId: canonical,
       channelLabel: label ?? null,
-      source: `[source: ${id}${label ? ` · ${label}` : ''}]`,
+      source: renderSourceHeader(id, label),
     };
   }
 
