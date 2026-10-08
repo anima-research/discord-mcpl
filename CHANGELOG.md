@@ -195,13 +195,15 @@ in the git log and PR descriptions.
   reaches it. Only channels with activity are registered. A thread is
   forgotten when it, or the channel it hangs off, is deleted. A thread's
   label is `#parent › thread (Guild)`, which is display-only, because
-  `#thread (Guild)` would paste back as a same-named channel. Other
-  channels keep their `#name (Guild)` address. The reconnect sweep also
-  registers a missed DM, thread or other unregistered channel before
-  pushing it, and names its channel (`origin.mcplChannelId`), so a freshly
-  started host can answer it. `channelCreate` registers only channels
-  messages are posted in (text, announcement and voice), no longer a
-  category or forum, which hold no messages themselves.
+  `#thread (Guild)` would paste back as a same-named channel. A tool
+  given a thread label as its channel refuses it, even where a voice
+  channel has that name. Other channels keep their `#name (Guild)`
+  address. The reconnect sweep also registers a missed DM, thread or
+  other unregistered channel before pushing it, and names its channel
+  (`origin.mcplChannelId`), so a freshly started host can answer it.
+  `channelCreate` registers only channels messages are posted in (text,
+  announcement and voice), no longer a category or forum, which hold no
+  messages themselves.
 - **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
   edit whose author is unknown (uncached message) was forwarded because the
   check required an author; it is now dropped, like creates.

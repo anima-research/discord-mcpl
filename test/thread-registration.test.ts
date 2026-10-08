@@ -28,14 +28,35 @@ describe('thread labels', () => {
     assert.equal(formatThreadLabel(null, 'design-chat', 'Test Server'), '› design-chat (Test Server)');
     const d = toDescriptor('g1', 'Test Server', { id: 'th1', name: 'design-chat', type: 'thread', parentId: 'c1', parentName: 'general', label: '' });
     assert.equal(d.label, '#general › design-chat (Test Server)');
-    // Pasted back, it asks for a channel named `general › design-chat`, and a
-    // Discord text channel's name has no spaces: it fails loudly, where
-    // `#design-chat (Test Server)` would quietly name a same-named channel.
+    // Pasted back, it parses as the name `general › design-chat`, a shape the
+    // resolver refuses (next test), where `#design-chat (Test Server)` would
+    // quietly name a same-named channel.
     assert.deepEqual(parseChannelRef(d.label), { kind: 'name', name: 'general › design-chat', guild: 'Test Server' });
     // A channel's descriptor keeps its address form.
     const c = toDescriptor('g1', 'Test Server', { id: 'c1', name: 'general', type: 'text', label: '' } as DiscordChannelInfo);
     assert.equal(c.label, '#general (Test Server)');
     assert.deepEqual(parseChannelRef(c.label), { kind: 'name', name: 'general', guild: 'Test Server' });
+  });
+
+  it('pasted into a send, fail loudly even where a voice room carries the same name', (t) => {
+    // A voice channel's name may hold spaces and ›, so a voice room can be
+    // named `general › design-chat`. The adapter's resolver (parse,
+    // candidates, match) refuses the label rather than sending there.
+    const { adapter, client } = adapterFixture(t);
+    const channels = new Map<string, unknown>([
+      ['c1', { id: 'c1', type: ChannelType.GuildText, name: 'general', parentId: null }],
+      ['v1', { id: 'v1', type: ChannelType.GuildVoice, name: 'general › design-chat', parentId: null }],
+    ]);
+    (client.guilds.cache as unknown as Map<string, unknown>).set('g1', {
+      id: 'g1', name: 'Test Server', channels: { cache: channels },
+    });
+    const r = adapter.resolveChannelRef(formatThreadLabel('general', 'design-chat', 'Test Server'));
+    assert.ok(!r.ok, JSON.stringify(r));
+    assert.equal(r.reason, 'thread-label');
+    // The resolver does see this guild's channels: a channel label resolves.
+    const general = adapter.resolveChannelRef('#general (Test Server)');
+    assert.ok(general.ok, JSON.stringify(general));
+    assert.equal(general.id, 'c1');
   });
 });
 
