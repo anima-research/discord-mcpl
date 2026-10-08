@@ -2198,6 +2198,12 @@ export function mapAllAttachments(m: {
   return out;
 }
 
+/** Whether messages are posted in a channel of this kind (and so it is
+ *  registered as a place to post). */
+export function isPostingChannel(type: DiscordChannelInfo['type']): boolean {
+  return type === 'text' || type === 'announcement' || type === 'voice' || type === 'thread';
+}
+
 /**
  * Discord channel type number -> the kind we expose.
  *
@@ -2207,12 +2213,6 @@ export function mapAllAttachments(m: {
  * that fell to 'unknown' and so could not be reached as `#announcements`, while
  * `list_channels` happily printed a pasteable label for it.
  */
-/** Whether messages are posted in a channel of this kind (and so it is
- *  registered as a place to post). */
-export function isPostingChannel(type: DiscordChannelInfo['type']): boolean {
-  return type === 'text' || type === 'announcement' || type === 'voice' || type === 'thread';
-}
-
 export function mapChannelType(type: number | undefined): DiscordChannelInfo['type'] {
   switch (type) {
     case 0: return 'text';

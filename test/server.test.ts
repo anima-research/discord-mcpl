@@ -950,6 +950,18 @@ describe('DiscordMcplServer', () => {
         mentions: ['bot_123'], attachments: [], timestamp: new Date(),
       });
       await expectPush(client, 'discord:g1:c1');
+
+      // A guild whose name neither the message nor the cache knows: the label
+      // is bare `#name`, never `#name (<guild id>)`, which names no guild.
+      discord.simulateMessage({
+        id: 'x1', content: 'hi', cleanContent: 'hi', authorId: 'u1', authorName: 'Bob', isBot: false,
+        channelId: 'cx', channelName: 'lobby', guildId: 'g9', guildName: null,
+        channelType: 'text', channelParentId: null,
+        mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+      } as unknown as DiscordMessageData);
+      const unnamed = (await expectChanged(client)).added ?? [];
+      assert.deepEqual(unnamed.map((d) => [d.id, d.label]), [['discord:g9:cx', '#lobby']]);
+      await expectPush(client, 'discord:g9:cx');
     });
 
     it('forgets a deleted thread, and the threads of a deleted channel, but announces nothing for a thread it never registered', async (t) => {

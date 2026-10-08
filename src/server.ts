@@ -2504,10 +2504,18 @@ export class DiscordMcplServer {
   ): ChannelDescriptor | null {
     const type = ch.type ?? 'text';
     if (!isPostingChannel(type)) return null;
+    // getGuildName answers the id when the cache doesn't know the guild, and
+    // `#name (<id>)` would be the unresolvable label channel-names.ts warns
+    // about: then a channel is labelled bare `#name`, as channelCreate's
+    // path does, and a thread `#parent › name`.
     const guild = guildName ?? this.discord.getGuildName(guildId);
+    const guildKnown = guild !== guildId;
     const name = ch.name ?? ch.channelId;
     const thread = type === 'thread';
-    return toDescriptor(
+    const label = thread
+      ? (guildKnown ? formatThreadLabel(ch.parentName, name, guild) : `${ch.parentName ? `#${ch.parentName} ` : ''}› ${name}`)
+      : (guildKnown ? channelAddressLabel(name, guild) : `#${name}`);
+    const d = toDescriptor(
       guildId,
       guild,
       {
@@ -2516,11 +2524,12 @@ export class DiscordMcplServer {
         type,
         parentId: ch.parentId ?? undefined,
         ...(thread ? { parentName: ch.parentName ?? undefined } : {}),
-        label: thread ? formatThreadLabel(ch.parentName, name, guild) : channelAddressLabel(name, guild),
+        label,
       },
       this.isChannelSubscribed(ch.channelId),
       this.backscrollLimitFor(ch.channelId),
     );
+    return guildKnown ? d : { ...d, label };
   }
 
   /** Register the given descriptors and emit a single `channels/changed`
