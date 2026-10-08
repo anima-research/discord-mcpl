@@ -142,8 +142,11 @@ export interface DiscordMessageData {
   threadName?: string;
   /** Name of the channel a thread hangs off, when the message is in a thread. */
   threadParentName?: string | null;
-  /** Id of the channel a thread hangs off, when the message is in a thread. */
-  threadParentId?: string | null;
+  /** The kind of channel the message was posted in (a guild message only). */
+  channelType?: DiscordChannelInfo['type'];
+  /** That channel's own parent (a guild message only): a channel's category,
+   *  or, for a thread, the channel it hangs off. */
+  channelParentId?: string | null;
   replyToId?: string;
   /** User id of the author of the message this message is in reply to.
    *  Populated for reply messages regardless of whether the sender left
@@ -1239,18 +1242,23 @@ export class DiscordAdapter {
     };
   }
 
-  /** The channel a cached thread hangs off, or null when the channel isn't a
-   *  cached thread. getChannelMeta's REST fetch caches what it fetches, so
-   *  after it this answers for an uncached thread too. Used to register a
-   *  thread the reconnect sweep pushes, labelled `#parent › thread`. */
-  getCachedThreadParent(channelId: string): { parentId: string | null; parentName: string | null } | null {
+  /** A cached guild channel's kind and parent (a channel's category, or a
+   *  thread's channel, with its name), or null when it isn't cached.
+   *  getChannelMeta's REST fetch caches what it fetches, so after it this
+   *  answers for an uncached channel too. Used to register what the reconnect
+   *  sweep pushes: a thread is labelled `#parent › thread`. */
+  getCachedChannelPlacement(channelId: string): {
+    type: DiscordChannelInfo['type'];
+    parentId: string | null;
+    parentName: string | null;
+  } | null {
     const c = this.client.channels.cache.get(channelId) as {
-      isThread?: () => boolean;
+      type?: number;
       parentId?: string | null;
       parent?: { name?: string } | null;
     } | undefined;
-    if (c?.isThread?.() !== true) return null;
-    return { parentId: c.parentId ?? null, parentName: c.parent?.name ?? null };
+    if (!c) return null;
+    return { type: mapChannelType(c.type), parentId: c.parentId ?? null, parentName: c.parent?.name ?? null };
   }
 
   /** Compare two Discord snowflake IDs numerically without BigInt parsing.
@@ -1832,11 +1840,12 @@ export class DiscordAdapter {
     });
 
     this.client.on('channelCreate', (channel) => {
-      // Only guild text channels, as boot (getTextChannels) and channelUpdate
-      // register: a category, forum or voice channel isn't somewhere a
-      // conversation's messages are posted. Threads never reach channelCreate;
-      // they are registered when a message in one arrives.
-      if (channel.type !== ChannelType.GuildText) return;
+      // Only channels a conversation's messages are posted in: text,
+      // announcement and voice (text-in-voice). A category or forum holds no
+      // messages itself, and stage and media channels aren't sendable here
+      // (mapChannelType). Threads never reach channelCreate; they, and any
+      // channel registration missed, are registered when a message arrives.
+      if (!isPostingChannel(mapChannelType(channel.type))) return;
       if ('guildId' in channel && channel.guildId) {
         const parentId = 'parentId' in channel ? (channel.parentId ?? null) : null;
         if (!this.channelAllowed(channel.guildId, channel.id, parentId)) return;
@@ -2059,9 +2068,6 @@ export class DiscordAdapter {
     const threadParentName = inThread
       ? ((message.channel as { parent?: { name?: string } | null }).parent?.name ?? null)
       : undefined;
-    const threadParentId = inThread
-      ? ((message.channel as { parentId?: string | null }).parentId ?? null)
-      : undefined;
     // `cleanContent` resolves <@id>, <@&roleId>, <#channelId> to
     // @username / @role / #channel (with raw-content fallback), forwarded
     // messages carry their body in messageSnapshots, not content, and Discord
@@ -2083,8 +2089,14 @@ export class DiscordAdapter {
       channelName,
       guildId: message.guildId ?? null,
       guildName,
+      ...(message.guildId
+        ? {
+          channelType: mapChannelType((message.channel as { type?: number } | null)?.type),
+          channelParentId: (message.channel as { parentId?: string | null } | null)?.parentId ?? null,
+        }
+        : {}),
       ...(inThread
-        ? { threadId: message.channelId, ...(channelName ? { threadName: channelName } : {}), threadParentName, threadParentId }
+        ? { threadId: message.channelId, ...(channelName ? { threadName: channelName } : {}), threadParentName }
         : {}),
       replyToId: refType === 0 ? (message.reference?.messageId ?? undefined) : undefined,
       // mentions.repliedUser is the User the reply targets — distinct
@@ -2195,6 +2207,12 @@ export function mapAllAttachments(m: {
  * that fell to 'unknown' and so could not be reached as `#announcements`, while
  * `list_channels` happily printed a pasteable label for it.
  */
+/** Whether messages are posted in a channel of this kind (and so it is
+ *  registered as a place to post). */
+export function isPostingChannel(type: DiscordChannelInfo['type']): boolean {
+  return type === 'text' || type === 'announcement' || type === 'voice' || type === 'thread';
+}
+
 export function mapChannelType(type: number | undefined): DiscordChannelInfo['type'] {
   switch (type) {
     case 0: return 'text';

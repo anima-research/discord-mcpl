@@ -221,10 +221,10 @@ class MockDiscordAdapter {
   simulateChannelDelete(guildId: string, channelId: string): void {
     this._channelDeleteHandler?.(guildId, channelId);
   }
-  /** Cached threads' parents, by thread id. */
-  threadParents: Record<string, { parentId: string | null; parentName: string | null }> = {};
-  getCachedThreadParent(channelId: string): { parentId: string | null; parentName: string | null } | null {
-    return this.threadParents[channelId] ?? null;
+  /** Cached channels' kinds and parents, by channel id. */
+  placements: Record<string, { type: DiscordChannelInfo['type']; parentId: string | null; parentName: string | null }> = {};
+  getCachedChannelPlacement(channelId: string): { type: DiscordChannelInfo['type']; parentId: string | null; parentName: string | null } | null {
+    return this.placements[channelId] ?? null;
   }
 }
 
@@ -877,7 +877,7 @@ describe('DiscordMcplServer', () => {
       id, content: 'hello', cleanContent: 'hello',
       authorId: 'u1', authorName: 'Bob', isBot: false,
       channelId: threadId, channelName: threadName, guildId: 'g1', guildName: 'Test Server',
-      threadId, threadName, threadParentName: 'general', threadParentId: 'c1',
+      threadId, threadName, threadParentName: 'general', channelType: 'thread' as const, channelParentId: 'c1',
       mentions: ['bot_123'], attachments: [], timestamp: new Date(),
     });
 
@@ -928,6 +928,28 @@ describe('DiscordMcplServer', () => {
       // A second message in the same thread is not re-announced.
       discord.simulateMessage(inThread('m2'));
       await expectPush(client, 'discord:g1:th1');
+    });
+
+    it('registers any other unregistered channel a message comes from by its address, and leaves registered ones alone', async (t) => {
+      const { client, discord } = await started(t);
+      // An announcement channel: boot registers only text channels.
+      discord.simulateMessage({
+        id: 'a1', content: 'news', cleanContent: 'news', authorId: 'u1', authorName: 'Bob', isBot: false,
+        channelId: 'ann1', channelName: 'news', guildId: 'g1', guildName: 'Test Server',
+        channelType: 'announcement', channelParentId: null,
+        mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+      });
+      const added = (await expectChanged(client)).added ?? [];
+      assert.deepEqual(added.map((d) => [d.id, d.label, d.metadata?.channelType]), [['discord:g1:ann1', '#news (Test Server)', 'announcement']]);
+      await expectPush(client, 'discord:g1:ann1');
+      // #general (c1) was registered at boot: no announcement, straight to the push.
+      discord.simulateMessage({
+        id: 'g1m', content: 'hi', cleanContent: 'hi', authorId: 'u1', authorName: 'Bob', isBot: false,
+        channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+        channelType: 'text', channelParentId: null,
+        mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+      });
+      await expectPush(client, 'discord:g1:c1');
     });
 
     it('forgets a deleted thread, and the threads of a deleted channel, but announces nothing for a thread it never registered', async (t) => {
@@ -1172,9 +1194,9 @@ describe('DiscordMcplServer', () => {
     await serverPromise;
   });
 
-  it('reconnect sweep registers a missed DM and a missed thread before pushing them, and names their channels', async (t) => {
+  it('reconnect sweep registers a missed DM, thread and announcement channel before pushing them, and names their channels', async (t) => {
     const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-sweep-register.json`);
-    writeFileSync(wmPath, JSON.stringify({ watermarks: { dm42: '100', th1: '100' }, dmChannels: ['dm42'] }));
+    writeFileSync(wmPath, JSON.stringify({ watermarks: { dm42: '100', th1: '100', ann1: '100' }, dmChannels: ['dm42'] }));
     process.env.DISCORD_WATERMARK_FILE = wmPath;
     t.after(() => {
       delete process.env.DISCORD_WATERMARK_FILE;
@@ -1189,8 +1211,12 @@ describe('DiscordMcplServer', () => {
     discord.cachedChannelMeta = {
       dm42: { name: null, guildId: null, guildName: null, isDM: true },
       th1: { name: 'design-chat', guildId: 'g1', guildName: 'Test Guild', isDM: false },
+      ann1: { name: 'news', guildId: 'g1', guildName: 'Test Guild', isDM: false },
     } as never;
-    discord.threadParents = { th1: { parentId: 'c1', parentName: 'general' } };
+    discord.placements = {
+      th1: { type: 'thread', parentId: 'c1', parentName: 'general' },
+      ann1: { type: 'announcement', parentId: null, parentName: null },
+    };
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
     const serverPromise = server.serve(serverConn);
     t.after(async () => {
@@ -1201,7 +1227,12 @@ describe('DiscordMcplServer', () => {
     const regMsg = await client.nextMessage();
     if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
 
-    for (const [id, label] of [['discord:dm:dm42', 'DM: Ra'], ['discord:g1:th1', '#general › design-chat (Test Guild)']]) {
+    for (const [id, label] of [
+      ['discord:dm:dm42', 'DM: Ra'],
+      ['discord:g1:th1', '#general › design-chat (Test Guild)'],
+      // A channel boot doesn't register (only text channels are), named by its address.
+      ['discord:g1:ann1', '#news (Test Guild)'],
+    ]) {
       const changed = await client.nextMessage();
       assert.equal(changed.type, 'notification', `${id} is registered before its missed messages are pushed`);
       if (changed.type === 'notification') {
@@ -1583,8 +1614,10 @@ describe('RFC-006 coalescing', () => {
 
   it('an edit uses the scope its create used, even after the channel became registered', async () => {
     const h = await boot({ eventCoalescing: true });
-    // g2/c9 is not registered at startup: the create goes out in feature-set scope.
-    h.discord.simulateMessage({ ...guildMessage('m8', 'before registration'), channelId: 'c9', guildId: 'g2', guildName: 'Late Guild', channelName: 'late' } as unknown as DiscordMessageData);
+    // g2/c9 is not registered at startup, and a channel of a kind that isn't
+    // a place to post (here 'unknown', as a stage channel's chat maps) isn't
+    // registered on arrival either: the create goes out in feature-set scope.
+    h.discord.simulateMessage({ ...guildMessage('m8', 'before registration'), channelId: 'c9', guildId: 'g2', guildName: 'Late Guild', channelName: 'late', channelType: 'unknown' } as unknown as DiscordMessageData);
     const create = await h.nextRequest();
     assert.deepEqual((create.params as Push).coalesce, { key: 'message:m8', initial: true });
     h.client.sendResponse(create.id, { accepted: true });
