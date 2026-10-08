@@ -87,6 +87,23 @@ describe('channel lifecycle events', () => {
     assert.deepEqual(deleted, [['g1', 'th1']]);
   });
 
+  it('registers nothing from channelCreate in a guild the guild filter excludes', (t) => {
+    const adapter = new DiscordAdapter({ token: 'unused', guildIds: ['g1'] });
+    const client = (adapter as unknown as { client: Client }).client;
+    t.after(() => client.destroy());
+    const emit = client.emit.bind(client) as (event: string, ...args: unknown[]) => boolean;
+    const created: string[] = [];
+    adapter.onChannelCreate((_guildId, channel) => created.push(channel.id));
+    const channel = (id: string, guildId: string) => ({
+      id, type: ChannelType.GuildText, name: `chan-${id}`, guildId, guild: { name: 'Some Server' }, parentId: null,
+    });
+    emit('channelCreate', channel('in-g1', 'g1'));
+    emit('channelCreate', channel('in-g2', 'g2'));
+    // As guildCreate, channelUpdate and boot's listing apply the filter: a
+    // channel whose messages are all dropped isn't listed to the host.
+    assert.deepEqual(created, ['in-g1']);
+  });
+
   it('registers from channelCreate only channels messages are posted in', (t) => {
     const { adapter, emit } = adapterFixture(t);
     const created: string[] = [];

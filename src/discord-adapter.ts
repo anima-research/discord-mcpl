@@ -1847,6 +1847,10 @@ export class DiscordAdapter {
       // channel registration missed, are registered when a message arrives.
       if (!isPostingChannel(mapChannelType(channel.type))) return;
       if ('guildId' in channel && channel.guildId) {
+        // The guild filter too, as guildCreate, channelUpdate and boot's
+        // listing apply it: a channel in a guild it excludes would be listed
+        // to the host while every message from it is dropped.
+        if (this.guildIds?.length && !this.guildIds.includes(channel.guildId)) return;
         const parentId = 'parentId' in channel ? (channel.parentId ?? null) : null;
         if (!this.channelAllowed(channel.guildId, channel.id, parentId)) return;
         // A label must be an ADDRESS. The previous fallback substituted the
