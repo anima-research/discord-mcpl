@@ -175,9 +175,9 @@ in the git log and PR descriptions.
   settled with a new terminal sink event, `failed`, and the sink goes on to
   the next one. A refused item is never `cleared`, so its text is never
   billed. Any other throw in playback settles the playing and queued items
-  the same way, and an item a `failed` listener queues meanwhile is still
-  pumped. `VoiceOutput` ends a failed utterance as it does an interrupted
-  one: it stops synthesis and drops the rest of that inference.
+  the same way, and nothing a `failed` listener queues meanwhile waits for
+  the next `play()`. `VoiceOutput` ends a failed utterance as it does an
+  interrupted one: it stops synthesis and drops the rest of that inference.
   It reports status `failed` with the reason, and the model is told the
   message couldn't be played, tagged `voice:failed`. Like `voice:truncated`,
   that tag is context, not a wake: the text landed in the text channel, and
@@ -186,5 +186,6 @@ in the git log and PR descriptions.
   the model's stream, its transcript and history keep only what was heard,
   and the model is told on its next turn, without one being started for it.
   An interruption that comes while the model is still generating no longer
-  overwrites the previous turn's history and then keeps the whole unheard
-  reply. Raised in #69's review, the same class as #70's slash-command fix.
+  overwrites the previous turn's history and then keeps everything generated
+  so far, heard or not. Raised in #69's review, the same class as #70's
+  slash-command fix.
