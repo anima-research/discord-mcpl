@@ -10,6 +10,12 @@ import { DiscordAdapter, type HistoryMessage } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
 import { toolDefinitions } from '../src/tools.js';
 
+// Every assert.ok here carries a message. Without one, a failing assert.ok on
+// Node 20 quotes the failed expression by re-reading this file at the call's
+// position, which under tsx is the compiled code's (line 1, a large column);
+// that search retries without progress, so a regression hangs the run
+// instead of failing it.
+
 const at = (s: number) => new Date(Date.UTC(2026, 9, 7, 8, 0, s));
 const msg = (id: string, authorId: string, authorName: string, text: string, s: number, isBot = false): HistoryMessage => ({
   id, authorId, authorName, isBot, content: text, cleanContent: text, attachments: [], mentionsBot: false, timestamp: at(s),
@@ -77,7 +83,7 @@ describe('resolveLatestFrom', () => {
   it('resolves bot residents as well as people', async (t) => {
     const { adapter } = adapterFixture(t, history);
     const r = await adapter.resolveLatestFrom('c1', 'Fable');
-    assert.ok(r.ok && r.message.id === '200000000000000040');
+    assert.ok(r.ok && r.message.id === '200000000000000040', JSON.stringify(r));
   });
 
   it('refuses a name two people share, with choices, even if only one of them spoke recently', async (t) => {
@@ -86,8 +92,8 @@ describe('resolveLatestFrom', () => {
     assert.equal(r.ok, false);
     if (!r.ok) {
       assert.match(r.message, /^"Ra" matches 2 people here: /);
-      assert.ok(r.message.includes(`Ra (@ra) = ${RA}`));
-      assert.ok(r.message.includes(`Ra (@ra_two) = ${RA2}`));
+      assert.ok(r.message.includes(`Ra (@ra) = ${RA}`), r.message);
+      assert.ok(r.message.includes(`Ra (@ra_two) = ${RA2}`), r.message);
       assert.match(r.message, /nothing was done\.$/);
     }
   });
@@ -101,7 +107,7 @@ describe('resolveLatestFrom', () => {
       assert.match(r.message, /never reaches further back or picks another author/);
     }
     const nobody = await adapter.resolveLatestFrom('c1', 'Nobody');
-    assert.ok(!nobody.ok && /No one named "Nobody"/.test(nobody.message));
+    assert.ok(!nobody.ok && /No one named "Nobody"/.test(nobody.message), JSON.stringify(nobody));
   });
 
   it('refuses a name it cannot check for collisions when the member list fails, but still takes an id', async (t) => {
@@ -114,7 +120,7 @@ describe('resolveLatestFrom', () => {
       assert.equal(r.message, '"Ra" can\'t be checked for people sharing that name: this channel\'s member list is unavailable (Guild member cache warm-up failed). Use their numeric user id; nothing was done.');
     }
     const byId = await adapter.resolveLatestFrom('c1', RA);
-    assert.ok(byId.ok && byId.message.id === '200000000000000030');
+    assert.ok(byId.ok && byId.message.id === '200000000000000030', JSON.stringify(byId));
   });
 
   it('refuses a name when some members are listed by id only (a thread after a failed warm-up)', async (t) => {
@@ -124,7 +130,7 @@ describe('resolveLatestFrom', () => {
     assert.equal(r.ok, false);
     if (!r.ok) assert.match(r.message, /1 member\(s\) here couldn't be resolved to names\. Use their numeric user id; nothing was done\.$/);
     const byId = await adapter.resolveLatestFrom('c1', `<@${RA}>`);
-    assert.ok(byId.ok && byId.message.id === '200000000000000030');
+    assert.ok(byId.ok && byId.message.id === '200000000000000030', JSON.stringify(byId));
   });
 
   it('checks a thread\'s name against its other readers: all parent viewers (public), thread managers (private)', async (t) => {
@@ -254,7 +260,7 @@ describe('resolveLatestFrom', () => {
     const collision = fixture(true);
     const refused = await collision.adapter.resolveLatestFrom(THREAD, 'Ra');
     assert.ok(!refused.ok && /^"Ra" matches 2 people here: /.test(refused.message), JSON.stringify(refused));
-    assert.ok(!refused.ok && refused.message.includes(`Ra (@ra_two) = ${NAMESAKE}`));
+    assert.ok(!refused.ok && refused.message.includes(`Ra (@ra_two) = ${NAMESAKE}`), JSON.stringify(refused));
     assert.equal(collision.warmups(), 1, 'the thread and its parent share one member-cache warm-up');
 
     const unique = fixture(false);
@@ -292,7 +298,7 @@ describe('resolveLatestFrom', () => {
     const idOnly = [RA, RA2].map((id) => ({ id, username: id, displayName: id, isBot: false }));
     const { adapter } = adapterFixture(t, history, idOnly);
     const r = await adapter.resolveLatestFrom('c1', 'Ra');
-    assert.ok(!r.ok && /2 member\(s\) here couldn't be resolved to names/.test(r.message));
+    assert.ok(!r.ok && /2 member\(s\) here couldn't be resolved to names/.test(r.message), JSON.stringify(r));
   });
 
   it('asks discord.js to fail rather than post unthreaded when an addressed reply\'s target is gone', async (t) => {
@@ -374,33 +380,35 @@ describe('reply and reaction tools', () => {
         assert.match(schema.properties[key].description, /^Give exactly one of messageId or latestFrom; the other may be omitted or null\./);
         assert.ok(!schema.required.includes(key), `${name} doesn't require ${key}`);
       }
-      assert.ok(schema.required.includes('channelId'));
+      assert.ok(schema.required.includes('channelId'), `${name} requires channelId`);
     }
   });
 
   it('keeps sparse exact-id calls working', async () => {
     const f = serverFixture();
     const res = await f.call('add_reaction', { messageId: '200000000000000099', emoji: '👍' });
-    assert.ok(!res.isError);
+    assert.ok(!res.isError, res.content[0].text);
     assert.equal(res.content[0].text, 'Reaction added');
     assert.deepEqual(f.calls, [{ op: 'react', channelId: '1234567890123456789', messageId: '200000000000000099' }]);
   });
 
   it('accepts all-properties calls with the unused selector null, either way round', async () => {
     const f = serverFixture();
-    assert.ok(!(await f.call('add_reaction', { messageId: '200000000000000099', latestFrom: null, emoji: '👍' })).isError);
-    assert.ok(!(await f.call('remove_reaction', { messageId: null, latestFrom: 'Ra', emoji: '👍' })).isError);
+    const byId = await f.call('add_reaction', { messageId: '200000000000000099', latestFrom: null, emoji: '👍' });
+    assert.ok(!byId.isError, byId.content[0].text);
+    const byName = await f.call('remove_reaction', { messageId: null, latestFrom: 'Ra', emoji: '👍' });
+    assert.ok(!byName.isError, byName.content[0].text);
     assert.deepEqual(f.calls.map((c) => c.messageId), ['200000000000000099', '200000000000000030']);
   });
 
   it('refuses two selectors, no selector, and a non-string selector, doing nothing', async () => {
     const f = serverFixture();
     const both = await f.call('reply_message', { messageId: '200000000000000099', latestFrom: 'Ra', content: 'x' });
-    assert.ok(both.isError && /Give messageId or latestFrom, not both; nothing was done\./.test(both.content[0].text));
+    assert.ok(both.isError && /Give messageId or latestFrom, not both; nothing was done\./.test(both.content[0].text), both.content[0].text);
     const neither = await f.call('add_reaction', { messageId: '  ', latestFrom: null, emoji: '👍' });
-    assert.ok(neither.isError && /Give exactly one of messageId or latestFrom/.test(neither.content[0].text));
+    assert.ok(neither.isError && /Give exactly one of messageId or latestFrom/.test(neither.content[0].text), neither.content[0].text);
     const wrong = await f.call('add_reaction', { latestFrom: 42, emoji: '👍' });
-    assert.ok(wrong.isError && /latestFrom must be a string or null/.test(wrong.content[0].text));
+    assert.ok(wrong.isError && /latestFrom must be a string or null/.test(wrong.content[0].text), wrong.content[0].text);
     assert.deepEqual(f.calls, []);
   });
 
@@ -437,7 +445,7 @@ describe('reply and reaction tools', () => {
     const f = serverFixture();
     f.deleteTarget();
     const res = await f.call('add_reaction', { latestFrom: 'Ra', emoji: '👍' });
-    assert.ok(res.isError);
+    assert.ok(res.isError, res.content[0].text);
     assert.match(res.content[0].text, /Unknown Message/);
   });
 
@@ -474,7 +482,7 @@ describe('reply and reaction tools', () => {
   it('refuses a latestFrom with no match without acting', async () => {
     const f = serverFixture();
     const res = await f.call('reply_message', { latestFrom: 'Linn', content: 'x' });
-    assert.ok(res.isError && /No message from Linn among the 1 most recent messages here/.test(res.content[0].text));
+    assert.ok(res.isError && /No message from Linn among the 1 most recent messages here/.test(res.content[0].text), res.content[0].text);
     assert.deepEqual(f.calls, []);
   });
 });
