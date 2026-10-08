@@ -79,6 +79,18 @@ export function formatChannelLabel(name: string, guildName: string): string {
   return `#${name} (${guildName})`;
 }
 
+/**
+ * A thread's label: `#parent › thread (GuildName)`. Display only, and
+ * deliberately NOT the `#name (GuildName)` address form: this resolver
+ * excludes threads (they are addressed by id), and a thread labelled like a
+ * channel would paste as a same-named channel, the silent wrong-room failure
+ * this module exists to prevent. This form names no channel, so pasting it
+ * fails loudly instead. Without a known parent: `› thread (GuildName)`.
+ */
+export function formatThreadLabel(parentName: string | null | undefined, threadName: string, guildName: string): string {
+  return `${parentName ? `#${parentName} ` : ''}› ${threadName} (${guildName})`;
+}
+
 /** `#name (GuildName)` for a resolver candidate. */
 export function channelLabel(c: ChannelCandidate): string {
   return formatChannelLabel(c.name, c.guildName);

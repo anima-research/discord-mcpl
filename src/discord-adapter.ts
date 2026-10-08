@@ -142,6 +142,8 @@ export interface DiscordMessageData {
   threadName?: string;
   /** Name of the channel a thread hangs off, when the message is in a thread. */
   threadParentName?: string | null;
+  /** Id of the channel a thread hangs off, when the message is in a thread. */
+  threadParentId?: string | null;
   replyToId?: string;
   /** User id of the author of the message this message is in reply to.
    *  Populated for reply messages regardless of whether the sender left
@@ -177,6 +179,8 @@ export interface DiscordChannelInfo {
   name: string;
   type: 'text' | 'announcement' | 'voice' | 'category' | 'thread' | 'forum' | 'unknown';
   parentId?: string;
+  /** For a thread, the name of the channel it hangs off (for its label). */
+  parentName?: string;
   /** Guild-qualified display label, `#name (GuildName)` — the same string
    *  `toDescriptor` produces and the same string the channelId argument
    *  accepts. Returned so listings hand back something PASTEABLE: the
@@ -524,6 +528,7 @@ export class DiscordAdapter {
   private readyHandler?: () => void;
   private channelCreateHandler?: (guildId: string, channel: DiscordChannelInfo) => void;
   private channelDeleteHandler?: (guildId: string, channelId: string) => void;
+  private threadDeleteHandler?: (guildId: string, threadId: string) => void;
   private guildCreateHandler?: (
     guildId: string,
     guildName: string,
@@ -727,6 +732,12 @@ export class DiscordAdapter {
 
   onChannelDelete(handler: (guildId: string, channelId: string) => void): void {
     this.channelDeleteHandler = handler;
+  }
+
+  /** Fired when a thread is deleted (discord.js `threadDelete`; threads never
+   *  reach `channelDelete`). */
+  onThreadDelete(handler: (guildId: string, threadId: string) => void): void {
+    this.threadDeleteHandler = handler;
   }
 
   /** Fired when the bot joins a new guild after startup. The handler receives
@@ -1226,6 +1237,20 @@ export class DiscordAdapter {
       guildName: c.guild?.name ?? null,
       isDM: !guildId,
     };
+  }
+
+  /** The channel a cached thread hangs off, or null when the channel isn't a
+   *  cached thread. getChannelMeta's REST fetch caches what it fetches, so
+   *  after it this answers for an uncached thread too. Used to register a
+   *  thread the reconnect sweep pushes, labelled `#parent › thread`. */
+  getCachedThreadParent(channelId: string): { parentId: string | null; parentName: string | null } | null {
+    const c = this.client.channels.cache.get(channelId) as {
+      isThread?: () => boolean;
+      parentId?: string | null;
+      parent?: { name?: string } | null;
+    } | undefined;
+    if (c?.isThread?.() !== true) return null;
+    return { parentId: c.parentId ?? null, parentName: c.parent?.name ?? null };
   }
 
   /** Compare two Discord snowflake IDs numerically without BigInt parsing.
@@ -1807,6 +1832,11 @@ export class DiscordAdapter {
     });
 
     this.client.on('channelCreate', (channel) => {
+      // Only guild text channels, as boot (getTextChannels) and channelUpdate
+      // register: a category, forum or voice channel isn't somewhere a
+      // conversation's messages are posted. Threads never reach channelCreate;
+      // they are registered when a message in one arrives.
+      if (channel.type !== ChannelType.GuildText) return;
       if ('guildId' in channel && channel.guildId) {
         const parentId = 'parentId' in channel ? (channel.parentId ?? null) : null;
         if (!this.channelAllowed(channel.guildId, channel.id, parentId)) return;
@@ -1834,6 +1864,10 @@ export class DiscordAdapter {
       if ('guildId' in channel && channel.guildId) {
         this.channelDeleteHandler?.(channel.guildId, channel.id);
       }
+    });
+
+    this.client.on('threadDelete', (thread) => {
+      if (thread.guildId) this.threadDeleteHandler?.(thread.guildId, thread.id);
     });
 
     this.client.on('ready', () => {
@@ -2025,6 +2059,9 @@ export class DiscordAdapter {
     const threadParentName = inThread
       ? ((message.channel as { parent?: { name?: string } | null }).parent?.name ?? null)
       : undefined;
+    const threadParentId = inThread
+      ? ((message.channel as { parentId?: string | null }).parentId ?? null)
+      : undefined;
     // `cleanContent` resolves <@id>, <@&roleId>, <#channelId> to
     // @username / @role / #channel (with raw-content fallback), forwarded
     // messages carry their body in messageSnapshots, not content, and Discord
@@ -2047,7 +2084,7 @@ export class DiscordAdapter {
       guildId: message.guildId ?? null,
       guildName,
       ...(inThread
-        ? { threadId: message.channelId, ...(channelName ? { threadName: channelName } : {}), threadParentName }
+        ? { threadId: message.channelId, ...(channelName ? { threadName: channelName } : {}), threadParentName, threadParentId }
         : {}),
       replyToId: refType === 0 ? (message.reference?.messageId ?? undefined) : undefined,
       // mentions.repliedUser is the User the reply targets — distinct

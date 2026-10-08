@@ -183,6 +183,21 @@ in the git log and PR descriptions.
   fields. MCPL `threadId` (a thread *within* a channel) is no longer sent:
   a Discord thread is its own channel, already named by `channelId`, so a
   host keying conversations by thread no longer splits one channel in two.
+- **Threads are registered, and the reconnect sweep registers what it
+  pushes.** Boot and channel events register only guild text channels, so a
+  thread was never registered with the host. It couldn't be opened, and a
+  host that routes speech by a channel's declaration (MCPL RFC-011) held a
+  resident's plain-speech replies in it as drafts. A thread is now
+  registered when a message in it arrives through the filters, as a DM is,
+  so the host knows it before that message reaches it. Only threads with
+  activity are registered, and a thread is forgotten when it, or the channel
+  it hangs off, is deleted. Its label is `#parent › thread (Guild)`. That
+  form is display-only, because `#thread (Guild)` would paste back as a
+  same-named channel. The reconnect sweep also registers a missed DM or
+  thread before pushing it, and names its channel (`origin.mcplChannelId`),
+  so a freshly started host can answer it. `channelCreate` now registers
+  only guild text channels, as boot and `channelUpdate` do: a category,
+  forum or voice channel is no longer registered as a place to post.
 - **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
   edit whose author is unknown (uncached message) was forwarded because the
   check required an author; it is now dropped, like creates.

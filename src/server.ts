@@ -60,6 +60,7 @@ import {
   type AddressingPath,
 } from './channel-names.js';
 import { saveFiltersFile, loadFiltersFile, DiscordFiltersState, type DiscordFilters } from './filters.js';
+import { formatThreadLabel } from './channel-names.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -2322,6 +2323,35 @@ export class DiscordMcplServer {
         '</missed>',
       ].join('\n');
 
+      // Name the channel this push delivers from (MCPL RFC-011 §3), and
+      // register it first if this process hasn't, as the live path does: a
+      // missed DM or thread is otherwise unknown to a freshly started host,
+      // which can then neither open it nor tell where a reply would land.
+      const sweptGuild = isDM ? 'dm' : (meta?.guildId ?? null);
+      const sweptMcplId = sweptGuild ? mcplChannelId(sweptGuild, channelId) : undefined;
+      if (sweptMcplId && !this.channelManager.get(sweptMcplId)) {
+        if (isDM) {
+          // The bot's own messages are filtered out above, so every kept
+          // message in a DM is from the other party.
+          const peer = kept[0];
+          this.registerAndNotifyNew([
+            toDmDescriptor(channelId, peer.authorName, false, this.backscrollLimitFor(channelId), peer.authorId),
+          ]);
+        } else if (meta?.guildId) {
+          const parent = this.discord.getCachedThreadParent?.(channelId) ?? null;
+          if (parent) {
+            this.registerAndNotifyNew([
+              this.threadDescriptor(meta.guildId, meta.guildName, {
+                channelId,
+                threadName: meta.name ?? undefined,
+                threadParentId: parent.parentId,
+                threadParentName: parent.parentName,
+              }),
+            ]);
+          }
+        }
+      }
+
       try {
         await conn.sendRequest(method.PUSH_EVENT, {
           featureSet: 'discord.messaging',
@@ -2330,6 +2360,7 @@ export class DiscordMcplServer {
           origin: {
             source: 'discord',
             channelId,
+            ...(sweptMcplId ? { mcplChannelId: sweptMcplId } : {}),
             guildId: meta?.guildId ?? null,
             guildName: meta?.guildName ?? undefined,
             channelName: meta?.name ?? undefined,
@@ -2451,6 +2482,30 @@ export class DiscordMcplServer {
       console.error('[discord-mcpl] Failed to register channels:', (err as Error).message);
       dbg('registerDiscordChannels:send-failed', { error: (err as Error).message });
     }
+  }
+
+  /** A thread's descriptor, from a message posted in it: labelled
+   *  `#parent › thread (Guild)`, with its parent channel in metadata. */
+  private threadDescriptor(
+    guildId: string,
+    guildName: string | null,
+    msg: { channelId: string; threadName?: string; threadParentId?: string | null; threadParentName?: string | null },
+  ): ChannelDescriptor {
+    const name = msg.threadName ?? msg.channelId;
+    return toDescriptor(
+      guildId,
+      guildName ?? guildId,
+      {
+        id: msg.channelId,
+        name,
+        type: 'thread',
+        parentId: msg.threadParentId ?? undefined,
+        parentName: msg.threadParentName ?? undefined,
+        label: formatThreadLabel(msg.threadParentName, name, guildName ?? guildId),
+      },
+      this.isChannelSubscribed(msg.channelId),
+      this.backscrollLimitFor(msg.channelId),
+    );
   }
 
   /** Register the given descriptors and emit a single `channels/changed`
@@ -2943,9 +2998,25 @@ export class DiscordMcplServer {
       if (!this.conn || !this.mcplEnabled) return;
       const id = mcplChannelId(guildId, channelId);
       this.channelManager.unregister(id);
+      // A deleted channel takes its threads with it, and Discord sends no
+      // threadDelete for them: drop the ones registered under it too.
+      const threads = this.channelManager.getAll()
+        .filter((d) => (d.metadata as { channelType?: string; parentId?: string } | undefined)?.channelType === 'thread'
+          && (d.metadata as { parentId?: string }).parentId === channelId
+          && parseMcplChannelId(d.id)?.guildId === guildId)
+        .map((d) => d.id);
+      for (const t of threads) this.channelManager.unregister(t);
       this.conn.sendNotification(method.CHANNELS_CHANGED, {
-        removed: [id],
+        removed: [id, ...threads],
       });
+    });
+
+    this.discord.onThreadDelete?.((guildId, threadId) => {
+      if (!this.conn || !this.mcplEnabled) return;
+      const id = mcplChannelId(guildId, threadId);
+      // Only threads this server registered are the host's to forget.
+      if (!this.channelManager.unregister(id)) return;
+      this.conn.sendNotification(method.CHANNELS_CHANGED, { removed: [id] });
     });
   }
 
@@ -3368,6 +3439,14 @@ export class DiscordMcplServer {
           msg.authorId,
         ),
       ]);
+    } else if (msg.threadId && msg.guildId) {
+      // A Discord thread is its own channel, and boot and channel events
+      // register only guild text channels. Register a thread the way a DM
+      // is registered, when a message in it arrives, so the host knows it
+      // (its label, and where a publish lands) before this message reaches
+      // it. Only threads with activity get registered, never a server's
+      // whole thread archive.
+      this.registerAndNotifyNew([this.threadDescriptor(msg.guildId, msg.guildName, msg)]);
     }
     this.saveWatermark();
     // Update sticky-reply state: this inbound is now the "last

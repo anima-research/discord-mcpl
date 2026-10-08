@@ -210,6 +210,22 @@ class MockDiscordAdapter {
   simulateChannelAvailable(guildId: string, channel: DiscordChannelInfo): void {
     this._channelAvailableHandler?.(guildId, channel);
   }
+
+  private _threadDeleteHandler?: (guildId: string, threadId: string) => void;
+  onThreadDelete(handler: (guildId: string, threadId: string) => void): void {
+    this._threadDeleteHandler = handler;
+  }
+  simulateThreadDelete(guildId: string, threadId: string): void {
+    this._threadDeleteHandler?.(guildId, threadId);
+  }
+  simulateChannelDelete(guildId: string, channelId: string): void {
+    this._channelDeleteHandler?.(guildId, channelId);
+  }
+  /** Cached threads' parents, by thread id. */
+  threadParents: Record<string, { parentId: string | null; parentName: string | null }> = {};
+  getCachedThreadParent(channelId: string): { parentId: string | null; parentName: string | null } | null {
+    return this.threadParents[channelId] ?? null;
+  }
 }
 
 // ── Test Helpers ──
@@ -830,6 +846,14 @@ describe('DiscordMcplServer', () => {
       threadId: 'th1', threadName: 'design-chat', threadParentName: 'general',
       mentions: ['bot_123'], attachments: [], timestamp: new Date(),
     });
+    // The thread is registered first, so the host knows it before the push.
+    const changed = await client.nextMessage();
+    assert.equal(changed.type, 'notification');
+    if (changed.type === 'notification') {
+      assert.equal(changed.notification.method, 'channels/changed');
+      const added = (changed.notification.params as { added?: Array<Record<string, unknown>> }).added ?? [];
+      assert.deepEqual(added.map((d) => [d.id, d.label]), [['discord:g1:th1', '#general › design-chat (Test Server)']]);
+    }
     const pushMsg = await client.nextMessage();
     assert.equal(pushMsg.type, 'request');
     if (pushMsg.type === 'request') {
@@ -845,6 +869,85 @@ describe('DiscordMcplServer', () => {
       assert.ok(text.includes('[#general thread "design-chat" in Test Server]'), text);
       client.sendResponse(pushMsg.request.id, { accepted: true });
     }
+  });
+
+  describe('thread registration', () => {
+    /** A message posted in thread `threadId` under #general (c1). */
+    const inThread = (id: string, threadId = 'th1', threadName = 'design-chat') => ({
+      id, content: 'hello', cleanContent: 'hello',
+      authorId: 'u1', authorName: 'Bob', isBot: false,
+      channelId: threadId, channelName: threadName, guildId: 'g1', guildName: 'Test Server',
+      threadId, threadName, threadParentName: 'general', threadParentId: 'c1',
+      mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+    });
+
+    async function started(t: { after: (fn: () => Promise<void>) => void }) {
+      const { client, serverConn, discord } = await createTestPair();
+      const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+      const serverPromise = server.serve(serverConn);
+      t.after(async () => {
+        client.close();
+        await serverPromise;
+      });
+      await mcplHandshake(client);
+      const regMsg = await client.nextMessage();
+      if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+      return { client, discord };
+    }
+
+    async function expectChanged(client: McplConnection): Promise<{ added?: Array<Record<string, any>>; removed?: string[] }> {
+      const m = await client.nextMessage();
+      assert.equal(m.type, 'notification');
+      assert.equal(m.type === 'notification' && m.notification.method, method.CHANNELS_CHANGED);
+      return (m as { notification: { params: { added?: Array<Record<string, any>>; removed?: string[] } } }).notification.params;
+    }
+
+    async function expectPush(client: McplConnection, mcplChannelId: string): Promise<void> {
+      const m = await client.nextMessage();
+      assert.equal(m.type, 'request');
+      if (m.type === 'request') {
+        assert.equal(m.request.method, method.PUSH_EVENT);
+        assert.equal(((m.request.params as PushEventParams).origin as Record<string, unknown> | undefined)?.mcplChannelId, mcplChannelId);
+        client.sendResponse(m.request.id, { accepted: true });
+      }
+    }
+
+    it('registers a thread when its first message arrives, before the message reaches the host, and only once', async (t) => {
+      const { client, discord } = await started(t);
+      discord.simulateMessage(inThread('m1'));
+      const changed = await expectChanged(client);
+      const added = changed.added ?? [];
+      assert.equal(added.length, 1);
+      assert.equal(added[0].id, 'discord:g1:th1');
+      // Not `#design-chat (Test Server)`: that is a channel's address form, and
+      // would paste as a same-named channel.
+      assert.equal(added[0].label, '#general › design-chat (Test Server)');
+      assert.deepEqual(added[0].metadata, { channelType: 'thread', parentId: 'c1' });
+      await expectPush(client, 'discord:g1:th1');
+
+      // A second message in the same thread is not re-announced.
+      discord.simulateMessage(inThread('m2'));
+      await expectPush(client, 'discord:g1:th1');
+    });
+
+    it('forgets a deleted thread, and the threads of a deleted channel, but announces nothing for a thread it never registered', async (t) => {
+      const { client, discord } = await started(t);
+      discord.simulateMessage(inThread('m1', 'th1'));
+      await expectChanged(client);
+      await expectPush(client, 'discord:g1:th1');
+      discord.simulateMessage(inThread('m2', 'th2', 'standup'));
+      await expectChanged(client);
+      await expectPush(client, 'discord:g1:th2');
+
+      discord.simulateThreadDelete('g1', 'th-never-seen');
+      discord.simulateThreadDelete('g1', 'th1');
+      // The unregistered thread produced nothing: the next notification is th1's.
+      assert.deepEqual((await expectChanged(client)).removed, ['discord:g1:th1']);
+
+      // Deleting #general (c1) takes its remaining registered thread with it.
+      discord.simulateChannelDelete('g1', 'c1');
+      assert.deepEqual((await expectChanged(client)).removed, ['discord:g1:c1', 'discord:g1:th2']);
+    });
   });
 
   it('renders reply target visibly and carries standard metadata on open channels', async () => {
@@ -1067,6 +1170,53 @@ describe('DiscordMcplServer', () => {
 
     client.close();
     await serverPromise;
+  });
+
+  it('reconnect sweep registers a missed DM and a missed thread before pushing them, and names their channels', async (t) => {
+    const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-sweep-register.json`);
+    writeFileSync(wmPath, JSON.stringify({ watermarks: { dm42: '100', th1: '100' }, dmChannels: ['dm42'] }));
+    process.env.DISCORD_WATERMARK_FILE = wmPath;
+    t.after(() => {
+      delete process.env.DISCORD_WATERMARK_FILE;
+      if (existsSync(wmPath)) unlinkSync(wmPath);
+    });
+    const { client, serverConn, discord } = await createTestPair();
+    discord.historyToReturn = [
+      { id: '101', authorId: 'u9', authorName: 'Ra', isBot: false, content: '<@bot_123> still there?', cleanContent: '@bot still there?', attachments: [], mentionsBot: true, timestamp: new Date(), reactions: [] },
+    ];
+    // Neither channel is registered in this fresh process: the DM was known
+    // only from the persisted DM list, the thread only from its watermark.
+    discord.cachedChannelMeta = {
+      dm42: { name: null, guildId: null, guildName: null, isDM: true },
+      th1: { name: 'design-chat', guildId: 'g1', guildName: 'Test Guild', isDM: false },
+    } as never;
+    discord.threadParents = { th1: { parentId: 'c1', parentName: 'general' } };
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    for (const [id, label] of [['discord:dm:dm42', 'DM: Ra'], ['discord:g1:th1', '#general › design-chat (Test Guild)']]) {
+      const changed = await client.nextMessage();
+      assert.equal(changed.type, 'notification', `${id} is registered before its missed messages are pushed`);
+      if (changed.type === 'notification') {
+        assert.equal(changed.notification.method, method.CHANNELS_CHANGED);
+        const added = (changed.notification.params as { added?: Array<{ id: string; label?: string }> }).added ?? [];
+        assert.deepEqual(added.map((d) => [d.id, d.label]), [[id, label]]);
+      }
+      const missed = await client.nextMessage();
+      assert.equal(missed.type, 'request');
+      if (missed.type === 'request') {
+        assert.equal(missed.request.method, method.PUSH_EVENT);
+        assert.equal(((missed.request.params as PushEventParams).origin as Record<string, unknown> | undefined)?.mcplChannelId, id, 'the push names the channel it delivers from');
+        client.sendResponse(missed.request.id, {});
+      }
+    }
   });
 
   it('reconnect sweep delivers missed mentions with nearby context from a non-subscribed channel', async () => {
