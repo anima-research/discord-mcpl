@@ -243,7 +243,8 @@ export interface UtteranceReport {
   /** Audio actually played into the channel, ms. */
   playedMs: number;
   /** Time spent queued behind the carrier before clearance (or before
-   *  expiry, for status 'expired'). Staleness signal for the model. */
+   *  expiry, for status 'expired', or before the failure, for a 'failed'
+   *  item that was never cleared). Staleness signal for the model. */
   queuedMs: number;
   /** Characters actually sent to the TTS provider — the zero-cost-loser
    *  receipt: 0 for anything dropped before clearance. */

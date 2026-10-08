@@ -100,7 +100,7 @@ test('when nothing more can play, every queued item is settled as failed, and a 
   // The sink isn't wedged: the next item is pumped again.
   broken = false;
   sink.play(item('u3'));
-  await until(() => events.length === 3, 'the later item to settle');
+  await until(() => events.length >= 3, 'the later item to settle');
   assert.deepEqual(summary(events).slice(2), ['failed:u3:0:player refused']);
   assert.equal(played.length, 1);
 });
