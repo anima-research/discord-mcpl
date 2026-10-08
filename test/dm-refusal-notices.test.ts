@@ -145,6 +145,9 @@ async function harness(t: TestContext, opts: {
         pushes.push(params as (typeof pushes)[number]);
         return {};
       },
+      // A real connection has both. The server announces registrations
+      // (channels/changed) as notifications, which these tests don't inspect.
+      sendNotification: () => {},
     };
     server.mcplEnabled = true;
     server.enabledFeatureSets = new Set(['discord.messaging']);
