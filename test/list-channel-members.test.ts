@@ -158,6 +158,28 @@ describe('listChannelMembers: channel filters bound inspection', () => {
     assert.equal(ok.scope, 'thread-joined');
     await assert.rejects(adapter.listChannelMembers('t_no'), /channel filters/);
   });
+
+  it('allows a thread whose channel is admitted only through its listed category; rejects one whose category is not listed', async () => {
+    const alice = member('u1', 'Alice');
+    const g = fakeGuild([alice]);
+    // Only a category is listed. Neither thread's channel is, nor is either
+    // thread, so admission has to come from the channel's own category, read
+    // from the client's channel cache (makeAdapter caches every fixture
+    // channel).
+    const adapter = makeAdapter(
+      {
+        c_in_cat: guildChannel('c_in_cat', g, [alice], 'cat_allowed'),
+        t_in_cat: thread('t_in_cat', g, ['u1'], 'c_in_cat'),
+        c_other_cat: guildChannel('c_other_cat', g, [alice], 'cat_other'),
+        t_other_cat: thread('t_other_cat', g, ['u1'], 'c_other_cat'),
+      },
+      { guildChannels: { g1: ['cat_allowed'] } },
+    );
+    const ok = await adapter.listChannelMembers('t_in_cat');
+    assert.equal(ok.scope, 'thread-joined');
+    assert.deepEqual(ok.members.map((m) => m.displayName), ['Alice']);
+    await assert.rejects(adapter.listChannelMembers('t_other_cat'), /channel filters/);
+  });
 });
 
 describe('listChannelMembers: threads', () => {
