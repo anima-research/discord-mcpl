@@ -2,7 +2,7 @@
  * Adapter side of thread registration: a thread's label is display-only, the
  * channel cache reports a thread's parent (so the reconnect sweep can
  * register what it pushes), a deleted thread is reported, and channelCreate
- * registers only guild text channels, as boot and channelUpdate do.
+ * registers only text, announcement and voice channels.
  * Jerome-1896 and Esther-1897 found that no path registered threads (room-203
  * #58153), and that the sweep pushed DMs and threads unregistered (#58257,
  * #58302).
