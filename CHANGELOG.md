@@ -169,6 +169,16 @@ in the git log and PR descriptions.
   `[message edited] <username>: <text>` like a create. Previously the host
   reconstructed a guild channel's edit as `discord:dm:<channelId>` and the
   agent could only guess who had edited.
+- **A thread in a channel admitted through its category is admitted too.**
+  `guildChannels` admits a listed channel with its threads, and a listed
+  category admits the channels under it, but the check looked only one
+  parent level up. A thread's parent is its channel, so threads in a channel
+  admitted only through its category were dropped at ingress (messages,
+  edits, deletes, reactions) and refused by `list_channel_members`, and a
+  forum admitted through its category lost every post. A thread now counts
+  as its channel wherever that channel's admission comes from: the check
+  reads the channel's own category from the channel cache. A thread whose
+  channel isn't cached stays excluded, as before.
 - **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
   edit whose author is unknown (uncached message) was forwarded because the
   check required an author; it is now dropped, like creates.
