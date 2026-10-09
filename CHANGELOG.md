@@ -5,6 +5,19 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Upgrade notes
+
+- **Upgrade the host's agent framework first, or together with this
+  release.** `/undo` now needs the `marks` host command, which the agent
+  framework gains with anima-research/agent-framework#250. On a host
+  without it, `/undo` is refused for every option, so a deployment that
+  takes this release before its host does loses `/undo` from Discord until
+  the host upgrades. Each connection asks the host again, so `/undo`
+  returns once the upgraded host reconnects.
+- **`/undo` and `/hide` mark nothing unless `marks` is chosen.** `/hide`
+  used to react 💤 on every hidden message by default; choose `marks: all`
+  for that. The admin commands' entry under Changed has the details.
+
 ### Added
 
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
@@ -148,6 +161,38 @@ in the git log and PR descriptions.
   Raising the cap intentionally restores the prior always-inline behavior.
   Images are unaffected: they inline as native image blocks under their own
   ceilings. (issue #30, PR #12)
+- **The admin commands make 💤 awareness marks an explicit choice.** On a
+  host whose agent framework has the `marks` host command
+  (anima-research/agent-framework#250), `/undo` and `/hide` take an optional
+  `marks` choice: `none` (the default), `addressed` or `all`. The host places
+  the marks and returns a `markers` receipt, and the reply says what it
+  scheduled: requested, not yet seen on Discord. A new admin command,
+  `/marks list|cancel|retract|release [target] [page]`, shows the host's
+  journal and acts on it, ephemerally:
+  - `list` pages the journal newest first, each page within one Discord
+    reply. `list target:<id>` shows one batch or retract in full, imported
+    history included.
+  - cancel, retract and release each answer with what that action's receipt
+    says. Cancel keeps its limits: confirmed marks stay, and in-flight or
+    unknown requests may still land.
+  - A reply too long for one message is cut visibly, with the whole answer
+    attached. An answer in a shape this server can't read is shown as sent.
+
+  Each connection probes the host once (`marks list`) to learn which kind it
+  is.
+  - On a host without the verb, `/undo` is **refused** whatever the option.
+    Such a host's undo places marks that follow branches: they are
+    re-applied on every switch, with no frozen audience and no cancel, so no
+    choice here can authorize them as a one-shot act. The web UI refuses the
+    same way.
+  - On such a host, `/hide` no longer reacts 💤 on every hidden message. It
+    reacts itself only for `marks: all`, and refuses `addressed`, since it
+    can't tell which messages addressed the agent. With no choice, nothing
+    is marked. A host with the verb that omits its receipt is reported as
+    such and never supplemented, since reactions placed here would bypass
+    its journal and its cancel.
+  - A probe that proves nothing either way (a timeout, another error) stops
+    the command with nothing changed, and the next command asks again.
 
 ### Fixed
 

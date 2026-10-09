@@ -283,14 +283,24 @@ test('socket died while queued: flush reopens a fresh stream and resends the ban
   assert.deepEqual(provider.streams[1]!.sent, ['resent text']);
 });
 
-test('maxHold expiry: dropped unspoken with an expired receipt, zero billed', async () => {
+// The hold deadline is a setTimeout and the receipt's queuedMs is read from
+// Date.now(): the two tests below drive both from one mocked clock, so the
+// deadline is checked exactly (nothing at 19 ms, expiry at 20) rather than
+// raced against the real scheduler, whose timers are based on the event
+// loop's own time and can fire short of a separately sampled wall clock.
+
+test('maxHold expiry: dropped unspoken with an expired receipt, zero billed', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
   const provider = new FakeProvider();
   const sink = new FakeSink();
   const out = new VoiceOutput({ textChannels: null, maxHoldMs: 20 }, provider, VOICE, sink, () => {});
   const reports: UtteranceReport[] = [];
   out.onReport((r) => reports.push(r));
   out.handleChunk('inf1', 'discord:g:100', 'too late');
-  await new Promise((r) => setTimeout(r, 50));
+  t.mock.timers.tick(19);
+  assert.deepEqual(sink.cancelled, [], 'not before the deadline');
+  assert.equal(reports.length, 0);
+  t.mock.timers.tick(1);
   assert.deepEqual(sink.cancelled, ['inf1']);
   assert.equal(reports.length, 1);
   const r = reports[0]!;
@@ -298,7 +308,7 @@ test('maxHold expiry: dropped unspoken with an expired receipt, zero billed', as
   assert.equal(r.billedChars, 0);
   assert.equal(r.playedMs, 0);
   assert.equal(r.unvoicedText, 'too late');
-  assert.ok(r.queuedMs >= 20);
+  assert.equal(r.queuedMs, 20);
   assert.deepEqual(provider.streams[0]!.sent, []);
   assert.equal(provider.streams[0]!.aborted, true);
   // The inference is dead: post-expiry chunks must not reopen anything.
@@ -306,7 +316,8 @@ test('maxHold expiry: dropped unspoken with an expired receipt, zero billed', as
   assert.equal(provider.streams.length, 1);
 });
 
-test('cleared beats expiry: a cleared utterance is never expired', async () => {
+test('cleared beats expiry: a cleared utterance is never expired', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
   const provider = new FakeProvider();
   const sink = new FakeSink();
   const out = new VoiceOutput({ textChannels: null, maxHoldMs: 20 }, provider, VOICE, sink, () => {});
@@ -314,7 +325,7 @@ test('cleared beats expiry: a cleared utterance is never expired', async () => {
   out.onReport((r) => reports.push(r));
   out.handleChunk('inf1', 'discord:g:100', 'quick');
   sink.clear('inf1');
-  await new Promise((r) => setTimeout(r, 50));
+  t.mock.timers.tick(50);
   assert.deepEqual(sink.cancelled, []);
   assert.equal(reports.length, 0); // still active, awaiting playback outcome
   assert.deepEqual(provider.streams[0]!.sent, ['quick']);
