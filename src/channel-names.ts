@@ -79,6 +79,29 @@ export function formatChannelLabel(name: string, guildName: string): string {
   return `#${name} (${guildName})`;
 }
 
+/**
+ * A thread's label: `#parent › thread (GuildName)`. Display only, and
+ * deliberately NOT the `#name (GuildName)` address form: this resolver
+ * excludes threads (they are addressed by id), and a thread labelled like a
+ * channel would paste as a same-named channel, the silent wrong-room failure
+ * this module exists to prevent. Without a known parent: `› thread (GuildName)`.
+ *
+ * Pasted back, it must fail loudly, and its shape alone doesn't ensure that:
+ * a voice channel's name may hold spaces and `›`, so a voice room named
+ * `general › design-chat` would match the label as a name. So
+ * `resolveChannelName` refuses a name in this shape before matching anything.
+ */
+export function formatThreadLabel(parentName: string | null | undefined, threadName: string, guildName: string): string {
+  return `${parentName ? `#${parentName} ` : ''}› ${threadName} (${guildName})`;
+}
+
+/** Whether a parsed name has a thread label's shape: `parent › thread`, or
+ *  `› thread` when the parent isn't known (formatThreadLabel, and the
+ *  guild-less labels the server falls back to). */
+function isThreadLabelShape(name: string): boolean {
+  return /(?:^|\s)›\s/.test(name);
+}
+
 /** `#name (GuildName)` for a resolver candidate. */
 export function channelLabel(c: ChannelCandidate): string {
   return formatChannelLabel(c.name, c.guildName);
@@ -157,7 +180,9 @@ export type ResolveResult =
    *  than a union with a `matched?: undefined` member, which said the same
    *  thing less legibly. */
   | { ok: true; id: string; matched?: ChannelCandidate }
-  | { ok: false; reason: 'not-found' | 'ambiguous'; message: string };
+  /** `thread-label`: the name had a thread label's shape, which is refused
+   *  before matching (formatThreadLabel says why). */
+  | { ok: false; reason: 'not-found' | 'ambiguous' | 'thread-label'; message: string };
 
 /**
  * Resolve a parsed name against live candidates.
@@ -171,6 +196,20 @@ export function resolveChannelName(
   ref: { name: string; guild?: string },
   candidates: ChannelCandidate[],
 ): ResolveResult {
+  // A pasted thread label, refused before matching: as a name it could reach
+  // a voice room whose name has the same shape.
+  if (isThreadLabelShape(ref.name)) {
+    return {
+      ok: false,
+      reason: 'thread-label',
+      message:
+        `"${ref.name}" has a thread label's shape (#parent › thread), and thread labels ` +
+        `are display-only, never matched as names. Address the thread by its id: the ` +
+        `discord:<guild>:<thread> id it is registered under, or its numeric id. A channel ` +
+        `whose name has this shape is addressed by id too.`,
+    };
+  }
+
   const wantName = ref.name.toLowerCase();
   const wantGuild = ref.guild?.toLowerCase();
 

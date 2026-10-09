@@ -4,7 +4,7 @@
 
 import type { ChannelDescriptor } from '@animalabs/mcpl-core';
 import type { DiscordChannelInfo } from './discord-adapter.js';
-import { formatChannelLabel } from './channel-names.js';
+import { formatChannelLabel, formatThreadLabel } from './channel-names.js';
 
 export type DiscordChannelDescriptor = ChannelDescriptor & {
   initiallyOpen?: boolean;
@@ -37,9 +37,12 @@ export function toDescriptor(
   return {
     id: mcplChannelId(guildId, channel.id),
     type: 'discord',
-    // Same formatter the resolver parses back, so this descriptor's label is
-    // by construction a valid channelId argument.
-    label: formatChannelLabel(channel.name, guildName),
+    // Same formatter the resolver parses back, so a channel's label is by
+    // construction a valid channelId argument. A thread's is display only
+    // (formatThreadLabel says why): threads are addressed by id.
+    label: channel.type === 'thread'
+      ? formatThreadLabel(channel.parentName, channel.name, guildName)
+      : formatChannelLabel(channel.name, guildName),
     direction: 'bidirectional',
     address: { guildId, channelId: channel.id },
     metadata: { channelType: channel.type, parentId: channel.parentId },

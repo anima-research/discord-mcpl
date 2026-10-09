@@ -5,6 +5,16 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Upgrade notes
+
+- **`chat:thread` now marks messages posted in a thread, and no longer marks
+  a message that started one.** A host gate or filter rule keyed on the tag
+  will match different messages after this upgrade: messages inside threads
+  now carry it, forum posts included (a forum post is a thread), and a
+  channel message that spawned a thread no longer does. The old matches were
+  the wrong ones (see "Thread fields name the thread a message was posted
+  in" under Fixed), but a rule tuned to them is worth checking.
+
 ### Added
 
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
@@ -169,6 +179,38 @@ in the git log and PR descriptions.
   `[message edited] <username>: <text>` like a create. Previously the host
   reconstructed a guild channel's edit as `discord:dm:<channelId>` and the
   agent could only guess who had edited.
+- **Thread fields name the thread a message was posted in.** They were read
+  from discord.js `message.thread`, which is the thread a message *started*,
+  so a message that had spawned a thread was tagged `chat:thread`, rendered
+  as `thread "…"`, and sent to the host with that thread's id as its MCPL
+  `threadId`, while messages actually posted in a thread carried none. Now a
+  message posted in a thread is tagged `chat:thread` and located as
+  `[#parent thread "name" …]`, and a thread starter carries no thread
+  fields. MCPL `threadId` (a thread *within* a channel) is no longer sent:
+  a Discord thread is its own channel, already named by `channelId`, so a
+  host keying conversations by thread no longer splits one channel in two.
+- **Every channel a message comes from is registered, threads included,
+  and the reconnect sweep registers what it pushes.** Boot and channel
+  events register guild text channels, never a thread (a Discord thread is
+  its own channel) and not an announcement channel or a voice channel's
+  text chat. Such a channel couldn't be opened, and a host that routes
+  speech by a channel's declaration (MCPL RFC-011) held a resident's
+  plain-speech replies in it as drafts. When a message arrives through the
+  filters from a channel that isn't registered, the channel is now
+  registered first, as a DM is, so the host knows it before that message
+  reaches it. Only channels with activity are registered. A thread is
+  forgotten when it, or the channel it hangs off, is deleted. A thread's
+  label is `#parent › thread (Guild)`, which is display-only, because
+  `#thread (Guild)` would paste back as a same-named channel. A tool
+  given a thread label as its channel refuses it, even where a voice
+  channel has that name. Other channels keep their `#name (Guild)`
+  address. The reconnect sweep also registers a missed DM, thread or
+  other unregistered channel before pushing it, and names its channel
+  (`origin.mcplChannelId`), so a freshly started host can answer it.
+  `channelCreate` registers only channels messages are posted in (text,
+  announcement and voice), no longer a category or forum, which hold no
+  messages themselves, nor a channel in a guild the guild filter excludes,
+  whose messages are all dropped.
 - **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
   edit whose author is unknown (uncached message) was forwarded because the
   check required an author; it is now dropped, like creates.

@@ -4,6 +4,7 @@ import * as assert from 'node:assert/strict';
 import {
   buildCandidates,
   channelLabel,
+  formatThreadLabel,
   isSnowflake,
   parseChannelRef,
   resolveChannelName,
@@ -200,6 +201,38 @@ describe('resolveChannelName', () => {
     const r = resolveChannelName({ name: 'lounge' }, [voice1, voice2]);
     assert.ok(!r.ok);
     assert.match(r.message, /\[voice\]/);
+  });
+
+  it('REFUSES a pasted thread label, even where a voice room carries its name', () => {
+    // A thread's label is display-only (formatThreadLabel). A voice channel's
+    // name may hold spaces and ›: matched as a name, the label would send to
+    // a voice room named `general › design-chat`.
+    const lookalike = ch('100000000000000009', 'general › design-chat', 'g1', 'Separatrix', 'voice');
+    const parentless = ch('100000000000000010', '› design-chat', 'g1', 'Separatrix', 'voice');
+    const world = [...CANDIDATES, lookalike, parentless];
+    for (const label of [
+      formatThreadLabel('general', 'design-chat', 'Separatrix'),
+      formatThreadLabel(null, 'design-chat', 'Separatrix'),
+      // The server's labels for a thread when it doesn't know the guild's name.
+      '#general › design-chat',
+      '› design-chat',
+    ]) {
+      const parsed = parseChannelRef(label);
+      assert.ok(parsed?.kind === 'name', label);
+      const r = resolveChannelName(parsed, world);
+      assert.ok(!r.ok, `${label} must not resolve`);
+      assert.equal(r.reason, 'thread-label', label);
+      assert.match(r.message, /by its id/, label);
+    }
+  });
+
+  it('matches a name that merely contains › as usual', () => {
+    // Only the label's shape is refused: › at the start or after a space,
+    // with a space after it.
+    const c = ch('100000000000000011', 'news›daily', 'g1', 'Separatrix');
+    const r = resolveChannelName({ name: 'news›daily' }, [...CANDIDATES, c]);
+    assert.ok(r.ok);
+    assert.equal(r.id, c.id);
   });
 });
 

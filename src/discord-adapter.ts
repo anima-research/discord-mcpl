@@ -134,9 +134,19 @@ export interface DiscordMessageData {
   guildId: string | null;
   /** Guild name (e.g. "My Server"). `null` for DMs. */
   guildName: string | null;
+  /** The thread the message was posted IN, when it was (Discord threads are
+   *  channels, so this equals `channelId`). Never the thread a message
+   *  started: that is discord.js `message.thread`, a different conversation. */
   threadId?: string;
   /** Thread name when the message is in a thread. */
   threadName?: string;
+  /** Name of the channel a thread hangs off, when the message is in a thread. */
+  threadParentName?: string | null;
+  /** The kind of channel the message was posted in (a guild message only). */
+  channelType?: DiscordChannelInfo['type'];
+  /** That channel's own parent (a guild message only): a channel's category,
+   *  or, for a thread, the channel it hangs off. */
+  channelParentId?: string | null;
   replyToId?: string;
   /** User id of the author of the message this message is in reply to.
    *  Populated for reply messages regardless of whether the sender left
@@ -172,6 +182,8 @@ export interface DiscordChannelInfo {
   name: string;
   type: 'text' | 'announcement' | 'voice' | 'category' | 'thread' | 'forum' | 'unknown';
   parentId?: string;
+  /** For a thread, the name of the channel it hangs off (for its label). */
+  parentName?: string;
   /** Guild-qualified display label, `#name (GuildName)` — the same string
    *  `toDescriptor` produces and the same string the channelId argument
    *  accepts. Returned so listings hand back something PASTEABLE: the
@@ -519,6 +531,7 @@ export class DiscordAdapter {
   private readyHandler?: () => void;
   private channelCreateHandler?: (guildId: string, channel: DiscordChannelInfo) => void;
   private channelDeleteHandler?: (guildId: string, channelId: string) => void;
+  private threadDeleteHandler?: (guildId: string, threadId: string) => void;
   private guildCreateHandler?: (
     guildId: string,
     guildName: string,
@@ -722,6 +735,12 @@ export class DiscordAdapter {
 
   onChannelDelete(handler: (guildId: string, channelId: string) => void): void {
     this.channelDeleteHandler = handler;
+  }
+
+  /** Fired when a thread is deleted (discord.js `threadDelete`; threads never
+   *  reach `channelDelete`). */
+  onThreadDelete(handler: (guildId: string, threadId: string) => void): void {
+    this.threadDeleteHandler = handler;
   }
 
   /** Fired when the bot joins a new guild after startup. The handler receives
@@ -1221,6 +1240,25 @@ export class DiscordAdapter {
       guildName: c.guild?.name ?? null,
       isDM: !guildId,
     };
+  }
+
+  /** A cached guild channel's kind and parent (a channel's category, or a
+   *  thread's channel, with its name), or null when it isn't cached.
+   *  getChannelMeta's REST fetch caches what it fetches, so after it this
+   *  answers for an uncached channel too. Used to register what the reconnect
+   *  sweep pushes: a thread is labelled `#parent › thread`. */
+  getCachedChannelPlacement(channelId: string): {
+    type: DiscordChannelInfo['type'];
+    parentId: string | null;
+    parentName: string | null;
+  } | null {
+    const c = this.client.channels.cache.get(channelId) as {
+      type?: number;
+      parentId?: string | null;
+      parent?: { name?: string } | null;
+    } | undefined;
+    if (!c) return null;
+    return { type: mapChannelType(c.type), parentId: c.parentId ?? null, parentName: c.parent?.name ?? null };
   }
 
   /** Compare two Discord snowflake IDs numerically without BigInt parsing.
@@ -1802,7 +1840,17 @@ export class DiscordAdapter {
     });
 
     this.client.on('channelCreate', (channel) => {
+      // Only channels a conversation's messages are posted in: text,
+      // announcement and voice (text-in-voice). A category or forum holds no
+      // messages itself, and stage and media channels aren't sendable here
+      // (mapChannelType). Threads never reach channelCreate; they, and any
+      // channel registration missed, are registered when a message arrives.
+      if (!isPostingChannel(mapChannelType(channel.type))) return;
       if ('guildId' in channel && channel.guildId) {
+        // The guild filter too, as guildCreate, channelUpdate and boot's
+        // listing apply it: a channel in a guild it excludes would be listed
+        // to the host while every message from it is dropped.
+        if (this.guildIds?.length && !this.guildIds.includes(channel.guildId)) return;
         const parentId = 'parentId' in channel ? (channel.parentId ?? null) : null;
         if (!this.channelAllowed(channel.guildId, channel.id, parentId)) return;
         // A label must be an ADDRESS. The previous fallback substituted the
@@ -1829,6 +1877,10 @@ export class DiscordAdapter {
       if ('guildId' in channel && channel.guildId) {
         this.channelDeleteHandler?.(channel.guildId, channel.id);
       }
+    });
+
+    this.client.on('threadDelete', (thread) => {
+      if (thread.guildId) this.threadDeleteHandler?.(thread.guildId, thread.id);
     });
 
     this.client.on('ready', () => {
@@ -2012,7 +2064,14 @@ export class DiscordAdapter {
       ? channel.name
       : null;
     const guildName = message.guild?.name ?? null;
-    const threadName = (message.thread as { name?: string } | null)?.name;
+    // A message posted IN a thread: Discord threads are channels, so its
+    // channelId is the thread and its parent is the channel it hangs off.
+    // (`message.thread` is the thread a message STARTED — not where it was
+    // posted, so it must never stand in for this.)
+    const inThread = (message.channel as { isThread?: () => boolean } | null)?.isThread?.() === true;
+    const threadParentName = inThread
+      ? ((message.channel as { parent?: { name?: string } | null }).parent?.name ?? null)
+      : undefined;
     // `cleanContent` resolves <@id>, <@&roleId>, <#channelId> to
     // @username / @role / #channel (with raw-content fallback), forwarded
     // messages carry their body in messageSnapshots, not content, and Discord
@@ -2034,8 +2093,15 @@ export class DiscordAdapter {
       channelName,
       guildId: message.guildId ?? null,
       guildName,
-      threadId: message.thread?.id,
-      threadName,
+      ...(message.guildId
+        ? {
+          channelType: mapChannelType((message.channel as { type?: number } | null)?.type),
+          channelParentId: (message.channel as { parentId?: string | null } | null)?.parentId ?? null,
+        }
+        : {}),
+      ...(inThread
+        ? { threadId: message.channelId, ...(channelName ? { threadName: channelName } : {}), threadParentName }
+        : {}),
       replyToId: refType === 0 ? (message.reference?.messageId ?? undefined) : undefined,
       // mentions.repliedUser is the User the reply targets — distinct
       // from mentions.users (which only includes them if the sender
@@ -2134,6 +2200,12 @@ export function mapAllAttachments(m: {
     }
   }
   return out;
+}
+
+/** Whether messages are posted in a channel of this kind (and so it is
+ *  registered as a place to post). */
+export function isPostingChannel(type: DiscordChannelInfo['type']): boolean {
+  return type === 'text' || type === 'announcement' || type === 'voice' || type === 'thread';
 }
 
 /**
