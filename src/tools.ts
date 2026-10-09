@@ -41,6 +41,17 @@ const MESSAGE_ID_KIND =
   'Numeric Discord ID of the target message, copied from incoming messages or fetched history. ' +
   'Also supply the channel containing it.';
 
+const TARGET_RULE =
+  'Give exactly one of messageId or latestFrom; the other may be omitted or null. ';
+
+const LATEST_FROM_DESC =
+  'Instead of messageId: the author whose newest message to target, as @username, display name, ' +
+  'or numeric user id (people and bots alike). Picks their newest message among the 100 most ' +
+  'recent in the channel, resolved once when the call runs; an ambiguous name returns choices, ' +
+  'a name that can\'t be checked against the channel\'s members is refused (use the numeric id), ' +
+  'and no match in that window is refused rather than guessed. The result echoes the chosen ' +
+  'message (id, author, time, excerpt).';
+
 export const toolDefinitions: ToolDefinition[] = [
   {
     name: 'send_message',
@@ -62,11 +73,12 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: {
         channelId: { type: 'string', description: CHANNEL_ID_DESC },
-        messageId: { type: 'string', description: 'Message to reply to. ' + MESSAGE_ID_KIND },
+        messageId: { type: ['string', 'null'], description: TARGET_RULE + 'Message to reply to. ' + MESSAGE_ID_KIND },
+        latestFrom: { type: ['string', 'null'], description: TARGET_RULE + LATEST_FROM_DESC },
         content: { type: 'string', description: 'Reply content (optional if files are attached)' },
         files: FILES_PROP,
       },
-      required: ['channelId', 'messageId'],
+      required: ['channelId'],
     },
   },
   {
@@ -89,10 +101,11 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: {
         channelId: { type: 'string', description: CHANNEL_ID_DESC },
-        messageId: { type: 'string', description: 'Message to react to. ' + MESSAGE_ID_KIND },
+        messageId: { type: ['string', 'null'], description: TARGET_RULE + 'Message to react to. ' + MESSAGE_ID_KIND },
+        latestFrom: { type: ['string', 'null'], description: TARGET_RULE + LATEST_FROM_DESC },
         emoji: { type: 'string', description: 'A unicode emoji (e.g. 👍), or a custom server emoji as `:name:` (discover names/ids with list_emojis) or its full `<:name:id>` token.' },
       },
-      required: ['channelId', 'messageId', 'emoji'],
+      required: ['channelId', 'emoji'],
     },
   },
   {
@@ -102,10 +115,11 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: {
         channelId: { type: 'string', description: CHANNEL_ID_DESC },
-        messageId: { type: 'string', description: 'Message whose reaction should be removed. ' + MESSAGE_ID_KIND },
+        messageId: { type: ['string', 'null'], description: TARGET_RULE + 'Message whose reaction should be removed. ' + MESSAGE_ID_KIND },
+        latestFrom: { type: ['string', 'null'], description: TARGET_RULE + LATEST_FROM_DESC },
         emoji: { type: 'string', description: 'The unicode or custom emoji previously added by this bot.' },
       },
-      required: ['channelId', 'messageId', 'emoji'],
+      required: ['channelId', 'emoji'],
     },
   },
   {
