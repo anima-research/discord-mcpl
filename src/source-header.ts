@@ -9,18 +9,20 @@
  * like `x] [source: discord:g:other · #admin` must not read as a second
  * attribution. So, as the framework does (agent-framework
  * src/mcpl/inbound-source.ts, `headerValue` / `labelValue`):
- * - a value with any character the grammar uses (brackets, the `·` and `/`
+ * - a value with any character the grammar uses (brackets, the `·` and ` / `
  *   separators, quotes, backslashes), any control or line-separator
  *   character, or anything invisible is rendered as a quoted, escaped string
  *   literal. Invisible means a format or default-ignorable character
  *   (zero-width characters, bidi overrides and isolates, the Hangul fillers,
  *   variation selectors outside an emoji) or a space other than U+0020: such
  *   characters can hide a header word, reorder the line for a human reader,
- *   or make a lookalike ` / `. The escape spells each one out, so nothing
- *   acts from inside the quotes;
+ *   or make a lookalike ` / `. So a value with one is quoted for that alone,
+ *   whatever follows it, and any other space around a slash is quoted as
+ *   such. The escape spells each one out, so nothing acts from inside the
+ *   quotes;
  * - a label beginning with one of the header's own words (`thread`,
- *   `reply to`, `unscoped`), once invisible characters are set aside, is
- *   quoted too, since it stands where a tail would;
+ *   `reply to`, `unscoped`) is quoted too, since it stands where a tail
+ *   would. One that an invisible character hides is quoted already;
  * - every other value is rendered as is. A header is always one line.
  *
  * A well-formed emoji sequence keeps its zero-width joiners and variation
@@ -40,11 +42,10 @@
  */
 const INVISIBLE = '\\p{Cf}\\p{Default_Ignorable_Code_Point}';
 // eslint-disable-next-line no-control-regex
-const STRUCTURAL = /[[\]\u00b7"\\\u0000-\u001f\u007f-\u009f\u2028\u2029]|\s\/\s/u;
+const STRUCTURAL = /[[\]\u00b7"\\\u0000-\u001f\u007f-\u009f\u2028\u2029]| \/ /u;
 /** An invisible character or a non-ASCII space; tested with emoji sequences taken out. */
 const UNSEEN_OUTSIDE_EMOJI = new RegExp(`[${INVISIBLE}]|(?! )\\p{Zs}`, 'u');
 const UNSEEN = new RegExp(`[\\u007f-\\u009f\\u2028\\u2029${INVISIBLE}]|(?! )\\p{Zs}`, 'gu');
-const INVISIBLE_RUN = new RegExp(`[${INVISIBLE}]`, 'gu');
 /** A well-formed emoji sequence: an emoji with an optional skin tone or presentation selector, joined to more by ZWJ. */
 const EMOJI_SEQUENCE = /\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|[\u{FE0E}\u{FE0F}])?(?:\u{200D}\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|[\u{FE0E}\u{FE0F}])?)*/gu;
 /** In a quoted value: an emoji sequence, kept as it is, or a character to escape. */
@@ -55,10 +56,9 @@ export function headerValue(value: string): string {
   return STRUCTURAL.test(value) || UNSEEN_OUTSIDE_EMOJI.test(value.replace(EMOJI_SEQUENCE, '')) ? quoted(value) : value;
 }
 
-/** The label: also quoted when it begins with one of the header's own words,
- *  looked for with invisible characters taken out. */
+/** The label: also quoted when it begins with one of the header's own words. */
 export function labelValue(label: string): string {
-  return /^\s*(?:thread|reply\s+to|unscoped)(?:\s|$)/i.test(label.replace(INVISIBLE_RUN, '')) ? quoted(label) : headerValue(label);
+  return /^\s*(?:thread|reply\s+to|unscoped)(?:\s|$)/i.test(label) ? quoted(label) : headerValue(label);
 }
 
 /** The standalone header: `[source: <canonical id> · <label>]`, the label left out when unknown. */
