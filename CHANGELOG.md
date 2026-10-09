@@ -157,6 +157,12 @@ in the git log and PR descriptions.
   weeks-old, never-edited messages. Updates are now forwarded only when
   `editedTimestamp` is set and the content actually changed (when the old
   message is cached). Real edits are unaffected.
+- **A slash command that fails no longer ends the process.** Slash handlers
+  run without being awaited, and their rejections were unhandled. On Node
+  15 and later, an unhandled rejection exits the process, so a single late
+  reply, which Discord refuses with "Unknown interaction" once its
+  3-second window has passed, took the whole server down. The dispatch now
+  catches and logs a handler's failure.
 - **Edits and deletes carry their author and location.** The push-event
   origin now includes `guildId`, the composite `mcplChannelId`, `messageId`
   and (when known) `authorId`/`authorName`, and an edit reads
