@@ -782,7 +782,14 @@ export class DiscordAdapter {
       const isLast = i === chunks.length - 1;
       const sent = await (channel as TextChannel | DMChannel).send({
         content: chunks[i] || undefined,
-        reply: i === 0 && options?.replyTo ? { messageReference: options.replyTo } : undefined,
+        // failIfNotExists: false -- if the reply target is gone (deleted, or a
+        // mistyped/stale id), Discord sends the message unthreaded instead of
+        // rejecting the whole send with "Unknown message". The content reaching
+        // the channel matters more than the reply line rendering.
+        reply:
+          i === 0 && options?.replyTo
+            ? { messageReference: options.replyTo, failIfNotExists: false }
+            : undefined,
         files: isLast && attachments.length > 0 ? attachments : undefined,
       });
       lastId = sent.id;
