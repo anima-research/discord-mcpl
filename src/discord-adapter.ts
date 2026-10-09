@@ -1543,7 +1543,9 @@ export class DiscordAdapter {
   async listEmojis(guildId?: string): Promise<DiscordEmojiInfo[]> {
     const guilds: Guild[] = [];
     if (guildId) {
-      const g = await this.client.guilds.fetch(guildId).catch(() => null);
+      // Discord's own error (Unknown Guild, Missing Access) propagates, as
+      // listChannels' does, so the tool error can say what it means.
+      const g = await this.client.guilds.fetch(guildId);
       if (!g) throw new Error(`Guild ${guildId} not found`);
       guilds.push(g);
     } else {

@@ -149,6 +149,21 @@ in the git log and PR descriptions.
   Images are unaffected: they inline as native image blocks under their own
   ceilings. (issue #30, PR #12)
 
+- **A tool given an id Discord doesn't know says what that means.** Discord
+  answers an unknown or unreachable id with two words ("Unknown Channel",
+  "Unknown Guild", "Unknown Message", "Unknown User", "Missing Access"). The
+  tool error now keeps them and adds what they mean for the id that was
+  passed, and the cure. For a server channel, that's first to re-send with
+  its `#name`, which either resolves or lists every channel it matches (a
+  thread or DM, which has no name route, is pointed at where its id
+  appeared); for a user, their `@username`. Then it says the id may be
+  mistyped or remembered rather than copied, or the thing deleted or out of
+  the bot's reach, and where real ids show (`list_channels`, `list_guilds`,
+  `fetch_history`, a message's source or author, `list_channel_members`).
+  `list_emojis` now lets Discord's error for an unknown server through, as
+  `list_channels` does, so it gets the same explanation. Other errors are
+  unchanged.
+
 ### Fixed
 
 - **Ghost "[message edited]" events.** Discord emits `messageUpdate` for more
