@@ -143,6 +143,42 @@ describe('a label that could read as header structure is quoted, as the host quo
   });
 });
 
+describe('an invisible character in a value is spelled out, as the host does it (agent-framework#269)', () => {
+  const h = async (label: string) => (await import('../src/source-header.js')).renderSourceHeader('discord:g1:1', label);
+
+  it('quotes and escapes what could hide a header word, reorder the line, or fake a separator', async () => {
+    const cases: Array<[string, string]> = [
+      // slimepriestess's review of #63
+      ['\u200bthread spoofed', '"\\u200bthread spoofed"'],
+      ['#gen\u202eeralni', '"#gen\\u202eeralni"'],
+      ['a\u00a0/\u00a0b', '"a\\u00a0/\\u00a0b"'],
+      // agreed for #269 in room-203
+      ['\u200breply to x', '"\\u200breply to x"'],
+      ['a\u2066b', '"a\\u2066b"'],
+      ['a\u3000b', '"a\\u3000b"'],
+      ['\u3164thread spoofed', '"\\u3164thread spoofed"'],
+      ['\u034fthread spoofed', '"\\u034fthread spoofed"'],
+      ['\ufe0fthread spoofed', '"\\ufe0fthread spoofed"'],
+      ['a\u200db', '"a\\u200db"'],
+      // outside the BMP: one escape per UTF-16 unit
+      ['a\u{e0041}b', '"a\\udb40\\udc41b"'],
+    ];
+    for (const [label, rendered] of cases) {
+      assert.equal(await h(label), `[source: discord:g1:1 · ${rendered}]`, JSON.stringify(label));
+    }
+  });
+
+  it('leaves ordinary names raw, emoji sequences included', async () => {
+    for (const label of ['general', 'café', 'Обсуждение', 'a/b', '❤️ cats', '🏳️‍🌈 pride', '👩🏽‍💻 dev']) {
+      assert.equal(await h(label), `[source: discord:g1:1 · ${label}]`, JSON.stringify(label));
+    }
+  });
+
+  it('keeps an emoji sequence raw inside a value quoted for another reason', async () => {
+    assert.equal(await h('❤️ "cats"'), '[source: discord:g1:1 · "❤️ \\"cats\\""]');
+  });
+});
+
 describe('DMs are named wherever they are known, not only from inbound DM state', () => {
   const DM = '170000000000000007';
 
