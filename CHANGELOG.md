@@ -149,6 +149,16 @@ in the git log and PR descriptions.
   Images are unaffected: they inline as native image blocks under their own
   ceilings. (issue #30, PR #12)
 
+- **A tool given an id Discord doesn't know says what that means.** Discord
+  answers an unknown or unreachable id with two words ("Unknown Channel",
+  "Unknown Message", "Unknown User", "Missing Access"). The tool error now
+  keeps them and adds what they mean for the id that was passed: that it
+  may be mistyped or remembered rather than copied, or the thing deleted or
+  out of the bot's reach. It also says where to copy a real id from
+  (`list_channels`, `fetch_history`, a message's source or author,
+  `list_channel_members`), or to pass a `#name`, which lists its matches
+  when several channels share it. Other errors are unchanged.
+
 ### Fixed
 
 - **Ghost "[message edited]" events.** Discord emits `messageUpdate` for more

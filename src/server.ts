@@ -59,6 +59,7 @@ import {
   looksLikeExplicitName,
   type AddressingPath,
 } from './channel-names.js';
+import { explainDiscordError } from './discord-errors.js';
 import { saveFiltersFile, loadFiltersFile, DiscordFiltersState, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1389,7 +1390,7 @@ export class DiscordMcplServer {
       };
     } catch (err) {
       return {
-        content: [textContent((err as Error).message)],
+        content: [textContent(explainDiscordError(err, args))],
         isError: true,
       };
     }
