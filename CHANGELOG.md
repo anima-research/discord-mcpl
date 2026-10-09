@@ -25,14 +25,14 @@ in the git log and PR descriptions.
   reported as unknown at the next start. State lives in
   `$XDG_STATE_HOME/discord-mcpl/<bot user id>/dm-notices.json` (override:
   `DISCORD_DM_NOTICES_FILE`) and holds no message bodies. It keeps each
-  sender for 7 days after their latest refusal, and nothing is written while
-  notices are off; turning them on starts from that moment, so nothing
-  refused while they were off is notified later. If it can't be read
-  or written, notices are suspended. The agent turns notices on and off with
-  `filters_update {setDmNotice}`, which works with or without a filters file.
-  `filters_get` shows the setting and whether the state is persisted. Every
-  refused DM leaves one operator log line (sender id, message id, notice
-  outcome) without its body.
+  sender for 7 days after their latest refusal or notice, and a refusal
+  while notices are off writes nothing; turning them on starts from that
+  moment, so nothing refused while they were off is notified later. If it
+  can't be read or written, notices are suspended. The agent turns notices
+  on and off with `filters_update {setDmNotice}`, which works with or
+  without a filters file. `filters_get` shows the setting and whether the
+  state is persisted. Every refused DM leaves one operator log line (sender
+  id, message id, notice outcome) without its body.
 
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
   advertises `eventCoalescing`, a message create carries its stable subject

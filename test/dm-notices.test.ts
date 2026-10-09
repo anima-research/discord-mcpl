@@ -195,6 +195,20 @@ describe('DM notice state', () => {
     assert.equal(await state.decide(idAt(T0 + 1000), 'old-friend'), 'before-floor', "a dropped sender's old message still never notifies");
   });
 
+  it("keeps a dropped sender's old message unnotified when the clock steps back after the prune", async (t) => {
+    // The floor recomputed from now covers a clock that only moves forward;
+    // the persisted floor is what holds after an NTP step or a VM restore.
+    const f = fixture(t);
+    const state = f.make();
+    await f.openOn(state);
+    assert.equal(await state.decide(idAt(T0 + 1000), 'old-friend'), 'notify');
+    const later = T0 + 1000 + DM_NOTICE_RETENTION_MS + 1;
+    f.clock.set(later);
+    assert.equal(await state.decide(idAt(later), 'third'), 'notify', 'drops old-friend');
+    f.clock.set(later - 2 * 24 * HOUR);
+    assert.equal(await state.decide(idAt(T0 + 1000), 'old-friend'), 'before-floor');
+  });
+
   it('is off until the resident turns it on, so a new state notifies no one', async (t) => {
     const f = fixture(t);
     const state = f.make();
