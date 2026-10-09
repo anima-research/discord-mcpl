@@ -19,10 +19,11 @@ describe('explainDiscordError', () => {
   it('says what an unknown channel id means, names the id, and gives the cures', () => {
     const text = explainDiscordError(discordError('Unknown Channel', 10003, 404), { channelId: '111111111111111111' });
     assert.match(text, /^Unknown Channel\n\n/, "Discord's own words come first");
-    assert.match(text, /No channel 111111111111111111 is visible to this connection\. Re-send with the channel's name/,
+    assert.match(text, /No channel 111111111111111111 is visible to this connection\. For a server channel, re-send with its name/,
       'the name path, which lists its candidates, is the first cure');
+    assert.match(text, /A thread or DM has no name route: copy its id from where it appeared/,
+      'a thread or DM is never sent back to a name that could match another channel');
     assert.match(text, /remembered rather than copied/);
-    assert.match(text, /list_channels/);
   });
 
   it('explains an unknown message, an unknown user and missing access the same way', () => {
@@ -57,6 +58,21 @@ describe('explainDiscordError', () => {
 });
 
 describe('the tool chokepoint', () => {
+  it('list_emojis with an unknown guild id passes Discord\'s error through to be explained', async (t) => {
+    const { DiscordAdapter } = await import('../src/discord-adapter.js');
+    const adapter = new DiscordAdapter({ token: 'unused' });
+    const client = (adapter as unknown as { client: { guilds: { fetch: (id: string) => Promise<unknown> }; destroy(): void } }).client;
+    t.after(() => client.destroy());
+    client.guilds.fetch = async () => { throw discordError('Unknown Guild', 10004, 404); };
+    const server = new DiscordMcplServer(adapter) as unknown as {
+      handleToolCall(n: string, a: Record<string, unknown>): Promise<{ isError?: boolean; content: Array<{ text?: string }> }>;
+    };
+    const r = await server.handleToolCall('list_emojis', { guildId: '999999999999999999' });
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text ?? '', /^Unknown Guild\n\nNo server 999999999999999999 is visible to this connection/);
+    assert.match(r.content[0].text ?? '', /list_guilds/);
+  });
+
   it('a send to an unknown channel id returns the explanation as the tool error', async () => {
     const adapter = {
       sendMessage: async () => { throw discordError('Unknown Channel', 10003, 404); },

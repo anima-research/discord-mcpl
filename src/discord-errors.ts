@@ -33,12 +33,17 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>)
   switch (code) {
     case UNKNOWN_CHANNEL:
       // The name path is the cure that already lists candidates: it either
-      // resolves or returns every channel it matches, qualified.
+      // resolves or returns every channel it matches, qualified. It covers
+      // server channels only (resolveChannelRef leaves out threads,
+      // categories and DMs), so a thread or DM is pointed at its id's
+      // sources instead: a thread's name retried could match a same-named
+      // channel.
       why =
-        `${channel ? `No channel ${channel}` : 'No such channel'} is visible to this connection. Re-send ` +
-        'with the channel\'s name instead (#name, or #name (Server)): a name either resolves or lists every ' +
-        'channel it matches. The id may be mistyped or remembered rather than copied, or the channel ' +
-        "deleted; list_channels and a message's source show real ids.";
+        `${channel ? `No channel ${channel}` : 'No such channel'} is visible to this connection. For a ` +
+        'server channel, re-send with its name instead (#name, or #name (Server)): a name either resolves ' +
+        'or lists every channel it matches. A thread or DM has no name route: copy its id from where it ' +
+        "appeared, a message's source or fetch_history. The id may be mistyped or remembered rather than " +
+        'copied, or the channel deleted.';
       break;
     case UNKNOWN_GUILD:
       why =
