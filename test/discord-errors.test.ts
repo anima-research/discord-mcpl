@@ -21,7 +21,7 @@ describe('explainDiscordError', () => {
     assert.match(text, /^Unknown Channel\n\n/, "Discord's own words come first");
     assert.match(text, /No channel 111111111111111111 is visible to this connection\. For a server channel, re-send with its name/,
       'the name path, which lists its candidates, is the first cure');
-    assert.match(text, /A thread or DM has no name route: copy its id from where it appeared/,
+    assert.match(text, /A thread or DM has no name route: copy its id from a message that arrived there/,
       'a thread or DM is never sent back to a name that could match another channel');
     assert.match(text, /remembered rather than copied/);
   });

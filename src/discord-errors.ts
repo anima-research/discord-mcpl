@@ -41,8 +41,8 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>)
       why =
         `${channel ? `No channel ${channel}` : 'No such channel'} is visible to this connection. For a ` +
         'server channel, re-send with its name instead (#name, or #name (Server)): a name either resolves ' +
-        'or lists every channel it matches. A thread or DM has no name route: copy its id from where it ' +
-        "appeared, a message's source or fetch_history. The id may be mistyped or remembered rather than " +
+        'or lists every channel it matches. A thread or DM has no name route: copy its id from a message ' +
+        'that arrived there, whose source names it. The id may be mistyped or remembered rather than ' +
         'copied, or the channel deleted.';
       break;
     case UNKNOWN_GUILD:
