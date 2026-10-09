@@ -160,6 +160,8 @@ describe('an invisible character in a value is spelled out, as the host does it 
       ['\u034fthread spoofed', '"\\u034fthread spoofed"'],
       ['\ufe0fthread spoofed', '"\\ufe0fthread spoofed"'],
       ['a\u200db', '"a\\u200db"'],
+      // a format control that isn't default-ignorable (interlinear annotation)
+      ['\ufff9thread x', '"\\ufff9thread x"'],
       // outside the BMP: one escape per UTF-16 unit
       ['a\u{e0041}b', '"a\\udb40\\udc41b"'],
     ];

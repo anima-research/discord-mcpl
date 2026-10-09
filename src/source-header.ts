@@ -29,37 +29,36 @@
  * the same rule as the framework's).
  */
 
-/** An emoji written as a sequence: a pictograph, optionally modified or
- *  given a presentation selector, and others joined to it by U+200D. */
-const EMOJI_SEQ =
-  /\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|[\u{FE0E}\u{FE0F}])?(?:\u{200D}\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|[\u{FE0E}\u{FE0F}])?)*/u;
-
-/** Invisible: a default-ignorable code point, or a space other than U+0020. */
-const INVISIBLE = /\p{Default_Ignorable_Code_Point}|(?! )\p{Zs}/u;
-
+/**
+ * Characters a reader can't see: every format character (`\p{Cf}`: zero-width
+ * characters, bidi overrides and isolates) and every default-ignorable code
+ * point, which adds fillers that are letters (U+3164, U+115F, U+1160, U+FFA0),
+ * the combining grapheme joiner and the variation selectors. A visible
+ * look-alike, such as U+2800 BRAILLE PATTERN BLANK, stays as it is. The
+ * constants below are the framework's (inbound-source.ts), character for
+ * character, so the two renderings keep one rule.
+ */
+const INVISIBLE = '\\p{Cf}\\p{Default_Ignorable_Code_Point}';
 // eslint-disable-next-line no-control-regex
 const STRUCTURAL = /[[\]\u00b7"\\\u0000-\u001f\u007f-\u009f\u2028\u2029]|\s\/\s/u;
-
-/** Spelled out inside quotes: DEL, the C1 controls and U+2028/2029 (which
- *  JSON.stringify leaves literal), and every invisible character outside an
- *  emoji sequence. The sequence alternative comes first, so its own joiners
- *  and selectors are kept. */
-const ESCAPED = new RegExp(
-  `(${EMOJI_SEQ.source})|[\\u007f-\\u009f\\u2028\\u2029]|${INVISIBLE.source}`,
-  'gu',
-);
-const EMOJI_SEQS = new RegExp(EMOJI_SEQ.source, 'gu');
+/** An invisible character or a non-ASCII space; tested with emoji sequences taken out. */
+const UNSEEN_OUTSIDE_EMOJI = new RegExp(`[${INVISIBLE}]|(?! )\\p{Zs}`, 'u');
+const UNSEEN = new RegExp(`[\\u007f-\\u009f\\u2028\\u2029${INVISIBLE}]|(?! )\\p{Zs}`, 'gu');
+const INVISIBLE_RUN = new RegExp(`[${INVISIBLE}]`, 'gu');
+/** A well-formed emoji sequence: an emoji with an optional skin tone or presentation selector, joined to more by ZWJ. */
+const EMOJI_SEQUENCE = /\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|[\u{FE0E}\u{FE0F}])?(?:\u{200D}\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|[\u{FE0E}\u{FE0F}])?)*/gu;
+/** In a quoted value: an emoji sequence, kept as it is, or a character to escape. */
+const QUOTED_ESCAPES = new RegExp(`(${EMOJI_SEQUENCE.source})|${UNSEEN.source}`, 'gu');
 
 /** A header field: quoted when it could read as structure, else as is. */
 export function headerValue(value: string): string {
-  return STRUCTURAL.test(value) || INVISIBLE.test(value.replace(EMOJI_SEQS, '')) ? quoted(value) : value;
+  return STRUCTURAL.test(value) || UNSEEN_OUTSIDE_EMOJI.test(value.replace(EMOJI_SEQUENCE, '')) ? quoted(value) : value;
 }
 
 /** The label: also quoted when it begins with one of the header's own words,
- *  read with every default-ignorable character removed. */
+ *  looked for with invisible characters taken out. */
 export function labelValue(label: string): string {
-  const visible = label.replace(/\p{Default_Ignorable_Code_Point}/gu, '');
-  return /^\s*(?:thread|reply\s+to|unscoped)(?:\s|$)/i.test(visible) ? quoted(label) : headerValue(label);
+  return /^\s*(?:thread|reply\s+to|unscoped)(?:\s|$)/i.test(label.replace(INVISIBLE_RUN, '')) ? quoted(label) : headerValue(label);
 }
 
 /** The standalone header: `[source: <canonical id> · <label>]`, the label left out when unknown. */
@@ -69,14 +68,14 @@ export function renderSourceHeader(channelId: string, label?: string | null): st
 
 /** A value as a quoted, escaped string literal that always stays on one line. */
 function quoted(value: string): string {
-  // JSON.stringify escapes the C0 controls, quotes and backslashes. Escape
-  // the rest of ESCAPED visibly too, one \uXXXX per UTF-16 unit.
-  return JSON.stringify(value).replace(ESCAPED, (match: string, emoji: string | undefined) =>
-    emoji !== undefined
-      ? emoji
-      : match
-          .split('')
-          .map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)
-          .join(''),
+  // JSON.stringify escapes the C0 controls, quotes and backslashes, but
+  // leaves DEL, the C1 controls (U+0085 NEL breaks a line), U+2028 / U+2029,
+  // invisible characters and non-ASCII spaces literal: escape those visibly
+  // too, per UTF-16 unit, so a quoted bidi override can't reorder what
+  // follows it. An emoji sequence stays as it is. JSON.parse still gives the
+  // value back.
+  return JSON.stringify(value).replace(
+    QUOTED_ESCAPES,
+    (c, emoji?: string) => emoji ?? [...Array(c.length).keys()].map((i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, '0')}`).join(''),
   );
 }
