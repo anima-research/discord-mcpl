@@ -19,10 +19,10 @@ describe('explainDiscordError', () => {
   it('says what an unknown channel id means, names the id, and gives the cures', () => {
     const text = explainDiscordError(discordError('Unknown Channel', 10003, 404), { channelId: '111111111111111111' });
     assert.match(text, /^Unknown Channel\n\n/, "Discord's own words come first");
-    assert.match(text, /No channel 111111111111111111 is visible to this connection/);
+    assert.match(text, /No channel 111111111111111111 is visible to this connection\. Re-send with the channel's name/,
+      'the name path, which lists its candidates, is the first cure');
     assert.match(text, /remembered rather than copied/);
     assert.match(text, /list_channels/);
-    assert.match(text, /#name/);
   });
 
   it('explains an unknown message, an unknown user and missing access the same way', () => {
@@ -30,10 +30,18 @@ describe('explainDiscordError', () => {
     assert.match(msg, /No message 222 is visible in channel 1/);
     assert.match(msg, /fetch_history/);
     const user = explainDiscordError(discordError('Unknown User', 10013, 404), { userId: '333' });
-    assert.match(user, /No user 333 is known to Discord/);
-    assert.match(user, /@username/);
+    assert.match(user, /No user 333 is known to Discord\. Re-send with their @username/);
     const access = explainDiscordError(discordError('Missing Access', 50001, 403), { channelId: '444' });
     assert.match(access, /^Missing Access\n\nThis bot can't reach channel 444/);
+  });
+
+  it('names a server for an unknown guild id, and for missing access on a call aimed at a server', () => {
+    const guild = explainDiscordError(discordError('Unknown Guild', 10004, 404), { guildId: '555' });
+    assert.match(guild, /^Unknown Guild\n\nNo server 555 is visible to this connection/);
+    assert.match(guild, /list_guilds/);
+    const access = explainDiscordError(discordError('Missing Access', 50001, 403), { guildId: '666' });
+    assert.match(access, /^Missing Access\n\nThis bot can't reach server 666/);
+    assert.match(access, /list_guilds/);
   });
 
   it('keeps what a tool path added to the message, and leaves every other error as it was', () => {

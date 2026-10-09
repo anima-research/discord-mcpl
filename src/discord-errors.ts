@@ -12,11 +12,12 @@
  *
  * The explanation is appended after the error's own text, so Discord's words
  * and anything a tool path added to them (such as where a send was aimed)
- * stay as they were. Errors other than these four pass through unchanged.
+ * stay as they were. Errors other than these five pass through unchanged.
  */
 
 /** Discord's JSON error codes for an id it can't resolve, or can't reach. */
 const UNKNOWN_CHANNEL = 10003;
+const UNKNOWN_GUILD = 10004;
 const UNKNOWN_MESSAGE = 10008;
 const UNKNOWN_USER = 10013;
 const MISSING_ACCESS = 50001;
@@ -27,14 +28,23 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>)
   const given = (key: string): string | undefined =>
     typeof args[key] === 'string' && (args[key] as string).trim() ? (args[key] as string).trim() : undefined;
   const channel = given('channelId');
+  const guild = given('guildId');
   let why: string | undefined;
   switch (code) {
     case UNKNOWN_CHANNEL:
+      // The name path is the cure that already lists candidates: it either
+      // resolves or returns every channel it matches, qualified.
       why =
-        `${channel ? `No channel ${channel}` : 'No such channel'} is visible to this connection: the id may be ` +
-        'mistyped or remembered rather than copied, or the channel deleted. Copy a channel id from ' +
-        "list_channels or from a message's source, or pass the channel as #name (a name that matches " +
-        'several channels lists them).';
+        `${channel ? `No channel ${channel}` : 'No such channel'} is visible to this connection. Re-send ` +
+        'with the channel\'s name instead (#name, or #name (Server)): a name either resolves or lists every ' +
+        'channel it matches. The id may be mistyped or remembered rather than copied, or the channel ' +
+        "deleted; list_channels and a message's source show real ids.";
+      break;
+    case UNKNOWN_GUILD:
+      why =
+        `${guild ? `No server ${guild}` : 'No such server'} is visible to this connection: the id may be ` +
+        'mistyped or remembered rather than copied, or the bot no longer in it. list_guilds shows the ' +
+        'servers this bot is in, with their ids.';
       break;
     case UNKNOWN_MESSAGE:
       why =
@@ -45,14 +55,19 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>)
       break;
     case UNKNOWN_USER:
       why =
-        `${given('userId') ? `No user ${given('userId')}` : 'No such user'} is known to Discord: the id may be ` +
-        "mistyped or remembered rather than copied. Copy a user id from a message's author or from " +
-        'list_channel_members, or pass their @username.';
+        `${given('userId') ? `No user ${given('userId')}` : 'No such user'} is known to Discord. Re-send with ` +
+        'their @username or display name instead. The id may be mistyped or remembered rather than copied; ' +
+        "a message's author and list_channel_members show real ids.";
       break;
     case MISSING_ACCESS:
-      why =
-        `This bot can't reach ${channel ? `channel ${channel}` : 'what this call needs'}: it isn't in that ` +
-        "server, or the channel's permissions leave it out. list_channels shows the channels it can use.";
+      // Named by what the call was aimed at: a channel, else a server.
+      why = channel
+        ? `This bot can't reach channel ${channel}: it isn't in that server, or the channel's permissions ` +
+          'leave it out. list_channels shows the channels it can use.'
+        : guild
+          ? `This bot can't reach server ${guild}: it isn't in it, or can't see what this call needs there. ` +
+            'list_guilds shows the servers it is in.'
+          : "This bot can't reach what this call needs: it isn't in that server, or permissions leave it out.";
       break;
   }
   return why ? `${message}\n\n${why}` : message;
