@@ -2918,9 +2918,6 @@ export class DiscordMcplServer {
   });
   /** The notice state's opening, once its path was known. */
   private dmNoticesOpening: Promise<void> | null = null;
-  /** When this server began handling refusals: the floor for a notice state
-   *  created now or later. No refusal is handled before the server exists. */
-  private readonly dmNoticeBoundary = Date.now();
 
   /** Start handling refused DMs, whether or not a host is connected:
    *  index.ts calls this right after constructing the server, as it calls
@@ -2940,9 +2937,7 @@ export class DiscordMcplServer {
       const override = process.env.DISCORD_DM_NOTICES_FILE?.trim();
       const botId = this.discord.botUserId;
       if (override || botId) {
-        this.dmNoticesOpening = this.dmNotices.open(resolveDmNoticesPath(botId ?? '', process.env), {
-          floorAt: this.dmNoticeBoundary,
-        });
+        this.dmNoticesOpening = this.dmNotices.open(resolveDmNoticesPath(botId ?? '', process.env));
       }
     }
     return this.dmNotices;

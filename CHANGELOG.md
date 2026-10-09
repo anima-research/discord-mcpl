@@ -24,7 +24,10 @@ in the git log and PR descriptions.
   failed, unknown) is recorded after, and an attempt interrupted in between is
   reported as unknown at the next start. State lives in
   `$XDG_STATE_HOME/discord-mcpl/<bot user id>/dm-notices.json` (override:
-  `DISCORD_DM_NOTICES_FILE`) and holds no message bodies. If it can't be read
+  `DISCORD_DM_NOTICES_FILE`) and holds no message bodies. It keeps each
+  sender for 7 days after their latest refusal, and nothing is written while
+  notices are off; turning them on starts from that moment, so nothing
+  refused while they were off is notified later. If it can't be read
   or written, notices are suspended. The agent turns notices on and off with
   `filters_update {setDmNotice}`, which works with or without a filters file.
   `filters_get` shows the setting and whether the state is persisted. Every

@@ -8,13 +8,12 @@
  * DM_NOTICE_HOURLY_CEILING in any hour across all senders, through
  * restarts, reconnect catch-up and duplicate gateway events:
  *
- *   - floorId: when the connector began handling refusals with this state,
- *     as a Discord snowflake. A message older than that never notifies, on
- *     any path: a gateway event can carry an older message as well as the
- *     catch-up sweep can, and deploying this mustn't notify everyone whose
- *     DMs were refused before. The server captures the boundary when it is
- *     constructed, before it handles any refusal, so a state file created
- *     later still uses it.
+ *   - floorId: a Discord snowflake. A message older than it never
+ *     notifies, on any path: a gateway event can carry an older message as
+ *     well as the catch-up sweep can. It moves to the moment notices are
+ *     turned on, so nothing refused before then notifies later: while they
+ *     are off nothing is recorded, and a new state starts off. It also
+ *     follows the retention horizon below.
  *   - per sender, lastHandledId: the newest refused message already handled.
  *     A message whose id isn't newer never notifies again.
  *   - per sender, lastNotice: the last notice's message, when it was
@@ -33,6 +32,12 @@
  * refused DM gets no notice; it is still handled, so it never notifies
  * later.
  *
+ * A sender is kept for DM_NOTICE_RETENTION_MS after their latest refusal
+ * or notice, then dropped, and the floor follows that horizon, so a message
+ * from before it can't notify once its sender is gone. The file holds the
+ * senders refused within the retention while notices were on, not everyone
+ * ever refused.
+ *
  * The same file holds the resident's on/off setting for notices. It is off
  * until the resident turns it on with filters_update setDmNotice: a bot
  * account shouldn't start sending text to strangers because the connector was
@@ -46,8 +51,8 @@
  * The file is read and written asynchronously, so a slow disk never stalls
  * the gateway, and the state's operations (open, decide, recordOutcome,
  * setEnabled) run one at a time, in the order they were called: each sees the
- * state the one before it left. Every change rewrites the whole file, which
- * holds one small entry per sender ever refused.
+ * state the one before it left. Every change rewrites the whole file. While
+ * notices are off, a refusal changes nothing, so nothing is written.
  */
 import { mkdir, open, readFile, rename, type FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -58,6 +63,10 @@ export const DM_NOTICE_TEXT =
   'its configured contacts. It sends this notice at most once per 24 hours.';
 
 export const DM_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** How long a sender is kept after their latest refusal or notice. Longer
+ *  than the 24-hour window, which it must outlast. */
+export const DM_NOTICE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** At most this many notices in any hour, across all senders. */
 export const DM_NOTICE_HOURLY_CEILING = 10;
@@ -71,6 +80,13 @@ export function snowflakeAt(ms: number): string {
   const offset = BigInt(Math.floor(ms)) - DISCORD_EPOCH_MS;
   return (offset > 0n ? offset << 22n : 0n).toString();
 }
+
+/** When Discord assigned a snowflake, as epoch ms. */
+function snowflakeTime(id: string): number {
+  return Number((BigInt(id) >> 22n) + DISCORD_EPOCH_MS);
+}
+
+const laterSnowflake = (a: string, b: string): string => (BigInt(a) >= BigInt(b) ? a : b);
 
 /** Where the notice state lives: DISCORD_DM_NOTICES_FILE when set, else
  *  $XDG_STATE_HOME/discord-mcpl/<bot user id>/dm-notices.json, falling back
@@ -171,7 +187,6 @@ export class DmNoticeState {
   /** The state as the file holds it (see commit), or null while it can't be read. */
   private file: NoticeFile | null = null;
   private path: string | null = null;
-  private floorAt: number | undefined;
   private error: string | null = 'not opened yet (the bot user id is not known)';
   /** Settles when the last operation called so far has finished. */
   private tail: Promise<void> = Promise.resolve();
@@ -203,17 +218,15 @@ export class DmNoticeState {
     return run;
   }
 
-  /** Open the state at `path`. A new file gets its floor at `floorAt` (the
-   *  caller's startup boundary, epoch ms), else now; an existing file keeps
-   *  its own. An unreadable or invalid file is left untouched and suspends
-   *  notices until an operator repairs or removes it; the next decision or
-   *  setting change tries it again. */
-  open(path: string, opts: { floorAt?: number } = {}): Promise<void> {
-    return this.serially(() => this.load(path, opts.floorAt));
+  /** Open the state at `path`, creating it (notices off) if there is none.
+   *  An unreadable or invalid file is left untouched and suspends notices
+   *  until an operator repairs or removes it; the next decision or setting
+   *  change tries it again. */
+  open(path: string): Promise<void> {
+    return this.serially(() => this.load(path));
   }
 
-  private async load(path: string, floorAt?: number): Promise<void> {
-    this.floorAt = floorAt ?? this.floorAt;
+  private async load(path: string): Promise<void> {
     this.path = path;
     this.file = null;
     let text: string | null = null;
@@ -226,7 +239,7 @@ export class DmNoticeState {
       }
     }
     if (text === null) {
-      await this.commit({ version: 1, floorId: snowflakeAt(this.floorAt ?? this.now()), enabled: false, senders: {} });
+      await this.commit({ version: 1, floorId: snowflakeAt(this.now()), enabled: false, senders: {} });
       return;
     }
     let parsed: NoticeFile | null = null;
@@ -299,7 +312,12 @@ export class DmNoticeState {
     return this.serially(async () => {
       if (!this.file && this.path) await this.load(this.path);
       if (!this.file) throw new Error(`DM notice state is unavailable: ${this.error ?? 'no path'}`);
-      const next: NoticeFile = { ...this.file, enabled };
+      // Refusals while off weren't recorded, so turning notices on moves the
+      // floor to now: nothing refused before this moment ever notifies.
+      const floorId = enabled && !this.file.enabled
+        ? laterSnowflake(this.file.floorId, snowflakeAt(this.now()))
+        : this.file.floorId;
+      const next: NoticeFile = { ...this.file, enabled, floorId };
       const error = await this.commit(next);
       if (error && this.file !== next) throw new Error(`could not save the DM notice setting: ${error}`);
       return error;
@@ -307,12 +325,12 @@ export class DmNoticeState {
   }
 
   /**
-   * Decide one refused DM's notice and record it durably. Every refusal the
-   * state can see advances its sender's lastHandledId, silenced or not, so a
-   * later catch-up of the same message can't notify. A `notify` result is
-   * returned only after the reservation is durable; while the file can't be
-   * written durably, notices are suspended (checked again on the next
-   * refusal).
+   * Decide one refused DM's notice and record it durably. While notices are
+   * on, every refusal advances its sender's lastHandledId, so a later
+   * catch-up of the same message can't notify; while they are off, nothing
+   * is recorded (see setEnabled's floor). A `notify` result is returned only
+   * after the reservation is durable; while the file can't be written
+   * durably, notices are suspended (checked again on the next refusal).
    */
   decide(messageId: string, authorId: string): Promise<DmNoticeDecision> {
     return this.serially(async () => {
@@ -320,32 +338,33 @@ export class DmNoticeState {
       if (!this.file && this.path) await this.load(this.path);
       const file = this.file;
       if (!file) return 'suspended';
-      const silenced = !file.enabled;
-      if (!SNOWFLAKE_RE.test(messageId) || BigInt(messageId) < BigInt(file.floorId)) return 'before-floor';
+      const now = this.now();
+      const horizon = now - DM_NOTICE_RETENTION_MS;
+      const floorId = laterSnowflake(file.floorId, snowflakeAt(horizon));
+      if (!SNOWFLAKE_RE.test(messageId) || BigInt(messageId) < BigInt(floorId)) return 'before-floor';
       const prev = file.senders[authorId];
       if (prev && BigInt(messageId) <= BigInt(prev.lastHandledId)) return 'already-handled';
+      if (!file.enabled) return 'silenced';
 
-      const now = this.now();
       const inWindow = prev?.lastNotice !== undefined && now - prev.lastNotice.at < DM_NOTICE_WINDOW_MS;
       const atCeiling =
-        !silenced &&
         !inWindow &&
         Object.values(file.senders).filter(
           (s) => s.lastNotice !== undefined && now - s.lastNotice.at < DM_NOTICE_CEILING_WINDOW_MS,
         ).length >= DM_NOTICE_HOURLY_CEILING;
-      const reserve = !silenced && !inWindow && !atCeiling;
+      const reserve = !inWindow && !atCeiling;
       const lastNotice: LastNotice | undefined = reserve
         ? { messageId, at: now, outcome: 'pending' }
         : prev?.lastNotice;
-      const next: NoticeFile = {
-        ...file,
-        senders: {
-          ...file.senders,
-          [authorId]: { lastHandledId: messageId, ...(lastNotice ? { lastNotice } : {}) },
-        },
-      };
-      if (await this.commit(next)) return silenced ? 'silenced' : 'suspended';
-      if (silenced) return 'silenced';
+      // Senders quiet since the horizon are dropped; the floor that moved
+      // with it keeps their older messages from notifying.
+      const senders: Record<string, SenderState> = {};
+      for (const [id, s] of Object.entries(file.senders)) {
+        if (Math.max(snowflakeTime(s.lastHandledId), s.lastNotice?.at ?? -Infinity) >= horizon) senders[id] = s;
+      }
+      senders[authorId] = { lastHandledId: messageId, ...(lastNotice ? { lastNotice } : {}) };
+      const next: NoticeFile = { ...file, floorId, senders };
+      if (await this.commit(next)) return 'suspended';
       if (reserve) return 'notify';
       return inWindow ? 'rate-limited' : 'ceiling-reached';
     });

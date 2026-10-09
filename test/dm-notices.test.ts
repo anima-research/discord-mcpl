@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import {
   DM_NOTICE_CEILING_WINDOW_MS,
   DM_NOTICE_HOURLY_CEILING,
+  DM_NOTICE_RETENTION_MS,
   DM_NOTICE_WINDOW_MS,
   DmNoticeState,
   resolveDmNoticesPath,
@@ -43,8 +44,8 @@ function fixture(t: TestContext, start = T0) {
   const onDisk = () => JSON.parse(readFileSync(path, 'utf-8'));
   /** Open the state and turn notices on, as a resident would: they're off
    *  in a new state. */
-  const openOn = async (state: DmNoticeState, opts?: { floorAt?: number }) => {
-    await state.open(path, opts);
+  const openOn = async (state: DmNoticeState) => {
+    await state.open(path);
     assert.equal(await state.setEnabled(true), null);
   };
   return { dir, path, clock, make, interrupted, failing, onDisk, openOn };
@@ -146,28 +147,52 @@ describe('DM notice state', () => {
     assert.equal(await state.decide(idAt(T0 + 1), 'old-correspondent'), 'notify');
   });
 
-  it('gives a state created late the startup boundary as its floor', async (t) => {
-    const f = fixture(t);
-    f.clock.set(T0 + HOUR); // the file is only created now, at first use
-    const state = f.make();
-    await f.openOn(state, { floorAt: T0 });
-    assert.equal(await state.decide(idAt(T0 + 5), 'first-knocker'), 'notify', 'arrived after startup, before the file existed');
-    assert.equal(await state.decide(idAt(T0 - 5), 'earlier-knocker'), 'before-floor', 'arrived before startup');
-    const reopened = f.make();
-    await reopened.open(f.path, { floorAt: T0 + 2 * HOUR });
-    assert.equal(f.onDisk().floorId, snowflakeAt(T0), 'an existing file keeps its own floor');
-  });
-
-  it('records silenced refusals, so lifting the silence does not notify old messages', async (t) => {
+  it('moves the floor to the moment notices are turned on, and only then', async (t) => {
     const f = fixture(t);
     const state = f.make();
     await state.open(f.path);
-    assert.equal(await state.setEnabled(false), null);
+    assert.equal(f.onDisk().floorId, snowflakeAt(T0), "a new state's floor is its creation");
+    f.clock.set(T0 + HOUR);
+    const reopened = f.make();
+    await reopened.open(f.path);
+    assert.equal(f.onDisk().floorId, snowflakeAt(T0), 'an existing file keeps its own floor');
+    await reopened.setEnabled(true);
+    assert.equal(f.onDisk().floorId, snowflakeAt(T0 + HOUR), 'turning notices on moves it to now');
+    f.clock.set(T0 + 2 * HOUR);
+    await reopened.setEnabled(true);
+    assert.equal(f.onDisk().floorId, snowflakeAt(T0 + HOUR), 'turning on what is already on moves nothing');
+    assert.equal(await reopened.decide(idAt(T0 + 5), 'early-knocker'), 'before-floor', 'refused while off');
+    assert.equal(await reopened.decide(idAt(T0 + 2 * HOUR), 'later-knocker'), 'notify');
+  });
+
+  it('writes nothing for a refusal while notices are off, and never notifies it once they are on', async (t) => {
+    const f = fixture(t);
+    const state = f.make();
+    await state.open(f.path);
+    const before = readFileSync(f.path, 'utf-8');
     const m1 = idAt(T0 + 1000);
+    f.clock.set(T0 + 1000);
     assert.equal(await state.decide(m1, 'stranger'), 'silenced');
+    assert.equal(readFileSync(f.path, 'utf-8'), before, 'a refusal while off writes nothing');
+    f.clock.set(T0 + 1500);
     await state.setEnabled(true);
-    assert.equal(await state.decide(m1, 'stranger'), 'already-handled');
+    assert.equal(await state.decide(m1, 'stranger'), 'before-floor', 'refused while off, so it never notifies');
+    f.clock.set(T0 + 2000);
     assert.equal(await state.decide(idAt(T0 + 2000), 'stranger'), 'notify', 'silence reserved no window');
+  });
+
+  it('keeps a sender for the retention after their latest refusal, then drops them, and the floor follows', async (t) => {
+    const f = fixture(t);
+    const state = f.make();
+    await f.openOn(state);
+    assert.equal(await state.decide(idAt(T0 + 1000), 'old-friend'), 'notify');
+    f.clock.set(T0 + DM_NOTICE_RETENTION_MS);
+    assert.equal(await state.decide(idAt(T0 + DM_NOTICE_RETENTION_MS), 'newcomer'), 'notify');
+    assert.ok(f.onDisk().senders['old-friend'], 'kept within the retention');
+    f.clock.set(T0 + 1000 + DM_NOTICE_RETENTION_MS + 1);
+    assert.equal(await state.decide(idAt(T0 + 1000 + DM_NOTICE_RETENTION_MS + 1), 'third'), 'notify');
+    assert.deepEqual(Object.keys(f.onDisk().senders).sort(), ['newcomer', 'third'], 'dropped once past it');
+    assert.equal(await state.decide(idAt(T0 + 1000), 'old-friend'), 'before-floor', "a dropped sender's old message still never notifies");
   });
 
   it('is off until the resident turns it on, so a new state notifies no one', async (t) => {
@@ -176,9 +201,12 @@ describe('DM notice state', () => {
     await state.open(f.path);
     assert.deepEqual([state.status().enabled, state.status().persisted], [false, true], 'off by default, and durable');
     assert.equal(f.onDisk().enabled, false);
+    f.clock.set(T0 + 1000);
     assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'silenced');
+    f.clock.set(T0 + 1500);
     assert.equal(await state.setEnabled(true), null);
-    assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'already-handled', 'a silenced message stays handled');
+    assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'before-floor', 'a message refused while off stays unnotified');
+    f.clock.set(T0 + 2000);
     assert.equal(await state.decide(idAt(T0 + 2000), 'stranger'), 'notify');
   });
 
@@ -324,6 +352,8 @@ describe('DM notice state', () => {
       );
       f.failing.clear();
       assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'silenced');
+      assert.equal(state.status().persisted, false, 'a refusal while off writes nothing, so it confirms nothing');
+      assert.equal(await state.setEnabled(false), null);
       assert.equal(f.onDisk().enabled, false, 'the next write kept the setting the file held');
       assert.equal(state.status().persisted, true, 'that write was durable');
     });
