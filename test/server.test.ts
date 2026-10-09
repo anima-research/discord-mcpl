@@ -351,6 +351,35 @@ describe('DiscordMcplServer', () => {
     await serverPromise;
   });
 
+  it('a notification whose handler throws leaves the server serving requests', async (t) => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcpHandshake(client);
+
+    const errors = t.mock.method(console, 'error', () => {});
+    // The mock adapter has no sendTyping, so this handler throws synchronously.
+    client.sendNotification('channels/typing', { channelId: 'discord:g1:c1', op: 'start' });
+    const answered = await Promise.race([
+      client.sendRequest('tools/list', {}).then(() => true),
+      new Promise<boolean>((resolve) => {
+        const t = setTimeout(() => resolve(false), 3000);
+        (t as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    // Clean up before asserting: a failed assertion ahead of close() would leave
+    // the socket open, and the runner would report the failure but never exit.
+    client.close();
+    await serverPromise;
+
+    assert.equal(answered, true, 'tools/list was answered after the throwing notification');
+    // The throw was logged once, naming the method, with the Error itself so its stack is kept.
+    assert.equal(errors.mock.callCount(), 1);
+    const logged = errors.mock.calls[0].arguments;
+    assert.match(String(logged[0]), /notification channels\/typing failed/);
+    assert.ok(logged[1] instanceof Error, 'the Error itself was logged, not only its message');
+  });
+
   it('tools/list returns tool definitions', async () => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);

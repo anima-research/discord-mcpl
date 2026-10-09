@@ -998,7 +998,17 @@ export class DiscordMcplServer {
         if (msg.type === 'request') {
           await this.handleRequest(msg.request);
         } else {
-          this.handleNotification(msg.notification);
+          // A notification has no reply to carry an error, and one that
+          // throws must not end this loop: every later request would go
+          // unread, and the host would wait each one out as unconfirmed.
+          try {
+            this.handleNotification(msg.notification);
+          } catch (err) {
+            console.error(
+              `[discord-mcpl] notification ${msg.notification.method} failed:`,
+              err,
+            );
+          }
         }
       }
     } catch (err) {
