@@ -151,6 +151,19 @@ in the git log and PR descriptions.
 
 ### Fixed
 
+- **`channels/open` opens exactly the channel it was asked for.** A stale or
+  unknown `channelId` used to fall through to the first registered channel of
+  the same type, so a host could open, subscribe to, and receive history from
+  a different channel than it named. Now every supplied selector (`channelId`,
+  `address`) must name the same registered channel, and a missing, malformed,
+  or contradictory one is refused before any history is fetched or anything
+  is opened. Only a request with no selector at all may pick a channel by
+  type, and only when exactly one fits; otherwise the refusal lists bounded
+  choices. `type`, which MCPL requires, must be a non-empty string on every
+  request and must match the channel opened: a missing or invalid `type` is
+  refused, even beside an exact `channelId` or `address`, rather than read as
+  any type.
+
 - **Ghost "[message edited]" events.** Discord emits `messageUpdate` for more
   than content edits: link-preview / embed refreshes re-send old messages with
   `edited_timestamp` still null. Those reached the agent as fresh edits of
