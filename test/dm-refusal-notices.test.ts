@@ -53,6 +53,10 @@ async function harness(t: TestContext, opts: {
   noticesFile?: 'fresh' | 'unwritable';
   /** Reuse a notice-state path, to model a restart. */
   noticesPath?: string;
+  /** 'on' (the default here) turns notices on at startup, as a resident
+   *  would; 'as-saved' leaves the state's own setting, which is off in a
+   *  new state. */
+  notices?: 'on' | 'as-saved';
   /** Use the adapter's real channel-metadata helpers instead of stubs. */
   realMeta?: boolean;
   /** Send notices through the adapter's real sendDmNotice. */
@@ -156,6 +160,11 @@ async function harness(t: TestContext, opts: {
   // As index.ts does at startup: refusals are handled from here on, and the
   // notice state's floor predates the sweep.
   await server.setupDmRefusals();
+  // Notices are off in a new notice state; most tests here are about what
+  // happens once a resident has turned them on.
+  if ((opts.notices ?? 'on') === 'on' && opts.noticesFile !== 'unwritable') {
+    await server.filtersUpdate({ setDmNotice: true });
+  }
   // Record what the adapter hands the server, then let the server handle it.
   const toServer = (adapter as unknown as { messageHandler?: (m: { authorId: string; content: string }) => void }).messageHandler;
   (adapter as unknown as { messageHandler: (m: { authorId: string; content: string }) => void }).messageHandler = (m) => {
@@ -256,7 +265,7 @@ describe('live refusals', () => {
     const pendingFile = readFileSync(noticesPath, 'utf-8');
 
     writeFileSync(noticesPath, '{ broken');
-    const restarted = await harness(t, { dmUsers: ['friend'], noticesPath }); // opens broken: suspended
+    const restarted = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' }); // opens broken: suspended
     writeFileSync(noticesPath, pendingFile); // an operator repairs it
     restarted.emit('someone-else', { id: freshId(2) });
     await restarted.settle();
@@ -542,27 +551,32 @@ describe('the notice setting', () => {
     t.after(() => rmSync(keep, { recursive: true, force: true }));
     const noticesPath = join(keep, 'dm-notices.json');
 
-    const first = await harness(t, { dmUsers: ['friend'], noticesPath });
+    const first = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' });
     const shown = await first.server.executeToolCall('filters_get', {}) as { dmNotice: { enabled: boolean; persisted: boolean; path: string } };
-    assert.deepEqual([shown.dmNotice.enabled, shown.dmNotice.persisted, shown.dmNotice.path], [true, true, noticesPath]);
-    await assert.rejects(first.server.filtersUpdate({ setDmNotice: false, setDmUsers: ['x'] }), /DISCORD_FILTERS_FILE is not set/);
-    assert.equal(JSON.parse(readFileSync(noticesPath, 'utf-8')).enabled, true, 'a refused filter change applies nothing');
-    const off = await first.server.filtersUpdate({ setDmNotice: false });
-    assert.equal(off.applied.dmNotice, false);
+    assert.deepEqual([shown.dmNotice.enabled, shown.dmNotice.persisted, shown.dmNotice.path], [false, true, noticesPath],
+      'off until the resident turns it on');
+    first.emit('stranger');
+    await first.settle();
+    assert.deepEqual(first.notices, [], 'an upgrade starts no notices');
+    assert.ok(first.logs.some((l) => /sender stranger.*notice silenced/.test(l)));
+    await assert.rejects(first.server.filtersUpdate({ setDmNotice: true, setDmUsers: ['x'] }), /DISCORD_FILTERS_FILE is not set/);
+    assert.equal(JSON.parse(readFileSync(noticesPath, 'utf-8')).enabled, false, 'a refused filter change applies nothing');
+    const on = await first.server.filtersUpdate({ setDmNotice: true });
+    assert.equal(on.applied.dmNotice, true);
     await assert.rejects(first.server.filtersUpdate({ setDmNotice: 'no' }), /true or false/);
     await assert.rejects(first.server.filtersUpdate({ setDmUsers: ['x'] }), /DISCORD_FILTERS_FILE is not set/,
       'whitelist changes still need the filters file');
 
-    const restarted = await harness(t, { dmUsers: ['friend'], noticesPath });
-    restarted.emit('stranger');
-    await restarted.settle();
-    assert.deepEqual(restarted.notices, []);
+    const restarted = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' });
     const again = await restarted.server.executeToolCall('filters_get', {}) as { dmNotice: { enabled: boolean } };
-    assert.equal(again.dmNotice.enabled, false);
-    await restarted.server.filtersUpdate({ setDmNotice: true });
+    assert.equal(again.dmNotice.enabled, true, 'the resident\'s choice survives the restart');
     restarted.emit('stranger');
     await restarted.settle();
     assert.equal(restarted.notices.length, 1);
+    await restarted.server.filtersUpdate({ setDmNotice: false });
+    restarted.emit('another');
+    await restarted.settle();
+    assert.equal(restarted.notices.length, 1, 'and turning it off again holds');
   });
 
   it('works alongside whitelist changes when a filters file is configured, without writing to it', async (t) => {

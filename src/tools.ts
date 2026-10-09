@@ -195,8 +195,8 @@ export const toolDefinitions: ToolDefinition[] = [
       'Show the active event filters: which guilds/channels can deliver events to you ' +
       '(guild whitelist, optional per-guild channel whitelist) and which users may DM you. ' +
       'null means unrestricted. dmNotice says whether senders of refused DMs get an automatic ' +
-      'delivery notice, and whether its once-per-24-hours limit is currently durable (notices are ' +
-      'suspended when it is not). Filters gate delivery only — the bot must also be a ' +
+      'delivery notice (off until you turn it on), and whether its limits are currently durable (notices are ' +
+      'suspended when they are not). Filters gate delivery only — the bot must also be a ' +
       'member of a guild to see it at all. Reports the config plane\'s desired-vs-effective ' +
       'state (live / stale / unavailable — whitelists and suppression share one lifecycle, so ' +
       'a broken filters file makes ALL of them stale together) and reaction-suppression state ' +
@@ -252,8 +252,9 @@ export const toolDefinitions: ToolDefinition[] = [
           type: 'boolean',
           description:
             'Whether a sender whose DM the whitelist refuses gets an automatic delivery notice from this ' +
-            'connection (at most once per 24 hours per sender; it never quotes or forwards their message). ' +
-            'On by default; false drops refused DMs without any notice. Saved with the notice state, so it ' +
+            'connection (at most once per 24 hours per sender, and at most 10 an hour across all senders; ' +
+            'it never quotes or forwards their message). Off by default, so refused DMs are dropped without ' +
+            'any notice until you set it true. Saved with the notice state, so it ' +
             'works and survives restarts even when DISCORD_FILTERS_FILE is not configured. Omit to leave it unchanged.',
         },
       },

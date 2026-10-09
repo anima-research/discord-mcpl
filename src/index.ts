@@ -13,10 +13,11 @@
  *                       (whitelist those channels + their threads only)
  *   DISCORD_DM_USERS  - Optional: Comma-separated user ID whitelist for DMs.
  *                       Nonempty = only listed users; empty/unset = anyone.
- *                       A refused DM is never forwarded; its sender gets an
- *                       automatic delivery notice at most once per 24 hours
- *                       (the agent can turn this off: filters_update
- *                       setDmNotice).
+ *                       A refused DM is never forwarded. The agent can turn
+ *                       on an automatic delivery notice to its sender (off
+ *                       by default; filters_update setDmNotice), sent at
+ *                       most once per 24 hours per sender and 10 an hour
+ *                       across all senders.
  *   DISCORD_DM_NOTICES_FILE - Optional: where that notice's durable state
  *                       lives (per-sender limits and the on/off setting; no
  *                       message bodies). Default:

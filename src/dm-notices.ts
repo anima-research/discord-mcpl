@@ -4,7 +4,8 @@
  * A refused DM is never forwarded to the agent. Without a notice the sender
  * can't tell a contact filter from a resident ignoring them, so the connector
  * tells them once. This module holds the durable per-sender state that keeps
- * the notice to once per message and at most once a day per sender, across
+ * the notice to once per message, at most once a day per sender, and at most
+ * DM_NOTICE_HOURLY_CEILING in any hour across all senders, through
  * restarts, reconnect catch-up and duplicate gateway events:
  *
  *   - floorId: when the connector began handling refusals with this state,
@@ -23,9 +24,20 @@
  *     was interrupted (say, by a crash after dispatch): it becomes unknown,
  *     is reported once, and is never retried.
  *
- * The same file holds the resident's on/off setting for notices (on unless
- * deliberately turned off with filters_update setDmNotice), so the choice
- * survives restarts whether or not a filters file is configured.
+ * The hourly ceiling bounds what a wave of new accounts DMing the bot can
+ * cause: each would get its one notice, an unbounded burst of outbound DMs,
+ * which is the pattern Discord's anti-spam watches bot accounts for. It
+ * counts the senders whose last notice was reserved within the hour. Each
+ * sender has at most one notice a day, so that is every notice reserved
+ * within the hour, durable with the rest of the state. Past the ceiling, a
+ * refused DM gets no notice; it is still handled, so it never notifies
+ * later.
+ *
+ * The same file holds the resident's on/off setting for notices. It is off
+ * until the resident turns it on with filters_update setDmNotice: a bot
+ * account shouldn't start sending text to strangers because the connector was
+ * upgraded, with nobody having chosen it. The choice survives restarts
+ * whether or not a filters file is configured.
  *
  * The state lives in its own file, separate from the filters file. If it
  * can't be read or written, notices are suspended rather than sent without a
@@ -46,6 +58,10 @@ export const DM_NOTICE_TEXT =
   'its configured contacts. It sends this notice at most once per 24 hours.';
 
 export const DM_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** At most this many notices in any hour, across all senders. */
+export const DM_NOTICE_HOURLY_CEILING = 10;
+export const DM_NOTICE_CEILING_WINDOW_MS = 60 * 60 * 1000;
 
 const DISCORD_EPOCH_MS = 1420070400000n;
 const SNOWFLAKE_RE = /^\d{1,20}$/;
@@ -94,7 +110,7 @@ const OUTCOMES = new Set<string>(['pending', 'sent', 'failed', 'unknown']);
 interface NoticeFile {
   version: 1;
   floorId: string;
-  /** The resident's setting: false = refused DMs get no notice. */
+  /** The resident's setting: false (the default) = refused DMs get no notice. */
   enabled: boolean;
   senders: Record<string, SenderState>;
 }
@@ -107,7 +123,8 @@ export type DmNoticeDecision =
   | 'suspended'
   | 'before-floor'
   | 'already-handled'
-  | 'rate-limited';
+  | 'rate-limited'
+  | 'ceiling-reached';
 
 export interface DmNoticeStatus {
   path: string | null;
@@ -209,7 +226,7 @@ export class DmNoticeState {
       }
     }
     if (text === null) {
-      await this.commit({ version: 1, floorId: snowflakeAt(this.floorAt ?? this.now()), enabled: true, senders: {} });
+      await this.commit({ version: 1, floorId: snowflakeAt(this.floorAt ?? this.now()), enabled: false, senders: {} });
       return;
     }
     let parsed: NoticeFile | null = null;
@@ -310,7 +327,13 @@ export class DmNoticeState {
 
       const now = this.now();
       const inWindow = prev?.lastNotice !== undefined && now - prev.lastNotice.at < DM_NOTICE_WINDOW_MS;
-      const reserve = !silenced && !inWindow;
+      const atCeiling =
+        !silenced &&
+        !inWindow &&
+        Object.values(file.senders).filter(
+          (s) => s.lastNotice !== undefined && now - s.lastNotice.at < DM_NOTICE_CEILING_WINDOW_MS,
+        ).length >= DM_NOTICE_HOURLY_CEILING;
+      const reserve = !silenced && !inWindow && !atCeiling;
       const lastNotice: LastNotice | undefined = reserve
         ? { messageId, at: now, outcome: 'pending' }
         : prev?.lastNotice;
@@ -323,7 +346,8 @@ export class DmNoticeState {
       };
       if (await this.commit(next)) return silenced ? 'silenced' : 'suspended';
       if (silenced) return 'silenced';
-      return reserve ? 'notify' : 'rate-limited';
+      if (reserve) return 'notify';
+      return inWindow ? 'rate-limited' : 'ceiling-reached';
     });
   }
 
