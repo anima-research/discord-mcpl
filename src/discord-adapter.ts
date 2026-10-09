@@ -134,9 +134,14 @@ export interface DiscordMessageData {
   guildId: string | null;
   /** Guild name (e.g. "My Server"). `null` for DMs. */
   guildName: string | null;
+  /** The thread the message was posted IN, when it was (Discord threads are
+   *  channels, so this equals `channelId`). Never the thread a message
+   *  started: that is discord.js `message.thread`, a different conversation. */
   threadId?: string;
   /** Thread name when the message is in a thread. */
   threadName?: string;
+  /** Name of the channel a thread hangs off, when the message is in a thread. */
+  threadParentName?: string | null;
   replyToId?: string;
   /** User id of the author of the message this message is in reply to.
    *  Populated for reply messages regardless of whether the sender left
@@ -2012,7 +2017,14 @@ export class DiscordAdapter {
       ? channel.name
       : null;
     const guildName = message.guild?.name ?? null;
-    const threadName = (message.thread as { name?: string } | null)?.name;
+    // A message posted IN a thread: Discord threads are channels, so its
+    // channelId is the thread and its parent is the channel it hangs off.
+    // (`message.thread` is the thread a message STARTED — not where it was
+    // posted, so it must never stand in for this.)
+    const inThread = (message.channel as { isThread?: () => boolean } | null)?.isThread?.() === true;
+    const threadParentName = inThread
+      ? ((message.channel as { parent?: { name?: string } | null }).parent?.name ?? null)
+      : undefined;
     // `cleanContent` resolves <@id>, <@&roleId>, <#channelId> to
     // @username / @role / #channel (with raw-content fallback), forwarded
     // messages carry their body in messageSnapshots, not content, and Discord
@@ -2034,8 +2046,9 @@ export class DiscordAdapter {
       channelName,
       guildId: message.guildId ?? null,
       guildName,
-      threadId: message.thread?.id,
-      threadName,
+      ...(inThread
+        ? { threadId: message.channelId, ...(channelName ? { threadName: channelName } : {}), threadParentName }
+        : {}),
       replyToId: refType === 0 ? (message.reference?.messageId ?? undefined) : undefined,
       // mentions.repliedUser is the User the reply targets — distinct
       // from mentions.users (which only includes them if the sender

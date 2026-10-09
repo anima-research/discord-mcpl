@@ -5,6 +5,16 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Upgrade notes
+
+- **`chat:thread` now marks messages posted in a thread, and no longer marks
+  a message that started one.** A host gate or filter rule keyed on the tag
+  will match different messages after this upgrade: messages inside threads
+  now carry it, forum posts included (a forum post is a thread), and a
+  channel message that spawned a thread no longer does. The old matches were
+  the wrong ones (see "Thread fields name the thread a message was posted
+  in" under Fixed), but a rule tuned to them is worth checking.
+
 ### Added
 
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
@@ -169,6 +179,16 @@ in the git log and PR descriptions.
   `[message edited] <username>: <text>` like a create. Previously the host
   reconstructed a guild channel's edit as `discord:dm:<channelId>` and the
   agent could only guess who had edited.
+- **Thread fields name the thread a message was posted in.** They were read
+  from discord.js `message.thread`, which is the thread a message *started*,
+  so a message that had spawned a thread was tagged `chat:thread`, rendered
+  as `thread "…"`, and sent to the host with that thread's id as its MCPL
+  `threadId`, while messages actually posted in a thread carried none. Now a
+  message posted in a thread is tagged `chat:thread` and located as
+  `[#parent thread "name" …]`, and a thread starter carries no thread
+  fields. MCPL `threadId` (a thread *within* a channel) is no longer sent:
+  a Discord thread is its own channel, already named by `channelId`, so a
+  host keying conversations by thread no longer splits one channel in two.
 - **DM whitelist fails closed on edits.** With `DISCORD_DM_USERS` set, a DM
   edit whose author is unknown (uncached message) was forwarded because the
   check required an author; it is now dropped, like creates.
