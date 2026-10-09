@@ -12,9 +12,9 @@
  * - a value with any character the grammar uses (brackets, the `·` and `/`
  *   separators, quotes, backslashes), any control or line-separator
  *   character, or anything invisible is rendered as a quoted, escaped string
- *   literal. Invisible means a default-ignorable code point (zero-width
- *   characters, bidi overrides and isolates, the Hangul fillers, variation
- *   selectors outside an emoji) or a space other than U+0020: such
+ *   literal. Invisible means a format or default-ignorable character
+ *   (zero-width characters, bidi overrides and isolates, the Hangul fillers,
+ *   variation selectors outside an emoji) or a space other than U+0020: such
  *   characters can hide a header word, reorder the line for a human reader,
  *   or make a lookalike ` / `. The escape spells each one out, so nothing
  *   acts from inside the quotes;
