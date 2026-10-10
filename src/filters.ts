@@ -29,8 +29,8 @@
  * deleted file) as suppression does, so staleness is a property of the
  * plane, not of any one key.
  */
-import { readFileSync, writeFileSync, renameSync, statSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync, statSync, existsSync } from 'node:fs';
+import { writeJsonFile } from './persisted-json.js';
 import { createHash } from 'node:crypto';
 
 export interface DiscordFilters {
@@ -141,12 +141,9 @@ export function loadFiltersFile(path: string): DiscordFilters | null {
   }
 }
 
-/** Atomic write (tmp + rename) so the poller never reads a half-written file. */
+/** Atomic write (tmp + rename) so the poller never reads a half-written file; the file keeps its permissions. */
 export function saveFiltersFile(path: string, filters: DiscordFilters): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(normalizeFilters(filters), null, 2) + '\n');
-  renameSync(tmp, path);
+  writeJsonFile(path, normalizeFilters(filters));
 }
 
 export function filtersFileMtime(path: string): number | null {
