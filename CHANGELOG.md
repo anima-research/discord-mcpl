@@ -157,6 +157,18 @@ in the git log and PR descriptions.
   weeks-old, never-edited messages. Updates are now forwarded only when
   `editedTimestamp` is set and the content actually changed (when the old
   message is cached). Real edits are unaffected.
+- **An unreadable state file no longer loses everything in it at the next
+  save.** The muted channels, the reaction channels and the watermarks are
+  each read once and rewritten whole after every change. When a file
+  couldn't be read, its store started empty, and the next save (one
+  `mute_channel`, one `set_reaction_visibility`, or the next forwarded
+  message for watermarks) overwrote it with only the new entry. Now a file
+  that can't be read, or isn't the shape its store expects, is moved to
+  `<file>.unreadable-<time>` before the store starts empty, and the error
+  log names both paths, so nothing is overwritten. Until the file is
+  restored, the store runs without its entries. Saves now write a temp
+  file and rename it over the old one, as the filters file already did, so
+  a process crash partway through a save can't leave a torn file.
 - **A slash command that fails no longer ends the process.** Slash handlers
   run without being awaited, and their rejections were unhandled. On Node
   15 and later, an unhandled rejection exits the process, so a single late

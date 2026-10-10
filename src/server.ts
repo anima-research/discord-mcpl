@@ -61,8 +61,8 @@ import {
 } from './channel-names.js';
 import { saveFiltersFile, loadFiltersFile, DiscordFiltersState, type DiscordFilters } from './filters.js';
 import { StateTracker } from './state.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { isJsonArray, isJsonObject, readJsonFile, writeJsonFile } from './persisted-json.js';
 import sharp from 'sharp';
 import { dbg } from './debug-log.js';
 
@@ -1914,27 +1914,20 @@ export class DiscordMcplServer {
     if (this.reactionChannelsLoaded) return;
     this.reactionChannelsLoaded = true;
     const path = this.reactionChannelsFile();
-    if (!path || !existsSync(path)) return;
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8'));
-      if (Array.isArray(parsed)) {
-        for (const id of parsed) {
-          if (typeof id === 'string' && id.length > 0) this.reactionChannels.add(id);
-        }
-      }
-      dbg('reaction-channels:loaded', { count: this.reactionChannels.size, path });
-    } catch (err) {
-      console.error('[discord-mcpl] Failed to load reaction channels:', (err as Error).message);
-      dbg('reaction-channels:load-failed', { error: (err as Error).message, path });
+    if (!path) return;
+    const parsed = readJsonFile(path, 'reaction channels', isJsonArray);
+    if (!parsed) return;
+    for (const id of parsed) {
+      if (typeof id === 'string' && id.length > 0) this.reactionChannels.add(id);
     }
+    dbg('reaction-channels:loaded', { count: this.reactionChannels.size, path });
   }
 
   private saveReactionChannels(): void {
     const path = this.reactionChannelsFile();
     if (!path) return; // in-memory mode
     try {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, JSON.stringify([...this.reactionChannels].sort(), null, 2) + '\n');
+      writeJsonFile(path, [...this.reactionChannels].sort());
     } catch (err) {
       console.error('[discord-mcpl] Failed to save reaction channels:', (err as Error).message);
       dbg('reaction-channels:save-failed', { error: (err as Error).message, path });
@@ -1979,24 +1972,18 @@ export class DiscordMcplServer {
     if (this.mutedLoaded) return;
     this.mutedLoaded = true;
     const path = this.mutedFile();
-    if (!path || !existsSync(path)) return;
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8'));
-      if (Array.isArray(parsed)) {
-        for (const id of parsed) if (typeof id === 'string' && id.length > 0) this.mutedChannels.add(id);
-      }
-      dbg('muted:loaded', { count: this.mutedChannels.size, path });
-    } catch (err) {
-      console.error('[discord-mcpl] Failed to load muted channels:', (err as Error).message);
-    }
+    if (!path) return;
+    const parsed = readJsonFile(path, 'muted channels', isJsonArray);
+    if (!parsed) return;
+    for (const id of parsed) if (typeof id === 'string' && id.length > 0) this.mutedChannels.add(id);
+    dbg('muted:loaded', { count: this.mutedChannels.size, path });
   }
 
   private saveMuted(): void {
     const path = this.mutedFile();
     if (!path) return;
     try {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, JSON.stringify([...this.mutedChannels].sort(), null, 2) + '\n');
+      writeJsonFile(path, [...this.mutedChannels].sort());
     } catch (err) {
       console.error('[discord-mcpl] Failed to save muted channels:', (err as Error).message);
     }
@@ -2022,52 +2009,50 @@ export class DiscordMcplServer {
     if (this.watermarkLoaded) return;
     this.watermarkLoaded = true;
     const path = this.watermarkFile();
-    if (!path || !existsSync(path)) return;
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8'));
-      const marks = parsed?.watermarks;
-      if (marks && typeof marks === 'object') {
-        for (const [chan, id] of Object.entries(marks)) {
-          if (typeof chan === 'string' && typeof id === 'string' && id.length > 0) {
-            this.forwardedWatermark.set(chan, id);
-          }
+    if (!path) return;
+    const parsed = readJsonFile(path, 'watermarks', isJsonObject);
+    if (!parsed) return;
+    const marks = parsed.watermarks;
+    if (marks && typeof marks === 'object') {
+      for (const [chan, id] of Object.entries(marks)) {
+        if (typeof chan === 'string' && typeof id === 'string' && id.length > 0) {
+          this.forwardedWatermark.set(chan, id);
         }
       }
-      if (Array.isArray(parsed?.dmChannels)) {
-        for (const id of parsed.dmChannels) {
-          if (typeof id === 'string' && id.length > 0) this.dmChannelIds.add(id);
-        }
-      }
-      const missed = parsed?.missed;
-      if (missed && typeof missed === 'object') {
-        for (const [chan, v] of Object.entries(missed as Record<string, unknown>)) {
-          const e = v as Partial<{
-            anchorId: string;
-            talliedThrough: string;
-            messages: number;
-            characters: number;
-          }>;
-          if (typeof chan === 'string' && chan.length > 0) {
-            this.missedTally.set(chan, {
-              anchorId: typeof e.anchorId === 'string' ? e.anchorId : '',
-              talliedThrough:
-                typeof e.talliedThrough === 'string' ? e.talliedThrough : e.anchorId ?? '',
-              messages: Number.isFinite(e.messages) ? (e.messages as number) : 0,
-              characters: Number.isFinite(e.characters) ? (e.characters as number) : 0,
-            });
-          }
-        }
-      }
-      dbg('watermark:loaded', {
-        channels: this.forwardedWatermark.size,
-        dms: this.dmChannelIds.size,
-        missed: this.missedTally.size,
-        path,
-      });
-    } catch (err) {
-      console.error('[discord-mcpl] Failed to load watermarks:', (err as Error).message);
-      dbg('watermark:load-failed', { error: (err as Error).message, path });
     }
+    if (Array.isArray(parsed.dmChannels)) {
+      for (const id of parsed.dmChannels) {
+        if (typeof id === 'string' && id.length > 0) this.dmChannelIds.add(id);
+      }
+    }
+    const missed = parsed.missed;
+    if (missed && typeof missed === 'object') {
+      for (const [chan, v] of Object.entries(missed as Record<string, unknown>)) {
+        // An entry that isn't an object reads as an empty tally rather than
+        // throwing partway through the load.
+        const e = (v && typeof v === 'object' ? v : {}) as Partial<{
+          anchorId: string;
+          talliedThrough: string;
+          messages: number;
+          characters: number;
+        }>;
+        if (typeof chan === 'string' && chan.length > 0) {
+          this.missedTally.set(chan, {
+            anchorId: typeof e.anchorId === 'string' ? e.anchorId : '',
+            talliedThrough:
+              typeof e.talliedThrough === 'string' ? e.talliedThrough : e.anchorId ?? '',
+            messages: Number.isFinite(e.messages) ? (e.messages as number) : 0,
+            characters: Number.isFinite(e.characters) ? (e.characters as number) : 0,
+          });
+        }
+      }
+    }
+    dbg('watermark:loaded', {
+      channels: this.forwardedWatermark.size,
+      dms: this.dmChannelIds.size,
+      missed: this.missedTally.size,
+      path,
+    });
   }
 
   /** Persist the watermark map + DM channel set. Best-effort; called after
@@ -2076,7 +2061,6 @@ export class DiscordMcplServer {
     const path = this.watermarkFile();
     if (!path) return; // in-memory mode
     try {
-      mkdirSync(dirname(path), { recursive: true });
       const out = {
         watermarks: Object.fromEntries(
           [...this.forwardedWatermark.entries()].sort((a, b) => a[0].localeCompare(b[0])),
@@ -2086,7 +2070,7 @@ export class DiscordMcplServer {
           [...this.missedTally.entries()].sort((a, b) => a[0].localeCompare(b[0])),
         ),
       };
-      writeFileSync(path, JSON.stringify(out, null, 2) + '\n');
+      writeJsonFile(path, out);
     } catch (err) {
       console.error('[discord-mcpl] Failed to save watermarks:', (err as Error).message);
       dbg('watermark:save-failed', { error: (err as Error).message, path });
