@@ -9,10 +9,23 @@
  *
  * Run: node --import tsx --test test/muted-reactions.test.ts
  */
-import { it, type TestContext } from 'node:test';
+import { after, before, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
+
+// The stores' files come from the environment: clear those variables for this
+// file, so a run in a shell that sets them can't overwrite someone's real
+// mutes or opt-ins, and put them back after.
+const STORE_ENV = ['DISCORD_SUBSCRIPTIONS_FILE', 'DISCORD_MUTED_CHANNELS_FILE', 'DISCORD_REACTION_CHANNELS_FILE', 'DISCORD_WATERMARK_FILE'];
+const savedEnv = new Map<string, string | undefined>();
+before(() => { for (const name of STORE_ENV) { savedEnv.set(name, process.env[name]); delete process.env[name]; } });
+after(() => {
+  for (const [name, value] of savedEnv) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 function fixture(t: TestContext) {
   const adapter = new DiscordAdapter({ token: 'unused' });
@@ -26,7 +39,7 @@ function fixture(t: TestContext) {
   server.conn = { sendRequest: async (_m: string, params: unknown) => { pushes.push(params); return {}; } };
   server.mcplEnabled = true;
   (server.enabledFeatureSets as Set<string>).add('discord.messaging');
-  // No persistence files are configured, so each store lives in memory.
+  // With no store files in the environment, each store lives in memory.
   server.subscriptionsLoaded = true;
   server.mutedLoaded = true;
   server.reactionChannelsLoaded = true;
