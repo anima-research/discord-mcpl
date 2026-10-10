@@ -1556,8 +1556,13 @@ export class DiscordMcplServer {
         if (wasNew) this.saveMuted();
         // Muting implies leaving: drop any ambient subscription so the channel
         // stops delivering; it also won't auto-subscribe back in while muted.
+        // Its reaction visibility goes too, as a close drops it
+        // (unsubscribeRawChannel), so unmuting leaves reactions off until
+        // channel_open turns them back on with the rest of ambient traffic.
         this.ensureSubscriptionsLoaded();
         this.subscribedChannels.delete(channelId);
+        this.ensureReactionChannelsLoaded();
+        this.reactionChannels.delete(channelId);
         for (const channel of this.channelManager.getOpen()) {
           if (parseMcplChannelId(channel.id)?.channelId === channelId) this.channelManager.close(channel.id);
         }
@@ -2855,6 +2860,15 @@ export class DiscordMcplServer {
       // match on. Issue #14.
       this.ensureReactionChannelsLoaded();
       if (!this.reactionChannels.has(ev.channelId)) return;
+      // A muted channel delivers nothing, its reactions included, as its
+      // creates, edits and deletes already don't (shouldEnterContext).
+      // mute_channel drops the channel's visibility, but visibility can come
+      // back while it's muted: set_reaction_visibility, or a persisted
+      // opt-in read after a restart. Muting takes precedence.
+      if (this.isChannelMuted(ev.channelId)) {
+        dbg('reaction:drop', { channelId: ev.channelId, messageId: ev.messageId, action: ev.action, reason: 'muted' });
+        return;
+      }
       // Reaction-suppression projection (issue #21): decided before ANY
       // model-visible text or the event id exists, so a suppressed reaction
       // leaves no glyph, name, or token anywhere — the eventId below embeds
