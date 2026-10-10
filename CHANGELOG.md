@@ -7,6 +7,28 @@ in the git log and PR descriptions.
 
 ### Added
 
+- **Self-contained channel provenance on Discord's own renderings** (the
+  Discord side of the host's message-provenance work). `fetch_history` and
+  `fetch_around` items each carry `source` (`[source: <canonical id> ·
+  <label>]`, the host's inbound header grammar minus its host-only server
+  segment), `channelId` (canonical `discord:<guild|dm>:<channel>`) and
+  `channelLabel`, so any message names its channel when read alone.
+  `channels/open` history items add `channelLabel` (the label at fetch) for
+  the host's header. `send_message`, `reply_message` and `send_dm` receipts
+  add the destination actually sent to: canonical `channelId`,
+  `discordChannelId` and `channelLabel`. A failed or uncertain send keeps
+  its own outcome text (a partial report, a timeout, Discord's rejection) and
+  adds `Attempted destination: …`, including a DM resolved before the
+  failure. DMs are named from the registry, inbound DM state or the channel
+  cache, so a fresh outgoing DM has its canonical id too. An unknown label is
+  left out, and the canonical id is authoritative when a label differs. A
+  value that could read as header structure is quoted, as the host quotes
+  it: a label holding brackets, `·`, ` / `, quotes, backslashes or control
+  or line-separator characters, or beginning with `thread`, `reply to` or
+  `unscoped`, becomes an escaped string literal, so a guild, thread or
+  display name can't forge a second attribution, and the header stays one
+  line. `channelLabel` keeps the raw label.
+
 - **RFC-006 event coalescing** (agent-framework #197, mcpl #5). When the host
   advertises `eventCoalescing`, a message create carries its stable subject
   (`coalesce: { key: "message:<id>", initial: true }`, plus an occurrence
