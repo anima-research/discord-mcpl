@@ -138,6 +138,16 @@ in the git log and PR descriptions.
 
 ### Changed
 
+- **Built with TypeScript 7.** The `typescript` dev dependency is now
+  `^7.0.2`, the native compiler. `npm ci` installs its binary for the
+  machine's platform (the lockfile carries the Linux, macOS and Windows
+  builds), and `tsserver` is no longer installed. `tsconfig.json` names the
+  Node types (`"types": ["node"]`), which TypeScript 7 no longer includes on
+  its own. The emitted JavaScript is unchanged. One declaration prints
+  differently: `TOOL_CLASS_VOCABULARY` in `tool-classes.d.ts` quotes its
+  tuple's strings with single quotes. Source maps differ in their
+  `mappings` only, so a stack trace can point at a slightly different
+  column.
 - **Text attachments now inline into context only up to
   `DISCORD_ATTACHMENT_INLINE_MAX_BYTES` (default 5120 bytes)** — previously
   live delivery inlined text attachments up to 256KiB. Over the cap, the
