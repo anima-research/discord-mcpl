@@ -466,9 +466,15 @@ export class VoiceOutput {
     if (!utt.done) this.skipped.add(inferenceId); // drop trailing chunks
     utt.tts?.abort();
     utt.out.end();
+    // An expired receipt means the configured hold elapsed, but Node's timer
+    // wheel runs on the monotonic clock and can fire up to ~1ms early as
+    // measured by Date.now() — floor the staleness signal at maxHoldMs so the
+    // receipt never claims the utterance waited less than the hold it expired
+    // under.
+    const heldMs = Math.max(this.cfg.maxHoldMs ?? 0, Date.now() - utt.queuedAt);
     this.report({
       inferenceId, channelId: utt.channelId, status: 'expired',
-      playedMs: 0, queuedMs: Date.now() - utt.queuedAt, billedChars: utt.billedChars,
+      playedMs: 0, queuedMs: heldMs, billedChars: utt.billedChars,
       voicedText: '', unvoicedText: utt.sentText, estimated: false,
     });
   }
