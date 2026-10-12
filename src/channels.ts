@@ -19,11 +19,24 @@ export type DiscordChannelDescriptor = ChannelDescriptor & {
  * Where a channels/publish lands (MCPL RFC-011 `capabilities.publish`):
  * `root` — the channel has no threads inside it, so every publish lands in
  * the channel itself or fails, and a publish naming a thread is refused
- * before anything is posted. True of every Discord channel this server
- * registers: a Discord thread is its own channel (with its own id), never a
- * thread within one, and a DM has none.
+ * before anything is posted. True of every channel a message can be posted
+ * in (takesMessages), and of a DM: a Discord thread is its own channel, with
+ * its own id, never a thread within one.
  */
 export const PUBLISH_TARGET = { target: 'root' } as const;
+
+/**
+ * Whether a message can be posted in a guild channel of this kind, so that a
+ * publish to it lands in it: the kinds the resolver names (text,
+ * announcement, and a voice or stage channel's text chat) and threads. Not a
+ * category, which holds channels, nor a forum, whose posts are threads
+ * inside it. Nor a kind this server doesn't know (`unknown`): a media
+ * channel, whose posts are threads too, or a channel registered before its
+ * kind was cached, which declares a target once it's re-derived.
+ */
+export function takesMessages(kind: ChannelFacts['type']): boolean {
+  return isNameAddressableKind(kind) || kind === 'thread';
+}
 
 /** MCPL channel ID format: discord:<guildId>:<channelId> */
 export function mcplChannelId(guildId: string, channelId: string): string {
@@ -64,7 +77,8 @@ export function channelLabelFor(c: ChannelFacts): string {
 
 /** A guild channel's MCPL descriptor, from what is known of it. Its metadata
  *  carries the names its label was made from, so a reader never has to parse
- *  them back out of a label. */
+ *  them back out of a label. It declares a root publish target only for a
+ *  kind a message can be posted in (takesMessages). */
 export function toDescriptor(
   channel: ChannelFacts,
   initiallyOpen = false,
@@ -87,7 +101,7 @@ export function toDescriptor(
     capabilities: {
       history: { maxMessages: maxHistory, supportsBeforeMessage: true },
       acknowledgment: { kind: 'reaction', supportsValue: true },
-      publish: PUBLISH_TARGET,
+      ...(takesMessages(channel.type) ? { publish: PUBLISH_TARGET } : {}),
     },
   };
 }

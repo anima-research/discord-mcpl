@@ -1610,6 +1610,8 @@ describe('DiscordMcplServer', () => {
       assert.deepEqual(added[0].metadata, {
         channelType: 'thread', parentId: 'c1', channelName: 'design-chat', guildName: GUILD, parentName: 'general',
       });
+      // A post to it lands in it: a Discord thread is its own channel.
+      assert.deepEqual((added[0] as { capabilities?: { publish?: unknown } }).capabilities?.publish, { target: 'root' });
       await expectPush(client, 'discord:g1:th1');
 
       // A second message in the same thread is not announced again.
@@ -1661,10 +1663,24 @@ describe('DiscordMcplServer', () => {
         discord.simulateMessage(posted(`m-${channelId}`, channelId, extra as Partial<DiscordMessageData>));
         const added = (await expectChanged(client)).added ?? [];
         assert.deepEqual(added.map((d) => [d.id, d.label]), [[`discord:${guildId}:${channelId}`, `discord:${guildId}:${channelId}`]]);
+        // A known kind that takes messages declares where a post lands; a
+        // channel whose kind isn't cached declares nothing yet.
+        const publish = (added[0] as { capabilities?: { publish?: unknown } }).capabilities?.publish;
+        assert.deepEqual(publish, channelId === 'unseen' ? undefined : { target: 'root' }, channelId);
         await expectPush(client, `discord:${guildId}:${channelId}`);
       }
       // The id label pastes back as exactly that channel.
       assert.deepEqual(parseChannelRef('discord:g9:cx'), { kind: 'id', id: 'cx' });
+      // Once the cache knows the channel, its next message re-derives it,
+      // with its name and its target.
+      discord.facts.unseen = { id: 'unseen', guildId: 'g1', guildName: GUILD, type: 'text', name: 'found' };
+      discord.simulateMessage(posted('m-unseen-2', 'unseen'));
+      const updated = (await expectChanged(client)).updated ?? [];
+      assert.deepEqual(
+        updated.map((d) => [d.label, (d as { capabilities?: { publish?: unknown } }).capabilities?.publish]),
+        [['#found (Test Guild)', { target: 'root' }]],
+      );
+      await expectPush(client, 'discord:g1:unseen');
     });
 
     it("reads a registered channel's names from its descriptor, never from its label", async (t) => {
@@ -2137,7 +2153,7 @@ describe('DiscordMcplServer', () => {
     await serverPromise;
   });
 
-  it('channels/register declares a root publish target on every channel (RFC-011)', async () => {
+  it('channels/register declares a root publish target on the channels it lists (RFC-011)', async () => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
     const serverPromise = server.serve(serverConn);
@@ -2186,7 +2202,16 @@ describe('DiscordMcplServer', () => {
     const regMsg = await client.nextMessage();
     if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
 
-    for (const threadId of ['t-123', 42, '', { id: 't' }]) {
+    // Each reason says what's true and what to send instead.
+    const thread = /^Discord channels have no threads inside them, so thread "t-123" can't be posted to here: a Discord thread is its own channel\. Publish to the thread's own channel id, or send threadId null \(or none\) to post in this channel\.$/;
+    const noThread = (shown: string) => new RegExp(`^threadId ${shown} names no thread: send threadId null \\(or none\\) to post in this channel\\.$`);
+    const cases: Array<[unknown, RegExp]> = [
+      ['t-123', thread],
+      ['', noThread('""')],
+      [42, noThread('42')],
+      [{ id: 't' }, noThread('\\{"id":"t"\\}')],
+    ];
+    for (const [threadId, reason] of cases) {
       const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
         conversationId: 'conv_1', channelId: 'discord:g1:c1', threadId,
         content: [{ type: 'text', text: 'Into a thread?' }],
@@ -2195,7 +2220,7 @@ describe('DiscordMcplServer', () => {
       // No message id: a definitive no-post the host may count as failed.
       assert.equal('messageId' in res, false);
       assert.equal('threadId' in res, false, 'nothing landed, so no target is echoed');
-      assert.match(String(res.reason), /thread|threadId/);
+      assert.match(String(res.reason), reason);
     }
     assert.equal(discord.sentMessages.length, 0, 'nothing was posted');
     client.close();
@@ -2217,6 +2242,62 @@ describe('DiscordMcplServer', () => {
     assert.deepEqual(Object.keys(res).sort(), ['delivered', 'messageId']);
     assert.equal(res.delivered, true);
     assert.equal(discord.sentMessages.length, 1);
+    client.close();
+    await serverPromise;
+  });
+
+  it('channels/publish with threadId null echoes null even when there is nothing to post', async () => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1', threadId: null,
+      content: [{ type: 'image', data: 'aGk=', mimeType: 'image/png' }],
+    })) as Record<string, unknown>;
+    assert.equal(res.delivered, false);
+    assert.ok('threadId' in res && res.threadId === null, 'the explicit root target is echoed');
+    assert.equal(discord.sentMessages.length, 0);
+    client.close();
+    await serverPromise;
+  });
+
+  it("a reply to a thread-starter message, published with what incoming carried, is delivered", async () => {
+    // A host echoes incoming's threadId into its publish (agent-framework's
+    // defaultPublishThreadId). A message that started a thread carries none,
+    // so the reply goes to the channel itself, with or without an explicit
+    // null target.
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    await client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });
+
+    discord.simulateMessage({
+      id: 'starter', content: 'kick off', cleanContent: 'kick off',
+      authorId: 'u1', authorName: 'Bob', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+      mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+    });
+    let msg = await client.nextMessage();
+    while (msg.type !== 'request' || msg.request.method !== method.CHANNELS_INCOMING) msg = await client.nextMessage();
+    client.sendResponse(msg.request.id, { results: [{ messageId: 'starter', accepted: true }] });
+    const incoming = (msg.request.params as ChannelsIncomingParams).messages[0] as unknown as Record<string, unknown>;
+
+    const carried = 'threadId' in incoming ? { threadId: incoming.threadId } : {};
+    for (const target of [carried, { threadId: (carried as { threadId?: unknown }).threadId ?? null }]) {
+      const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+        conversationId: 'conv_1', channelId: 'discord:g1:c1', ...target,
+        content: [{ type: 'text', text: 'On it.' }],
+      })) as Record<string, unknown>;
+      assert.equal(res.delivered, true, `published with ${JSON.stringify(target)}`);
+    }
+    assert.deepEqual(discord.sentMessages.map((m) => [m.channelId, m.content]), [['c1', 'On it.'], ['c1', 'On it.']]);
     client.close();
     await serverPromise;
   });

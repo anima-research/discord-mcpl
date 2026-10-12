@@ -3379,16 +3379,18 @@ export class DiscordMcplServer {
 
     // The publish target (MCPL RFC-011). Absent: a legacy caller, answered
     // exactly as before. `null`: the channel itself, explicitly, echoed back
-    // so the host can check where it landed. Anything else names a thread
-    // inside the channel, which no Discord channel has (every descriptor
-    // declares publish.target 'root'): refused before anything is posted,
-    // with no message id, so the host can count it as definitely not sent.
+    // on every answer so the host can check it against its request. Anything
+    // else, '' included, names a thread inside the channel, which no Discord
+    // channel has (a Discord thread is its own channel): refused before
+    // anything is posted, with no message id, so the host can count it as
+    // definitely not sent. Each reason says what to send instead.
     const target = params.threadId;
     if (target !== undefined && target !== null) {
-      const reason = typeof target === 'string'
-        ? `Discord channels have no threads inside them (thread "${target}" requested); ` +
-          'a Discord thread is its own channel — publish to its channel id instead'
-        : `invalid threadId ${JSON.stringify(target)}: expected a thread id string, null for the channel, or none`;
+      const reason = typeof target === 'string' && target !== ''
+        ? `Discord channels have no threads inside them, so thread "${target}" can't be posted to here: ` +
+          "a Discord thread is its own channel. Publish to the thread's own channel id, " +
+          'or send threadId null (or none) to post in this channel.'
+        : `threadId ${JSON.stringify(target)} names no thread: send threadId null (or none) to post in this channel.`;
       dbg('handlePublish:refused-target', { channelId: params.channelId, threadId: target });
       return { delivered: false, reason };
     }
@@ -3402,7 +3404,7 @@ export class DiscordMcplServer {
 
     if (!text) {
       dbg('handlePublish:skip', { channelId: params.channelId, reason: 'empty-text' });
-      return { delivered: false, messageId: undefined };
+      return { delivered: false, messageId: undefined, ...echo };
     }
 
     dbg('handlePublish', { channelId: params.channelId, textLen: text.length, preview: text.slice(0, 80) });
