@@ -35,6 +35,7 @@ import { DiscordMcplServer, serveStdio } from '../src/server.js';
 import { parseChannelRef } from '../src/channel-names.js';
 import { applyMentionCandidates } from '../src/discord-adapter.js';
 import { TOOL_CLASSES } from '../src/tool-classes.js';
+import { VoiceOutput } from '../src/voice.js';
 import type {
   ChannelChange,
   ChannelFacts,
@@ -2389,6 +2390,76 @@ describe('DiscordMcplServer', () => {
     // A refusal to a targeted publish says why (RFC-011 §4).
     assert.equal(res.reason, 'Nothing to post: the content holds no text.');
     assert.equal(discord.sentMessages.length, 0);
+  });
+
+  it('a stream toward a place a publish would refuse reaches no voice, and one toward the channel itself does (RFC-011 §6)', async (t) => {
+    // A TTS provider and a playback sink that record what voice would
+    // synthesize and queue.
+    const synthesized: string[] = [];
+    const queued: string[] = [];
+    let sinkEvent: (ev: { type: 'cleared'; id: string }) => void = () => {};
+    const provider = {
+      openStream: () => ({
+        sendText: (text: string) => { synthesized.push(text); },
+        end() {}, abort() {}, onAudio() {}, onAlignment() {}, onEnd() {}, onError() {},
+      }),
+    };
+    const sink = {
+      onEvent: (fn: typeof sinkEvent) => { sinkEvent = fn; },
+      play: (item: { id: string }) => { queued.push(item.id); },
+      cancel: () => false,
+    };
+    const voice = new VoiceOutput({ textChannels: null }, provider as never, { voiceId: 'v1' }, sink as never, () => {});
+    const { client, clientSocket, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter, voice);
+    const serving = server.serve(serverConn);
+    t.after(async () => {
+      voice.stop();
+      clientSocket.end();
+      await serving;
+      client.close();
+    });
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    const stream = (inferenceId: string, place: Record<string, unknown>, delta: string) => {
+      client.sendNotification(method.CHANNELS_OUTGOING_CHUNK, {
+        inferenceId, conversationId: 'conv_1', channelId: 'discord:g1:c1', index: 0, delta, ...place,
+      });
+    };
+    const complete = (inferenceId: string, place: Record<string, unknown>) => {
+      client.sendNotification(method.CHANNELS_OUTGOING_COMPLETE, {
+        inferenceId, conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [], ...place,
+      });
+    };
+    // The server reads in order, so a request's answer comes after it has
+    // handled the notifications sent before it. The publish each stream
+    // heads for is that request here.
+    const publish = (place: Record<string, unknown>, text: string) => client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [{ type: 'text', text }], ...place,
+    }) as Promise<Record<string, unknown>>;
+
+    for (const threadId of ['t-123', '', 42]) {
+      const inferenceId = `toward-${JSON.stringify(threadId)}`;
+      stream(inferenceId, { threadId }, 'Speech for a thread.');
+      complete(inferenceId, { threadId });
+      assert.equal((await publish({ threadId }, 'Speech for a thread.')).delivered, false);
+    }
+    assert.deepEqual(queued, [] as string[], 'no utterance is queued toward a refused place');
+    assert.deepEqual(synthesized, [] as string[], 'and nothing is synthesized');
+    assert.equal(discord.sentMessages.length, 0);
+
+    // The channel itself, named or as a legacy caller leaves it: voiced.
+    for (const [i, place] of [{ threadId: null }, {}].entries()) {
+      const inferenceId = `root-${i}`;
+      stream(inferenceId, place, `Root speech ${i}.`);
+      assert.equal((await publish(place, `Root speech ${i}.`)).delivered, true);
+      assert.ok(queued.includes(inferenceId), `${inferenceId} is queued`);
+      sinkEvent({ type: 'cleared', id: inferenceId });
+      complete(inferenceId, place);
+    }
+    assert.deepEqual(synthesized, ['Root speech 0.', 'Root speech 1.']);
   });
 
   it("a reply to a thread-starter message, published with what incoming carried, is delivered", async (t) => {

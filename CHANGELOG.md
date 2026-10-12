@@ -309,13 +309,16 @@ in the git log and PR descriptions.
   thread's id. A category or forum declares nothing. `channels/publish`
   takes the RFC's `threadId`:
   - `null` posts to the channel itself (as several messages when the text
-    is long), and every answer to it echoes `threadId: null`, so the host
-    can check it against its request. With no text to post, it's refused
-    with a reason;
+    is long), and every result echoes `threadId: null`, so the host can
+    check it against its request. With no text to post, it's refused with
+    a reason;
   - any other value, `''` included, is refused before anything is posted,
     as `delivered: false` with no message id and a reason that says what
     to send instead;
   - a request without the field is answered exactly as before.
+
+  A `channels/outgoing/chunk` naming a `threadId` other than `null` is
+  ignored, so voice speaks nothing toward a place a publish would refuse.
 
 ### Changed
 

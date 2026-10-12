@@ -58,7 +58,7 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { withToolClasses } from './tool-classes.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
-import { ChannelManager, channelLabelFor, mcplChannelId, parseMcplChannelId, takesMessages, toDescriptor, toDmDescriptor } from './channels.js';
+import { ChannelManager, channelLabelFor, inRoot, mcplChannelId, parseMcplChannelId, takesMessages, toDescriptor, toDmDescriptor } from './channels.js';
 import {
   channelLabel,
   isNameAddressableKind,
@@ -1534,7 +1534,14 @@ export class DiscordMcplServer {
       // moment streaming turned on. Now: chunks feed voice synthesis, and
       // complete finalizes the utterance. Nothing here ever sends text.
       case method.CHANNELS_OUTGOING_CHUNK: {
-        const p = notif.params as ChannelsOutgoingChunkParams;
+        // RFC-011 §6: a stream carries the place its publish will name. A
+        // place inside the channel is one handlePublish refuses, so a stream
+        // toward it renders nothing here either, voice included.
+        const p = notif.params as ChannelsOutgoingChunkParams & { threadId?: unknown };
+        if (!inRoot(p.threadId)) {
+          dbg('outgoing/chunk:refused-target', { inferenceId: p.inferenceId, channelId: p.channelId, threadId: p.threadId });
+          break;
+        }
         this.voice?.handleChunk(p.inferenceId, p.channelId, p.delta);
         break;
       }
@@ -1551,6 +1558,9 @@ export class DiscordMcplServer {
         // NOTE at the capability declaration), reintroduced on a different
         // signal. It was dormant only because the 0.4 boolean `channels`
         // capability made `channels.streaming` undeclarable. Issue #14.
+        // Whatever place it names, it voices nothing of its own: it ends only
+        // what accepted chunks began, so a stream toward a refused place,
+        // whose chunks voice skipped, has nothing to end.
         const p = notif.params as ChannelsOutgoingCompleteParams;
         dbg('outgoing/complete:finalized', { inferenceId: p.inferenceId, channelId: p.channelId });
         this.voice?.handleComplete(p.inferenceId);
@@ -3569,13 +3579,13 @@ export class DiscordMcplServer {
 
     // The publish target (MCPL RFC-011). Absent: a legacy caller, answered
     // exactly as before. `null`: the channel itself, explicitly, echoed back
-    // on every answer so the host can check it against its request. Anything
+    // in every result so the host can check it against its request. Anything
     // else, '' included, names a thread inside the channel, which no Discord
     // channel has (a Discord thread is its own channel): refused before
     // anything is posted, with no message id, so the host can count it as
     // definitely not sent. Each reason says what to send instead.
     const target = params.threadId;
-    if (target !== undefined && target !== null) {
+    if (!inRoot(target)) {
       const reason = typeof target === 'string' && target !== ''
         ? `Discord channels have no threads inside them, so thread "${target}" can't be posted to here: ` +
           "a Discord thread is its own channel. Publish to the thread's own channel id, " +

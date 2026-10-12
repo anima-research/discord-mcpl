@@ -26,6 +26,16 @@ export type DiscordChannelDescriptor = ChannelDescriptor & {
 export const PUBLISH_TARGET = { target: 'root' } as const;
 
 /**
+ * Whether a publish or a stream toward this place (RFC-011's `threadId`)
+ * lands in the channel itself, the only place a `root` channel has: no
+ * `threadId` (a caller from before the RFC) or `null`. Any other value names
+ * a thread inside the channel, which no Discord channel has, so it's refused.
+ */
+export function inRoot(threadId: unknown): boolean {
+  return threadId === undefined || threadId === null;
+}
+
+/**
  * Whether a message can be posted in a guild channel of this kind, so that a
  * publish to it lands in it: the kinds the resolver names (text,
  * announcement, and a voice or stage channel's text chat) and threads. Not a
