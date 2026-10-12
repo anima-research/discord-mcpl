@@ -31,8 +31,11 @@ export const PUBLISH_TARGET = { target: 'root' } as const;
  * announcement, and a voice or stage channel's text chat) and threads. Not a
  * category, which holds channels, nor a forum, whose posts are threads
  * inside it. Nor a kind this server doesn't know (`unknown`): a media
- * channel, whose posts are threads too, or a channel registered before its
- * kind was cached, which declares a target once it's re-derived.
+ * channel, whose posts are threads too, a kind Discord adds later, or a
+ * channel whose kind isn't cached. A channel of such a kind that a message
+ * has been delivered from takes messages all the same (ChannelFacts'
+ * `postedIn`): a forum's or media channel's posts arrive under their own
+ * thread's id, never the forum's.
  */
 export function takesMessages(kind: ChannelFacts['type']): boolean {
   return isNameAddressableKind(kind) || kind === 'thread';
@@ -77,8 +80,9 @@ export function channelLabelFor(c: ChannelFacts): string {
 
 /** A guild channel's MCPL descriptor, from what is known of it. Its metadata
  *  carries the names its label was made from, so a reader never has to parse
- *  them back out of a label. It declares a root publish target only for a
- *  kind a message can be posted in (takesMessages). */
+ *  them back out of a label. It declares a root publish target only where a
+ *  message can be posted: a kind that takes messages (takesMessages), or a
+ *  channel a message has been delivered from (`postedIn`). */
 export function toDescriptor(
   channel: ChannelFacts,
   initiallyOpen = false,
@@ -101,7 +105,7 @@ export function toDescriptor(
     capabilities: {
       history: { maxMessages: maxHistory, supportsBeforeMessage: true },
       acknowledgment: { kind: 'reaction', supportsValue: true },
-      ...(takesMessages(channel.type) ? { publish: PUBLISH_TARGET } : {}),
+      ...(takesMessages(channel.type) || channel.postedIn ? { publish: PUBLISH_TARGET } : {}),
     },
   };
 }

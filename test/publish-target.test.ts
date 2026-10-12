@@ -2,7 +2,8 @@
  * MCPL RFC-011: a channel declares `capabilities.publish.target: 'root'`
  * when a message can be posted in it, since a Discord thread is its own
  * channel and a channel has no threads inside it; a DM always does. A kind
- * that takes no message, or one this server doesn't know, declares nothing.
+ * that takes no message, or one this server doesn't know, declares nothing,
+ * unless a message has been delivered from that channel.
  */
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
@@ -33,5 +34,9 @@ describe('publish target declaration', () => {
       assert.equal(d.capabilities?.publish, undefined, kind);
       assert.ok(d.capabilities?.history && d.capabilities?.acknowledgment, `${kind} keeps its other capabilities`);
     }
+  });
+
+  it('a channel a message has been delivered from declares root, whatever its kind', () => {
+    assert.deepEqual(toDescriptor(facts('unknown', { postedIn: true })).capabilities?.publish, { target: 'root' });
   });
 });

@@ -58,7 +58,7 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { withToolClasses } from './tool-classes.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
-import { ChannelManager, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
+import { ChannelManager, mcplChannelId, parseMcplChannelId, takesMessages, toDescriptor, toDmDescriptor } from './channels.js';
 import {
   channelLabel,
   formatChannelLabel,
@@ -621,6 +621,12 @@ export class DiscordMcplServer {
    *  again (registerGuildDelivery). Snowflakes aren't reused, so an id here
    *  stays true. */
   private deletedChannels = new Set<string>();
+  /** Guild channels a message has been delivered from whose kind doesn't say
+   *  a message can be posted in them (not cached when it came, or a kind
+   *  this server doesn't classify). Holding a message says it, so each is
+   *  described as `postedIn` (a root publish target) on every path that
+   *  describes it, not only the delivery's. */
+  private postedInUnclassified = new Set<string>();
   private stateTracker = new StateTracker();
   /** Buffers for channels/outgoing/chunk streams, keyed by inferenceId */
 
@@ -3064,7 +3070,8 @@ export class DiscordMcplServer {
   /** A guild channel's descriptor, by the one rule every path registers by
    *  (toDescriptor), with its subscription and history settings. */
   private guildDescriptor(facts: ChannelFacts): ChannelDescriptor {
-    return toDescriptor(facts, this.isChannelSubscribed(facts.id), this.backscrollLimitFor(facts.id));
+    const described = this.postedInUnclassified.has(facts.id) ? { ...facts, postedIn: true } : facts;
+    return toDescriptor(described, this.isChannelSubscribed(facts.id), this.backscrollLimitFor(facts.id));
   }
 
   /** Register descriptors, and tell a connected host of each one that's new
@@ -3168,9 +3175,12 @@ export class DiscordMcplServer {
     }
     if (facts && holdsNoMessages(facts.type)) return undefined;
     if (facts?.archived && !opts.posted) return known ? id : undefined;
-    this.registerChannels([this.guildDescriptor(
-      facts ?? { id: channelId, guildId, guildName: null, type: opts.thread ? 'thread' : 'unknown', name: null },
-    )]);
+    const described: ChannelFacts = facts
+      ?? { id: channelId, guildId, guildName: null, type: opts.thread ? 'thread' : 'unknown', name: null };
+    // The delivery itself says a message can be posted here, whatever the
+    // kind: a forum's or media channel's posts come under their own ids.
+    if (!takesMessages(described.type)) this.postedInUnclassified.add(channelId);
+    this.registerChannels([this.guildDescriptor(described)]);
     return id;
   }
 
@@ -3198,6 +3208,7 @@ export class DiscordMcplServer {
     for (const id of ids) {
       this.deletedChannels.delete(id);
       this.deletedChannels.add(id);
+      this.postedInUnclassified.delete(id);
     }
     while (this.deletedChannels.size > DELETED_CHANNELS_KEPT) {
       this.deletedChannels.delete(this.deletedChannels.values().next().value as string);
@@ -3404,7 +3415,11 @@ export class DiscordMcplServer {
 
     if (!text) {
       dbg('handlePublish:skip', { channelId: params.channelId, reason: 'empty-text' });
-      return { delivered: false, messageId: undefined, ...echo };
+      // A targeted publish's refusal carries its reason (RFC-011 §4). A
+      // legacy caller's answer stays as it was.
+      return target === null
+        ? { delivered: false, messageId: undefined, threadId: null, reason: 'Nothing to post: the content holds no text.' }
+        : { delivered: false, messageId: undefined };
     }
 
     dbg('handlePublish', { channelId: params.channelId, textLen: text.length, preview: text.slice(0, 80) });

@@ -249,6 +249,9 @@ export interface ChannelFacts {
   parentName?: string | null;
   /** For a thread, whether it's archived. */
   archived?: boolean;
+  /** A message has been delivered from this channel, so one can be posted
+   *  in it, whatever its kind says (the server's, not the cache's). */
+  postedIn?: boolean;
 }
 
 /** One member of a channel, as the agent should see them. */

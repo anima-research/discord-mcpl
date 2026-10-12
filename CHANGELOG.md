@@ -302,12 +302,15 @@ in the git log and PR descriptions.
   `capabilities.publish.target: 'root'`: a Discord thread is its own
   channel, so no channel has threads inside it, and a publish lands in the
   channel itself or fails. That covers text, announcement, voice and stage
-  channels, threads and DMs. A category or forum declares nothing, and
-  neither does a channel registered before its kind was cached, until it's
-  re-derived. `channels/publish` takes the RFC's `threadId`:
+  channels, threads, DMs, and any channel a message has been delivered
+  from, whatever its kind (one not cached yet, or one this server doesn't
+  classify), since a forum's or media channel's posts arrive under their
+  own thread's id. A category or forum declares nothing. `channels/publish`
+  takes the RFC's `threadId`:
   - `null` posts to the channel itself (as several messages when the text
     is long), and every answer to it echoes `threadId: null`, so the host
-    can check it against its request;
+    can check it against its request. With no text to post, it's refused
+    with a reason;
   - any other value, `''` included, is refused before anything is posted,
     as `delivered: false` with no message id and a reason that says what
     to send instead;
