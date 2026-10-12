@@ -9,8 +9,8 @@ import { toDescriptor, toDmDescriptor } from '../src/channels.js';
 
 describe('publish target declaration', () => {
   it('a guild channel, a thread channel and a DM all declare root', () => {
-    const text = toDescriptor('g1', 'Guild', { id: 'c1', name: 'general', type: 'text', parentId: null } as never);
-    const thread = toDescriptor('g1', 'Guild', { id: 't1', name: 'design-chat', type: 'public_thread', parentId: 'c1' } as never);
+    const text = toDescriptor({ id: 'c1', guildId: 'g1', guildName: 'Guild', name: 'general', type: 'text', parentId: null });
+    const thread = toDescriptor({ id: 't1', guildId: 'g1', guildName: 'Guild', name: 'design-chat', type: 'thread', parentId: 'c1', parentName: 'general' });
     const dm = toDmDescriptor('d1', 'alice', false, 500, 'u1');
     for (const d of [text, thread, dm]) {
       assert.deepEqual(d.capabilities?.publish, { target: 'root' }, d.id);
