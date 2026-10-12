@@ -319,6 +319,14 @@ in the git log and PR descriptions.
 
   A `channels/outgoing/chunk` naming a `threadId` other than `null` is
   ignored, so voice speaks nothing toward a place a publish would refuse.
+  Voice also takes a stream to be its `inferenceId` and `channelId`
+  together, as the RFC does: an inference streaming toward two channels
+  makes two utterances, each voiced only if its own channel is, and a
+  completion ends only its own stream's. Every stream of an inference used
+  to join one utterance, so words toward a channel that isn't voiced were
+  spoken in a voiced channel's, any channel's completion ended it, and a
+  stream toward a channel that isn't voiced, arriving first, silenced the
+  voiced one. A voice receipt's event id now names the channel as well.
 
 ### Changed
 

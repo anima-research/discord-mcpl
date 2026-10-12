@@ -115,7 +115,7 @@ client.once('ready', async () => {
     const id = `utt${++n}`;
     console.log(`  [say] ${id} (${text.length} chars) — queued`);
     out.handleChunk(id, `discord:${guildId}:${vcId}`, text);
-    out.handleComplete(id);
+    out.handleComplete(id, `discord:${guildId}:${vcId}`);
   });
 });
 

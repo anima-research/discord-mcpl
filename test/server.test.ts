@@ -35,7 +35,7 @@ import { DiscordMcplServer, serveStdio } from '../src/server.js';
 import { parseChannelRef } from '../src/channel-names.js';
 import { applyMentionCandidates } from '../src/discord-adapter.js';
 import { TOOL_CLASSES } from '../src/tool-classes.js';
-import { VoiceOutput } from '../src/voice.js';
+import { VoiceOutput, streamKey } from '../src/voice.js';
 import type {
   ChannelChange,
   ChannelFacts,
@@ -2455,11 +2455,78 @@ describe('DiscordMcplServer', () => {
       const inferenceId = `root-${i}`;
       stream(inferenceId, place, `Root speech ${i}.`);
       assert.equal((await publish(place, `Root speech ${i}.`)).delivered, true);
-      assert.ok(queued.includes(inferenceId), `${inferenceId} is queued`);
-      sinkEvent({ type: 'cleared', id: inferenceId });
+      const item = streamKey(inferenceId, 'discord:g1:c1');
+      assert.ok(queued.includes(item), `${inferenceId} is queued`);
+      sinkEvent({ type: 'cleared', id: item });
       complete(inferenceId, place);
     }
     assert.deepEqual(synthesized, ['Root speech 0.', 'Root speech 1.']);
+  });
+
+  it("a stream's completion ends only its own channel's utterance, and another channel's stream joins none (RFC-011 §6)", async (t) => {
+    // Voice is configured for c1 only. One inference streams toward c1, and
+    // toward c2 either at a place a publish refuses or at the channel itself.
+    for (const elsewhere of [{ threadId: 't-123' }, { threadId: null }]) {
+      const synthesized: string[] = [];
+      const queued: string[] = [];
+      let ended = 0;
+      let sinkEvent: (ev: { type: 'cleared'; id: string }) => void = () => {};
+      const provider = {
+        openStream: () => ({
+          sendText: (text: string) => { synthesized.push(text); },
+          end() { ended++; }, abort() {}, onAudio() {}, onAlignment() {}, onEnd() {}, onError() {},
+        }),
+      };
+      const sink = {
+        onEvent: (fn: typeof sinkEvent) => { sinkEvent = fn; },
+        play: (item: { id: string }) => { queued.push(item.id); },
+        cancel: () => false,
+      };
+      const voice = new VoiceOutput({ textChannels: ['c1'] }, provider as never, { voiceId: 'v1' }, sink as never, () => {});
+      const { client, clientSocket, serverConn, discord } = await createTestPair();
+      const server = new DiscordMcplServer(discord as unknown as DiscordAdapter, voice);
+      const serving = server.serve(serverConn);
+      t.after(async () => {
+        voice.stop();
+        clientSocket.end();
+        await serving;
+        client.close();
+      });
+      await mcplHandshake(client);
+      const regMsg = await client.nextMessage();
+      if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+      const chunk = (channelId: string, place: Record<string, unknown>, delta: string) => {
+        client.sendNotification(method.CHANNELS_OUTGOING_CHUNK, {
+          inferenceId: 'shared', conversationId: 'conv_1', channelId, index: 0, delta, ...place,
+        });
+      };
+      const complete = (channelId: string, place: Record<string, unknown>) => {
+        client.sendNotification(method.CHANNELS_OUTGOING_COMPLETE, {
+          inferenceId: 'shared', conversationId: 'conv_1', channelId, content: [], ...place,
+        });
+      };
+      // The server reads in order, so this request's answer comes after it
+      // has handled the notifications sent before it. It posts nothing.
+      const settle = () => client.sendRequest(method.CHANNELS_PUBLISH, {
+        conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [],
+      });
+
+      chunk('discord:g1:c1', { threadId: null }, 'First words. ');
+      await settle();
+      sinkEvent({ type: 'cleared', id: streamKey('shared', 'discord:g1:c1') });
+      chunk('discord:g1:c2', elsewhere, 'Words for another channel.');
+      complete('discord:g1:c2', elsewhere);
+      chunk('discord:g1:c1', { threadId: null }, 'Last words.');
+      await settle();
+      assert.equal(ended, 0, `c2's completion ends nothing on c1 (c2 ${JSON.stringify(elsewhere)})`);
+      complete('discord:g1:c1', { threadId: null });
+      await settle();
+      assert.deepEqual(queued, [streamKey('shared', 'discord:g1:c1')], 'c2 queues nothing');
+      assert.deepEqual(synthesized, ['First words. ', 'Last words.'], "c2's words aren't voiced, and c1's all are");
+      assert.equal(ended, 1, "c1's own completion ends it");
+      assert.equal(discord.sentMessages.length, 0);
+    }
   });
 
   it("a reply to a thread-starter message, published with what incoming carried, is delivered", async (t) => {

@@ -1,13 +1,14 @@
-// VoiceOutput: chunk routing, lazy per-inference streams, channel filtering,
-// completion, the advisory-only discipline (this module never posts), and
-// the physics accounting: interruption → voiced/unvoiced split reports.
+// VoiceOutput: chunk routing, a lazy utterance per stream (an inference toward
+// one channel), channel filtering, completion, the advisory-only discipline
+// (this module never posts), and the physics accounting: interruption →
+// voiced/unvoiced split reports.
 // CarrierGate: carrier-sense hold-off behavior.
 // Provider + sink injected; no Discord, no network.
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Readable } from 'node:stream';
 import {
-  CarrierGate, VoiceOutput, compareSnowflakes,
+  CarrierGate, VoiceOutput, compareSnowflakes, streamKey,
   type PcmSink, type SinkEvent, type SinkItem, type UtteranceReport,
 } from '../src/voice.js';
 import type { TtsAlignment, TtsProvider, TtsStream, TtsVoice } from '@animalabs/voice-kit';
@@ -67,6 +68,9 @@ class FakeSink implements PcmSink {
 
 const VOICE: TtsVoice = { voiceId: 'v1' };
 
+/** The sink item of inference `inf`'s stream toward channel `ch`. */
+const item = (inf: string, ch = 'discord:g:100') => streamKey(inf, ch);
+
 function setup(textChannels: string[] | null = null) {
   const provider = new FakeProvider();
   const sink = new FakeSink();
@@ -92,35 +96,35 @@ test('billing gate: socket pre-opens free, text banks until cleared, then stream
   out.handleChunk('inf1', 'discord:g:100', 'there.');
   assert.equal(provider.streams.length, 1);        // socket pre-opened (free)
   assert.equal(sink.played.length, 1);             // queued for playback at open
-  assert.equal(sink.played[0]!.id, 'inf1');
+  assert.equal(sink.played[0]!.id, item('inf1'));
   assert.deepEqual(provider.streams[0]!.sent, []); // zero characters billed while queued
-  sink.clear('inf1');
+  sink.clear(item('inf1'));
   assert.deepEqual(provider.streams[0]!.sent, ['Hello there.']); // one flush
   out.handleChunk('inf1', 'discord:g:100', ' More.');
   assert.deepEqual(provider.streams[0]!.sent, ['Hello there.', ' More.']); // live now
   assert.equal(provider.streams[0]!.ended, false);
-  out.handleComplete('inf1');
+  out.handleComplete('inf1', 'discord:g:100');
   assert.equal(provider.streams[0]!.ended, true);
 });
 
 test('complete while queued: end is deferred to the flush', () => {
   const { provider, sink, out } = setup();
   out.handleChunk('inf1', 'discord:g:100', 'Whole thing.');
-  out.handleComplete('inf1');
+  out.handleComplete('inf1', 'discord:g:100');
   assert.equal(provider.streams[0]!.ended, false); // nothing sent yet — nothing to end
-  sink.clear('inf1');
+  sink.clear(item('inf1'));
   assert.deepEqual(provider.streams[0]!.sent, ['Whole thing.']);
   assert.equal(provider.streams[0]!.ended, true);
 });
 
-test('channel filter: non-voiced channels are skipped for the whole inference', () => {
+test('channel filter: a stream toward a non-voiced channel is skipped whole', () => {
   const { provider, sink, out } = setup(['777']);
   out.handleChunk('inf1', 'discord:g:999', 'not voiced ');
   out.handleChunk('inf1', 'discord:g:999', 'still not');
   assert.equal(provider.streams.length, 0);
   out.handleChunk('inf2', 'discord:g:777', 'voiced');
   assert.equal(provider.streams.length, 1);
-  sink.clear('inf2');
+  sink.clear(item('inf2', 'discord:g:777'));
   assert.deepEqual(provider.streams[0]!.sent, ['voiced']);
 });
 
@@ -154,6 +158,57 @@ test('unparseable channel ids are skipped, never throw', () => {
   assert.equal(provider.streams.length, 0);
 });
 
+// A stream is its inference and its channel (MCPL RFC-011 §6).
+
+test("an inference's streams toward two channels are two utterances, each ended only by its own completion", () => {
+  const { provider, sink, out } = setup();
+  out.handleChunk('inf1', 'discord:g:100', 'For one. ');
+  out.handleChunk('inf1', 'discord:g:200', 'For two. ');
+  assert.deepEqual(sink.played.map((p) => p.id), [item('inf1'), item('inf1', 'discord:g:200')]);
+  sink.clear(item('inf1'));
+  out.handleComplete('inf1', 'discord:g:200');
+  out.handleChunk('inf1', 'discord:g:100', 'Still one.');
+  assert.deepEqual(provider.streams[0]!.sent, ['For one. ', 'Still one.']);
+  assert.equal(provider.streams[0]!.ended, false, "the other channel's completion doesn't end it");
+  out.handleComplete('inf1', 'discord:g:100');
+  assert.equal(provider.streams[0]!.ended, true);
+  // The other utterance waited in the queue, and its own completion ends it
+  // once it plays.
+  sink.clear(item('inf1', 'discord:g:200'));
+  assert.deepEqual(provider.streams[1]!.sent, ['For two. ']);
+  assert.equal(provider.streams[1]!.ended, true);
+});
+
+test("a stream toward a channel that isn't voiced neither joins nor silences the same inference's voiced stream", () => {
+  const { provider, sink, out } = setup(['100']);
+  out.handleChunk('inf1', 'discord:g:999', 'Not voiced, and first. ');
+  out.handleChunk('inf1', 'discord:g:100', 'Voiced. ');
+  sink.clear(item('inf1'));
+  out.handleChunk('inf1', 'discord:g:999', 'Not voiced either.');
+  out.handleComplete('inf1', 'discord:g:999');
+  out.handleChunk('inf1', 'discord:g:100', 'Voiced still.');
+  assert.deepEqual(sink.played.map((p) => p.id), [item('inf1')]);
+  assert.deepEqual(provider.streams[0]!.sent, ['Voiced. ', 'Voiced still.']);
+  assert.equal(provider.streams[0]!.ended, false);
+});
+
+test("an utterance's end reports its own stream, and leaves the same inference's other stream voicing", () => {
+  const { sink, out, reports } = setup();
+  out.handleChunk('inf1', 'discord:g:100', 'One.');
+  out.handleChunk('inf1', 'discord:g:200', 'Two.');
+  sink.emit({ type: 'interrupted', id: item('inf1', 'discord:g:200'), playedMs: 0, by: { userId: 'u1', bot: false } });
+  out.handleChunk('inf1', 'discord:g:200', ' Dropped.');
+  sink.clear(item('inf1'));
+  out.handleChunk('inf1', 'discord:g:100', ' More.');
+  out.handleComplete('inf1', 'discord:g:100');
+  sink.emit({ type: 'finished', id: item('inf1'), playedMs: 0 });
+  assert.deepEqual(
+    reports.map((r) => [r.inferenceId, r.channelId, r.status, r.unvoicedText]),
+    [['inf1', 'discord:g:200', 'interrupted', 'Two.'], ['inf1', 'discord:g:100', 'spoken', 'One. More.']],
+  );
+  assert.equal(sink.played.length, 2, "the interrupted stream's later words queue nothing");
+});
+
 // ── Physics accounting ──────────────────────────────────────────────────────
 
 test('interruption: alignment-exact voiced/unvoiced split, TTS aborted, later chunks dropped', () => {
@@ -163,7 +218,7 @@ test('interruption: alignment-exact voiced/unvoiced split, TTS aborted, later ch
   provider.streams[0]!.emitAlignment(evenAlignment(text)); // char i midpoint = i*100+50
 
   const by = { userId: 'u9', username: 'antra', bot: false };
-  sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 550, by });
+  sink.emit({ type: 'interrupted', id: item('inf1'), playedMs: 550, by });
 
   assert.equal(reports.length, 1);
   const r = reports[0]!;
@@ -184,7 +239,7 @@ test('interruption without alignment: proportional estimate, flagged', () => {
   out.handleChunk('inf1', 'discord:g:100', '0123456789'); // 10 chars
   // 44100 samples = 1000 ms of source audio (PCM16 mono 44.1k = 2 bytes/sample)
   provider.streams[0]!.emitAudio(Buffer.alloc(88200));
-  sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 500, by: { userId: 'u1', bot: false } });
+  sink.emit({ type: 'interrupted', id: item('inf1'), playedMs: 500, by: { userId: 'u1', bot: false } });
 
   const r = reports[0]!;
   assert.equal(r.estimated, true);
@@ -195,7 +250,7 @@ test('interruption without alignment: proportional estimate, flagged', () => {
 test('interruption before any audio: everything unvoiced', () => {
   const { sink, out, reports } = setup();
   out.handleChunk('inf1', 'discord:g:100', 'never heard');
-  sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 0, by: { userId: 'u1', bot: true } });
+  sink.emit({ type: 'interrupted', id: item('inf1'), playedMs: 0, by: { userId: 'u1', bot: true } });
   const r = reports[0]!;
   assert.equal(r.voicedText, '');
   assert.equal(r.unvoicedText, 'never heard');
@@ -207,9 +262,9 @@ test('clean finish after complete snaps to fully voiced', () => {
   out.handleChunk('inf1', 'discord:g:100', text);
   provider.streams[0]!.emitAlignment(evenAlignment(text));
   provider.streams[0]!.emitAudio(Buffer.alloc(88200)); // 1000 ms
-  out.handleComplete('inf1');
+  out.handleComplete('inf1', 'discord:g:100');
   // Played ≈ synthesized (within slack) → full text, no phantom tail.
-  sink.emit({ type: 'finished', id: 'inf1', playedMs: 900 });
+  sink.emit({ type: 'finished', id: item('inf1'), playedMs: 900 });
 
   const r = reports[0]!;
   assert.equal(r.status, 'spoken');
@@ -223,9 +278,9 @@ test('truncated finish (TTS died early) reports the unvoiced tail', () => {
   out.handleChunk('inf1', 'discord:g:100', text);
   provider.streams[0]!.emitAlignment(evenAlignment(text)); // 45 chars → 4500 ms
   provider.streams[0]!.emitAudio(Buffer.alloc(88200 * 5)); // pretend 5000 ms synthesized
-  out.handleComplete('inf1');
+  out.handleComplete('inf1', 'discord:g:100');
   // Sink finished but only 2000 ms actually played (stream errored/ended early).
-  sink.emit({ type: 'finished', id: 'inf1', playedMs: 2000 });
+  sink.emit({ type: 'finished', id: item('inf1'), playedMs: 2000 });
 
   const r = reports[0]!;
   assert.equal(r.status, 'spoken');
@@ -247,7 +302,7 @@ test('zero-cost-loser pin: stopped while queued → provider received zero chara
 test('interrupted while never cleared: report carries billedChars 0', () => {
   const { sink, out, reports } = setup();
   out.handleChunk('inf1', 'discord:g:100', 'unbilled words');
-  sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 0, by: { userId: 'u1', bot: true } });
+  sink.emit({ type: 'interrupted', id: item('inf1'), playedMs: 0, by: { userId: 'u1', bot: true } });
   assert.equal(reports[0]!.billedChars, 0);
   assert.equal(reports[0]!.unvoicedText, 'unbilled words');
 });
@@ -256,9 +311,9 @@ test('billedChars receipt: cleared-then-interrupted bills exactly the flushed te
   const { provider, sink, out, reports } = setup();
   const text = 'Hello there, friend.';
   out.handleChunk('inf1', 'discord:g:100', text);
-  sink.clear('inf1');
+  sink.clear(item('inf1'));
   provider.streams[0]!.emitAlignment(evenAlignment(text));
-  sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 550, by: { userId: 'u9', bot: false } });
+  sink.emit({ type: 'interrupted', id: item('inf1'), playedMs: 550, by: { userId: 'u9', bot: false } });
   assert.equal(reports[0]!.billedChars, text.length);
   assert.ok(reports[0]!.queuedMs >= 0);
 });
@@ -267,7 +322,7 @@ test('socket pre-open is capped: deep-queue items open at clearance instead', ()
   const { provider, sink, out } = setup();
   for (let i = 0; i < 5; i++) out.handleChunk('inf' + i, 'discord:g:100', 'text ' + i);
   assert.equal(provider.streams.length, 3); // PRE_OPEN_MAX sockets, not 5
-  sink.clear('inf4');                       // deep item clears → opens now
+  sink.clear(item('inf4'));                       // deep item clears → opens now
   assert.equal(provider.streams.length, 4);
   assert.deepEqual(provider.streams[3]!.sent, ['text 4']);
 });
@@ -277,7 +332,7 @@ test('socket died while queued: flush reopens a fresh stream and resends the ban
   out.handleChunk('inf1', 'discord:g:100', 'resent ');
   provider.streams[0]!.emitError(new Error('idle timeout')); // provider hung up pre-clearance
   out.handleChunk('inf1', 'discord:g:100', 'text');          // keeps banking
-  sink.clear('inf1');
+  sink.clear(item('inf1'));
   assert.equal(provider.streams.length, 2);
   assert.deepEqual(provider.streams[0]!.sent, []);           // dead socket billed nothing
   assert.deepEqual(provider.streams[1]!.sent, ['resent text']);
@@ -308,10 +363,12 @@ test('maxHold expiry: dropped unspoken with an expired receipt, zero billed', (t
   t.mock.timers.tick(19);
   assert.deepEqual(sink.cancelled, [], 'not expired before its max hold');
   t.mock.timers.tick(1);
-  assert.deepEqual(sink.cancelled, ['inf1']);
+  assert.deepEqual(sink.cancelled, [item('inf1')]);
   assert.equal(reports.length, 1);
   const r = reports[0]!;
   assert.equal(r.status, 'expired');
+  assert.equal(r.inferenceId, 'inf1');
+  assert.equal(r.channelId, 'discord:g:100');
   assert.equal(r.billedChars, 0);
   assert.equal(r.playedMs, 0);
   assert.equal(r.voicedText, '');
@@ -352,7 +409,7 @@ test('cleared beats expiry: a cleared utterance is never expired', async () => {
   const reports: UtteranceReport[] = [];
   out.onReport((r) => reports.push(r));
   out.handleChunk('inf1', 'discord:g:100', 'quick');
-  sink.clear('inf1');
+  sink.clear(item('inf1'));
   await new Promise((r) => setTimeout(r, 50));
   assert.deepEqual(sink.cancelled, []);
   assert.equal(reports.length, 0); // still active, awaiting playback outcome

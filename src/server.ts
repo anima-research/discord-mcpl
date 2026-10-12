@@ -686,7 +686,9 @@ export class DiscordMcplServer {
           `Heard up to: "${tail}"\nNOT heard: "${head}"\n(The text was still delivered in the text channel as usual.)`;
     this.conn.sendRequest(method.PUSH_EVENT, {
       featureSet: 'discord.messaging',
-      eventId: `discord_voice_${r.status}_${r.inferenceId}`,
+      // One utterance per stream, and an inference can stream to two voiced
+      // channels: the channel keeps their reports' ids apart.
+      eventId: `discord_voice_${r.status}_${r.inferenceId}_${r.channelId}`,
       timestamp: new Date().toISOString(),
       origin: {
         source: 'discord',
@@ -1559,11 +1561,14 @@ export class DiscordMcplServer {
         // signal. It was dormant only because the 0.4 boolean `channels`
         // capability made `channels.streaming` undeclarable. Issue #14.
         // Whatever place it names, it voices nothing of its own: it ends only
-        // what accepted chunks began, so a stream toward a refused place,
-        // whose chunks voice skipped, has nothing to end.
+        // what its own stream's accepted chunks began. A stream is its
+        // inferenceId and channelId (RFC-011 §6), so another channel's
+        // completion in the same inference ends nothing here, and a stream
+        // toward a refused place, whose chunks never reached voice, has
+        // nothing to end.
         const p = notif.params as ChannelsOutgoingCompleteParams;
         dbg('outgoing/complete:finalized', { inferenceId: p.inferenceId, channelId: p.channelId });
-        this.voice?.handleComplete(p.inferenceId);
+        this.voice?.handleComplete(p.inferenceId, p.channelId);
         break;
       }
 
