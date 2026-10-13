@@ -234,6 +234,20 @@ test('interruption: alignment-exact voiced/unvoiced split, TTS aborted, later ch
   assert.equal(provider.streams.length, 1);
 });
 
+test("an interrupted stream skips its later chunks until its completion, which ends the skip with the stream", () => {
+  const { provider, sink, out } = setup();
+  const skipped = (out as unknown as { skipped: Set<string> }).skipped;
+  out.handleChunk('inf1', 'discord:g:100', 'Hello there.');
+  assert.equal(provider.streams.length, 1, 'the stream began an utterance');
+  sink.emit({ type: 'interrupted', id: item('inf1'), playedMs: 0, by: { userId: 'u1', bot: false } });
+  out.handleChunk('inf1', 'discord:g:100', ' More.');
+  assert.equal(provider.streams.length, 1, 'a later chunk opens nothing');
+  assert.equal(sink.played.length, 1);
+  assert.ok(skipped.has(item('inf1')), 'its later chunks are skipped while the stream lasts');
+  out.handleComplete('inf1', 'discord:g:100');
+  assert.equal(skipped.size, 0, 'its completion drops the skip');
+});
+
 test('interruption without alignment: proportional estimate, flagged', () => {
   const { provider, sink, out, reports } = setup();
   out.handleChunk('inf1', 'discord:g:100', '0123456789'); // 10 chars

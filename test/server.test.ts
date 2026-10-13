@@ -1768,6 +1768,18 @@ describe('DiscordMcplServer', () => {
       assert.deepEqual(target(nw), { target: 'root' });
     });
 
+    it("keeps no note that a deleted channel of a kind it doesn't classify was posted in", async (t) => {
+      const { client, discord, server } = await started(t);
+      const postedIn = (server as unknown as { postedInUnclassified: Set<string> }).postedInUnclassified;
+      discord.facts.nw = { id: 'nw', guildId: 'g1', guildName: GUILD, type: 'unknown', name: 'new-kind' };
+      discord.simulateMessage(posted('m-nw', 'nw'));
+      await expectChanged(client);
+      await expectPush(client, 'discord:g1:nw');
+      assert.ok(postedIn.has('nw'), 'its message says one can be posted there');
+      discord.simulateChannelDelete('g1', 'nw');
+      assert.equal(postedIn.has('nw'), false, "the note goes with the channel's deletion");
+    });
+
     it("reads a registered channel's names from its descriptor, never from its label", async (t) => {
       const { client, discord } = await started(t);
       discord.facts.th1 = threadFacts('th1', 'design-chat');
@@ -2527,6 +2539,58 @@ describe('DiscordMcplServer', () => {
       assert.equal(ended, 1, "c1's own completion ends it");
       assert.equal(discord.sentMessages.length, 0);
     }
+  });
+
+  it('a completion naming a place a publish would refuse still ends the utterance its stream began at the channel itself (RFC-011 §6)', async (t) => {
+    // A completion carries the place its chunks did, but a host can get it
+    // wrong on an abort path. It voices nothing either way, and ends what
+    // its own stream began, so the utterance doesn't hold the floor.
+    let ended = 0;
+    const sent: string[] = [];
+    let sinkEvent: (ev: { type: 'cleared'; id: string }) => void = () => {};
+    const provider = {
+      openStream: () => ({
+        sendText(d: string) { sent.push(d); }, end() { ended++; }, abort() {}, onAudio() {}, onAlignment() {}, onEnd() {}, onError() {},
+      }),
+    };
+    const sink = {
+      onEvent: (fn: typeof sinkEvent) => { sinkEvent = fn; },
+      play() {},
+      cancel: () => false,
+    };
+    const voice = new VoiceOutput({ textChannels: null }, provider as never, { voiceId: 'v1' }, sink as never, () => {});
+    const { client, clientSocket, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter, voice);
+    const serving = server.serve(serverConn);
+    t.after(async () => {
+      voice.stop();
+      clientSocket.end();
+      await serving;
+      client.close();
+    });
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    // The server reads in order, so this request's answer comes after it has
+    // handled the notifications sent before it. It posts nothing.
+    const settle = () => client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [],
+    });
+
+    client.sendNotification(method.CHANNELS_OUTGOING_CHUNK, {
+      inferenceId: 'inf', conversationId: 'conv_1', channelId: 'discord:g1:c1', index: 0, delta: 'Root words.', threadId: null,
+    });
+    await settle();
+    sinkEvent({ type: 'cleared', id: streamKey('inf', 'discord:g1:c1') });
+    // The completion carries the streamed text, as a host's does.
+    client.sendNotification(method.CHANNELS_OUTGOING_COMPLETE, {
+      inferenceId: 'inf', conversationId: 'conv_1', channelId: 'discord:g1:c1',
+      content: [{ type: 'text', text: 'Root words.' }], threadId: 't-123',
+    });
+    await settle();
+    assert.equal(ended, 1);
+    assert.deepEqual(sent, ['Root words.'], 'the chunk is voiced once, and the completion adds nothing');
+    assert.equal(discord.sentMessages.length, 0);
   });
 
   it("a reply to a thread-starter message, published with what incoming carried, is delivered", async (t) => {
