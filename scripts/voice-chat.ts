@@ -253,7 +253,7 @@ client.once('ready', async () => {
         history.push(turn);
         if (full) turns.set(id, turn);
       }
-      out.handleComplete(id);
+      out.handleComplete(id, `discord:${GUILD}:${VC}`);
       activeStream = null;
       // Anything said while we were generating gets answered now.
       if (pendingUserLines.length) scheduleTurn();
