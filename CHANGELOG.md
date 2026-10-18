@@ -460,11 +460,9 @@ in the git log and PR descriptions.
     name), channel, time, and an excerpt of at most 80 characters, cut by
     code points so no emoji is split. `add_reaction` and `remove_reaction`
     return `{ result, target }` for a `latestFrom` selection.
-  - **A reply to a message that's gone fails** instead of posting
-    unthreaded. Today discord.js's default (`fail_if_not_exists`) does that
-    for every reply. A `latestFrom` reply also asks for it explicitly, since
-    its target was chosen for it, so it keeps failing if the default for
-    other replies changes (#58 makes them post unthreaded instead).
+  - **A `latestFrom` reply to a message that's gone fails** instead of
+    posting unthreaded, since its target was chosen for it. A reply by
+    `messageId` posts unthreaded instead (below).
   - **Selectors:** both are nullable and neither is required, so sparse
     calls and all-properties calls with the unused one null both work. Only
     omission and null mean absent: a string is a selector given, blank
@@ -475,6 +473,11 @@ in the git log and PR descriptions.
   - **`list_channel_members`** reports, for a thread, `unresolved` (members
     listed by ID only, whose names couldn't be read) and
     `possiblyIncomplete` (Discord returned exactly one page of members).
+- **A reply whose target is gone still posts** (#58). `reply_message` by
+  `messageId` used to fail the whole send with "Unknown message" when that
+  message had been deleted or the id was wrong; it now posts the content as a
+  plain message, and the result's `unthreaded` says the reply target wasn't
+  found. A `latestFrom` reply still fails, as above.
 - **A refused DM's sender can be told** (issue #60). Once the agent turns
   notices on (`filters_update {setDmNotice: true}`; they're off by default, so
   upgrading starts no messages to anyone), when the DM whitelist refuses a DM,

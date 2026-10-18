@@ -302,7 +302,7 @@ describe('resolveLatestFrom', () => {
     assert.ok(!r.ok && /2 member\(s\) here couldn't be resolved to names/.test(r.message), JSON.stringify(r));
   });
 
-  it('sends a latestFrom reply with fail_if_not_exists whatever the default for other replies', async (t) => {
+  it('sends a latestFrom reply with fail_if_not_exists, and a reply by id without it, whatever the client default', async (t) => {
     const adapter = new DiscordAdapter({ token: 'unused' });
     const client = (adapter as unknown as { client: Client }).client;
     t.after(() => client.destroy());
@@ -322,19 +322,17 @@ describe('resolveLatestFrom', () => {
       };
     });
     const reference = (i: number) => bodies[i].message_reference as Record<string, unknown>;
-    // Today discord.js's default (failIfNotExists: true) covers every reply.
-    await adapter.sendMessage('dm1', 'by id', { replyTo: '1200000000000000001' });
-    await adapter.sendMessage('dm1', 'by latestFrom', { replyTo: '1200000000000000002', requireReplyTarget: true });
-    assert.equal(reference(0).fail_if_not_exists, true, "a reply by id carries discord.js's default");
-    assert.equal(reference(1).fail_if_not_exists, true);
-    // With the default for other replies false, as #58 makes it, a reply by
-    // id posts unthreaded when its target is gone, and a latestFrom reply,
-    // whose target the server chose, still fails.
-    (client.options as { failIfNotExists: boolean }).failIfNotExists = false;
-    await adapter.sendMessage('dm1', 'by id', { replyTo: '1200000000000000003' });
-    await adapter.sendMessage('dm1', 'by latestFrom', { replyTo: '1200000000000000004', requireReplyTarget: true });
-    assert.equal(reference(2).fail_if_not_exists, false, 'a plain reply follows the default');
-    assert.equal(reference(3).fail_if_not_exists, true, 'a latestFrom reply keeps failing');
+    // A reply by id posts unthreaded when its target is gone (#58); a
+    // latestFrom reply, whose target the server chose, still fails. Each
+    // states it, so the client's failIfNotExists default doesn't matter.
+    for (const fallback of [true, false]) {
+      (client.options as { failIfNotExists: boolean }).failIfNotExists = fallback;
+      const n = bodies.length;
+      await adapter.sendMessage('dm1', 'by id', { replyTo: `120000000000000000${n + 1}` });
+      await adapter.sendMessage('dm1', 'by latestFrom', { replyTo: `120000000000000000${n + 2}`, requireReplyTarget: true });
+      assert.equal(reference(n).fail_if_not_exists, false, `a reply by id posts unthreaded (client default ${fallback})`);
+      assert.equal(reference(n + 1).fail_if_not_exists, true, `a latestFrom reply keeps failing (client default ${fallback})`);
+    }
     assert.deepEqual(bodies.map((b) => (b.message_reference as { message_id: string }).message_id),
       ['1200000000000000001', '1200000000000000002', '1200000000000000003', '1200000000000000004']);
   });
@@ -362,6 +360,8 @@ describe('reply and reaction tools', () => {
       },
       async sendMessage(channelId: string, _content: string, options: Record<string, unknown>) {
         calls.push({ op: 'send', channelId, options });
+        // As the adapter reports a reply by id whose target is gone (#58).
+        if (gone && !options.requireReplyTarget) return { messageId: '300000000000000001', replyTargetMissing: true };
         return { messageId: '300000000000000001' };
       },
       // #63's send receipt reads the cached channel for its label; none is cached here.
@@ -446,6 +446,19 @@ describe('reply and reaction tools', () => {
     const sent = 'the message Ra just sent, which is long enough that the receipt only echoes a short part of it to the resident';
     assert.equal(receipt.target.excerpt, `${sent.slice(0, 79)}…`, '80 characters, the ellipsis included');
     assert.match(receipt.target.selectedBy, /not a claim about what you have seen/);
+  });
+
+  it('says a reply by id went unthreaded when its target was gone', async () => {
+    const f = serverFixture();
+    const threaded = JSON.parse((await f.call('reply_message', { messageId: '200000000000000099', content: 'x' })).content[0].text);
+    assert.equal(threaded.unthreaded, undefined);
+    f.deleteTarget();
+    const res = await f.call('reply_message', { messageId: '200000000000000099', content: 'still posted' });
+    assert.ok(!res.isError, res.content[0].text);
+    const receipt = JSON.parse(res.content[0].text);
+    assert.equal(receipt.messageId, '300000000000000001');
+    assert.equal(receipt.discordChannelId, '1234567890123456789');
+    assert.match(receipt.unthreaded, /^Message 200000000000000099 wasn't found .*posted as a plain message, not a reply\.$/);
   });
 
   it('acts on the message chosen at selection, even if newer traffic arrives before the action', async () => {

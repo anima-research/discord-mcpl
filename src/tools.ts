@@ -84,7 +84,9 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'reply_message',
-    description: 'Reply to a specific message in a Discord channel, optionally with file attachments.' + RECEIPT_PROVENANCE,
+    description: 'Reply to a specific message in a Discord channel, optionally with file attachments. ' +
+      'If a messageId target no longer exists, the message is posted unthreaded and the result says so in ' +
+      'unthreaded; a latestFrom target that is gone fails the send instead.' + RECEIPT_PROVENANCE,
     inputSchema: {
       type: 'object',
       properties: {

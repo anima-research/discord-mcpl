@@ -1217,7 +1217,7 @@ export class DiscordAdapter {
     channelId: string,
     content: string,
     options?: { replyTo?: string; files?: OutgoingFile[]; requireReplyTarget?: boolean },
-  ): Promise<{ messageId: string }> {
+  ): Promise<{ messageId: string; replyTargetMissing?: true }> {
     const channel = await this.channelById(channelId);
     if (!channel) throw channelUnusable(channelId, 'nothing was sent');
     if (!('send' in channel)) throw noMessagesHere(channel, channelId, 'nothing was sent');
@@ -1227,25 +1227,29 @@ export class DiscordAdapter {
     // Files-only message (no text): still send one message carrying the files.
     if (chunks.length === 0 && attachments.length > 0) chunks.push('');
     let lastId = '';
+    let replyTargetMissing: true | undefined;
     for (let i = 0; i < chunks.length; i++) {
       // Attach files to the LAST chunk so they render after the full text.
       const isLast = i === chunks.length - 1;
       const sent = await (channel as TextChannel | DMChannel).send({
         content: chunks[i] || undefined,
-        // A reply to a message that's gone fails rather than posting
-        // unthreaded: discord.js sends fail_if_not_exists from the client's
-        // failIfNotExists option, true by default. requireReplyTarget states
-        // it for a reply whose target the server chose (a latestFrom
-        // selection), so that one keeps failing whatever the default for
-        // other replies becomes (#58 makes them post unthreaded instead).
+        // A reply whose target is gone (deleted, or a stale or mistyped id)
+        // posts unthreaded instead of failing the whole send with "Unknown
+        // message": the content reaching the channel matters more than the
+        // reply line. discord.js would send fail_if_not_exists: true by
+        // default, so each reply states it. requireReplyTarget keeps a reply
+        // whose target the server chose (a latestFrom selection) failing,
+        // since its target was chosen for it rather than named.
         reply: i === 0 && options?.replyTo
-          ? { messageReference: options.replyTo, ...(options.requireReplyTarget ? { failIfNotExists: true } : {}) }
+          ? { messageReference: options.replyTo, failIfNotExists: options.requireReplyTarget === true }
           : undefined,
         files: isLast && attachments.length > 0 ? attachments : undefined,
       });
       lastId = sent.id;
+      // Discord drops the reference when it posts a reply unthreaded.
+      if (i === 0 && options?.replyTo && !sent.reference) replyTargetMissing = true;
     }
-    return { messageId: lastId };
+    return replyTargetMissing ? { messageId: lastId, replyTargetMissing } : { messageId: lastId };
   }
 
   /** Resolve a DM recipient that may be a numeric user ID **or** a

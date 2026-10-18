@@ -1794,7 +1794,7 @@ export class DiscordMcplServer {
         const files = args.files as OutgoingFile[] | undefined;
         requireContentOrFiles(content, files);
         const { messageId: replyTo, target } = await this.resolveTargetMessage(channelId, args);
-        let result: { messageId: string };
+        let result: { messageId: string; replyTargetMissing?: true };
         try {
           result = await this.discord.sendMessage(
             channelId,
@@ -1807,6 +1807,13 @@ export class DiscordMcplServer {
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
         const receipt = await this.augmentSendResult(result.messageId, channelId, shifted);
+        if (result.replyTargetMissing) {
+          // Only an exact messageId gets here: a latestFrom reply fails instead.
+          return {
+            ...receipt,
+            unthreaded: `Message ${replyTo} wasn't found (deleted, or a wrong id), so this was posted as a plain message, not a reply.`,
+          };
+        }
         return target ? { ...receipt, target } : receipt;
       }
 
