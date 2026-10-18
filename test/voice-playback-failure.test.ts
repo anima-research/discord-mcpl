@@ -10,12 +10,15 @@ import assert from 'node:assert/strict';
 import { PassThrough, type Readable } from 'node:stream';
 import { createAudioPlayer, NoSubscriberBehavior, type AudioResource } from '@discordjs/voice';
 import {
-  DiscordVoiceSink, PlaybackFailure, VoiceOutput,
+  DiscordVoiceSink, PlaybackFailure, VoiceOutput, streamKey,
   type PcmSink, type SinkEvent, type SinkItem, type SpeakerInfo, type UtteranceReport,
 } from '../src/voice.js';
 import { DiscordMcplServer } from '../src/server.js';
 import type { DiscordAdapter } from '../src/discord-adapter.js';
 import type { TtsAlignment, TtsProvider, TtsStream, TtsVoice } from '@animalabs/voice-kit';
+
+/** The sink item of inference inf1's stream toward discord:g:100. */
+const ITEM = streamKey('inf1', 'discord:g:100');
 
 type SinkInternals = {
   player: unknown;
@@ -283,10 +286,10 @@ test('VoiceOutput ends a failed utterance, stops its synthesis and reports it as
   out.onReport((r) => reports.push(r));
 
   out.handleChunk('inf1', 'discord:g:100', 'Hello there.');
-  sink.emit({ type: 'cleared', id: 'inf1' });
+  sink.emit({ type: 'cleared', id: ITEM });
   assert.deepEqual(provider.streams[0]!.sent, ['Hello there.']);
   const reason = 'Cannot play a resource that has already ended.';
-  sink.emit({ type: 'failed', id: 'inf1', playedMs: 0, reason });
+  sink.emit({ type: 'failed', id: ITEM, playedMs: 0, reason });
 
   assert.equal(provider.streams[0]!.aborted, true, 'synthesis stops: no more billing for audio nobody hears');
   assert.equal(reports.length, 1);
@@ -298,7 +301,7 @@ test('VoiceOutput ends a failed utterance, stops its synthesis and reports it as
   assert.equal(r.unvoicedText, 'Hello there.');
   assert.equal(r.restUnvoiced, true, 'the reply was still streaming, and the report says the rest goes unvoiced');
 
-  // The rest of that inference isn't voiced: the model re-decides.
+  // The rest of that stream isn't voiced: the model re-decides.
   out.handleChunk('inf1', 'discord:g:100', ' More.');
   assert.equal(provider.streams.length, 1);
   assert.equal(sink.played.length, 1);
@@ -316,7 +319,7 @@ test('an item refused before clearance bills nothing and reports how long it was
 
   out.handleChunk('inf1', 'discord:g:100', 'Hello there.');
   t.mock.timers.tick(25);
-  sink.emit({ type: 'failed', id: 'inf1', playedMs: 0, reason: 'refused' });
+  sink.emit({ type: 'failed', id: ITEM, playedMs: 0, reason: 'refused' });
 
   assert.deepEqual(provider.streams[0]!.sent, [], 'no text went to the provider');
   assert.equal(provider.streams[0]!.aborted, true, 'the pre-opened socket is closed');
@@ -335,10 +338,10 @@ test('a finished utterance that never had audio is not counted as fully played, 
   out.onReport((r) => reports.push(r));
 
   out.handleChunk('inf1', 'discord:g:100', 'Hello there.');
-  out.handleComplete('inf1');
-  sink.emit({ type: 'cleared', id: 'inf1' });
+  out.handleComplete('inf1', 'discord:g:100');
+  sink.emit({ type: 'cleared', id: ITEM });
   // The fake provider sends no audio, so audioMs stays 0.
-  sink.emit({ type: 'finished', id: 'inf1', playedMs: 0 });
+  sink.emit({ type: 'finished', id: ITEM, playedMs: 0 });
 
   assert.equal(reports.length, 1);
   assert.equal(reports[0]!.status, 'spoken');
@@ -369,7 +372,7 @@ test('the server tells the model a failed utterance could not be played, tagged 
   assert.equal(sent.length, 1);
   const p = sent[0]!.params;
   assert.deepEqual(p.tags, ['voice:failed']);
-  assert.equal(p.eventId, 'discord_voice_failed_inf1');
+  assert.equal(p.eventId, 'discord_voice_failed_inf1_discord:g1:100');
   const text: string = p.payload.content[0].text;
   assert.equal(
     text,
@@ -485,11 +488,11 @@ test('a failed utterance ends its stream, and audio that comes after is dropped 
   const sink = new FakeSink();
   const out = new VoiceOutput({ textChannels: null }, provider, { voiceId: 'v1' }, sink, () => {});
   out.handleChunk('inf1', 'discord:g:100', 'Hello there.');
-  sink.emit({ type: 'cleared', id: 'inf1' });
+  sink.emit({ type: 'cleared', id: ITEM });
   const stream = sink.played[0]!.stream as PassThrough;
   const errors: unknown[] = [];
   stream.on('error', (e) => errors.push(e));
-  sink.emit({ type: 'failed', id: 'inf1', playedMs: 0, reason: PlaybackFailure.refused });
+  sink.emit({ type: 'failed', id: ITEM, playedMs: 0, reason: PlaybackFailure.refused });
   assert.equal(stream.writableEnded, true, "the failed branch ends the item's stream");
   provider.streams[0]!.audio(Buffer.alloc(882)); // a late chunk from the aborted synthesis
   await new Promise((r) => setImmediate(r));
@@ -512,7 +515,7 @@ test('a reply whose provider is unavailable at clearance plays nothing and is re
   const reports: UtteranceReport[] = [];
   out.onReport((r) => reports.push(r));
   out.handleChunk('inf1', 'discord:g:100', 'Hello there.');
-  out.handleComplete('inf1');
+  out.handleComplete('inf1', 'discord:g:100');
   await until(() => reports.length === 1, 'the report');
   const r = reports[0]!;
   assert.equal(r.status, 'spoken');
@@ -530,11 +533,11 @@ test('a failed reply that played to its end is reported in full, as a finished o
   const reports: UtteranceReport[] = [];
   out.onReport((r) => reports.push(r));
   out.handleChunk('inf1', 'discord:g:100', 'Hello there.');
-  out.handleComplete('inf1');
-  sink.emit({ type: 'cleared', id: 'inf1' });
+  out.handleComplete('inf1', 'discord:g:100');
+  sink.emit({ type: 'cleared', id: ITEM });
   // One second of audio at 44.1 kHz mono PCM16, all of it played but for alignment jitter.
   provider.streams[0]!.audio(Buffer.alloc(44_100 * 2));
-  sink.emit({ type: 'failed', id: 'inf1', playedMs: 900, reason: PlaybackFailure.streamFailed });
+  sink.emit({ type: 'failed', id: ITEM, playedMs: 900, reason: PlaybackFailure.streamFailed });
   const r = reports[0]!;
   assert.equal(r.status, 'failed');
   assert.equal(r.voicedText, 'Hello there.', 'within the slack of the whole: snapped to the full text');

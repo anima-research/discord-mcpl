@@ -11,8 +11,45 @@ export type DiscordChannelDescriptor = ChannelDescriptor & {
   capabilities?: {
     history?: { maxMessages?: number; supportsBeforeMessage?: boolean };
     acknowledgment?: { kind?: string; supportsValue?: boolean };
+    publish?: { target: 'root' };
   };
 };
+
+/**
+ * Where a channels/publish lands (MCPL RFC-011 `capabilities.publish`):
+ * `root` — the channel has no threads inside it, so every publish lands in
+ * the channel itself or fails, and a publish naming a thread is refused
+ * before anything is posted. True of every channel a message can be posted
+ * in (takesMessages), and of a DM: a Discord thread is its own channel, with
+ * its own id, never a thread within one.
+ */
+export const PUBLISH_TARGET = { target: 'root' } as const;
+
+/**
+ * Whether a publish or a stream toward this place (RFC-011's `threadId`)
+ * lands in the channel itself, the only place a `root` channel has: no
+ * `threadId` (a caller from before the RFC) or `null`. Any other value names
+ * a thread inside the channel, which no Discord channel has, so it's refused.
+ */
+export function inRoot(threadId: unknown): boolean {
+  return threadId === undefined || threadId === null;
+}
+
+/**
+ * Whether a message can be posted in a guild channel of this kind, so that a
+ * publish to it lands in it: the kinds the resolver names (text,
+ * announcement, and a voice or stage channel's text chat) and threads. Not a
+ * category, which holds channels, nor a forum, whose posts are threads
+ * inside it. Nor a kind this server doesn't know (`unknown`): a media
+ * channel, whose posts are threads too, a kind Discord adds later, or a
+ * channel whose kind isn't cached. A channel of such a kind that a message
+ * has been delivered from takes messages all the same (ChannelFacts'
+ * `postedIn`): a forum's or media channel's posts arrive under their own
+ * thread's id, never the forum's.
+ */
+export function takesMessages(kind: ChannelFacts['type']): boolean {
+  return isNameAddressableKind(kind) || kind === 'thread';
+}
 
 /** MCPL channel ID format: discord:<guildId>:<channelId> */
 export function mcplChannelId(guildId: string, channelId: string): string {
@@ -61,7 +98,9 @@ export function channelLabelFor(c: ChannelFacts): string {
 
 /** A guild channel's MCPL descriptor, from what is known of it. Its metadata
  *  carries the names its label was made from, so a reader never has to parse
- *  them back out of a label. */
+ *  them back out of a label. It declares a root publish target only where a
+ *  message can be posted: a kind that takes messages (takesMessages), or a
+ *  channel a message has been delivered from (`postedIn`). */
 export function toDescriptor(
   channel: ChannelFacts,
   initiallyOpen = false,
@@ -84,6 +123,7 @@ export function toDescriptor(
     capabilities: {
       history: { maxMessages: maxHistory, supportsBeforeMessage: true },
       acknowledgment: { kind: 'reaction', supportsValue: true },
+      ...(takesMessages(channel.type) || channel.postedIn ? { publish: PUBLISH_TARGET } : {}),
     },
   };
 }
@@ -117,6 +157,7 @@ export function toDmDescriptor(
     capabilities: {
       history: { maxMessages: maxHistory, supportsBeforeMessage: true },
       acknowledgment: { kind: 'reaction', supportsValue: true },
+      publish: PUBLISH_TARGET,
     },
   };
 }

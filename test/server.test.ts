@@ -35,6 +35,7 @@ import { DiscordMcplServer, serveStdio } from '../src/server.js';
 import { parseChannelRef } from '../src/channel-names.js';
 import { applyMentionCandidates } from '../src/discord-adapter.js';
 import { TOOL_CLASSES } from '../src/tool-classes.js';
+import { VoiceOutput, streamKey } from '../src/voice.js';
 import type {
   ChannelChange,
   ChannelFacts,
@@ -1683,6 +1684,8 @@ describe('DiscordMcplServer', () => {
       assert.deepEqual(added[0].metadata, {
         channelType: 'thread', parentId: 'c1', channelName: 'design-chat', guildName: GUILD, parentName: 'general',
       });
+      // A post to it lands in it: a Discord thread is its own channel.
+      assert.deepEqual((added[0] as { capabilities?: { publish?: unknown } }).capabilities?.publish, { target: 'root' });
       await expectPush(client, 'discord:g1:th1');
 
       // A second message in the same thread is not announced again.
@@ -1735,10 +1738,55 @@ describe('DiscordMcplServer', () => {
         discord.simulateMessage(posted(`m-${channelId}`, channelId, extra as Partial<DiscordMessageData>));
         const added = (await expectChanged(client)).added ?? [];
         assert.deepEqual(added.map((d) => [d.id, d.label]), [[`discord:${guildId}:${channelId}`, `discord:${guildId}:${channelId}`]]);
+        // Each declares where a post lands: by its kind, or, its kind not
+        // cached, because a message was just delivered from it.
+        const publish = (added[0] as { capabilities?: { publish?: unknown } }).capabilities?.publish;
+        assert.deepEqual(publish, { target: 'root' }, channelId);
         await expectPush(client, `discord:${guildId}:${channelId}`);
       }
       // The id label pastes back as exactly that channel.
       assert.deepEqual(parseChannelRef('discord:g9:cx'), { kind: 'id', id: 'cx' });
+      // Once the cache knows the channel, its next message re-derives it,
+      // with its name, and its target stays.
+      discord.facts.unseen = { id: 'unseen', guildId: 'g1', guildName: GUILD, type: 'text', name: 'found' };
+      discord.simulateMessage(posted('m-unseen-2', 'unseen'));
+      const updated = (await expectChanged(client)).updated ?? [];
+      assert.deepEqual(
+        updated.map((d) => [d.label, (d as { capabilities?: { publish?: unknown } }).capabilities?.publish]),
+        [['#found (Test Guild)', { target: 'root' }]],
+      );
+      await expectPush(client, 'discord:g1:unseen');
+    });
+
+    it("declares a target for a channel of a kind it doesn't classify once a message comes from it, on every path", async (t) => {
+      const { client, discord } = await started(t);
+      // A kind Discord added that this server maps to `unknown`: it isn't
+      // listed, and its kind says nothing of whether a message can be posted.
+      discord.facts.nw = { id: 'nw', guildId: 'g1', guildName: GUILD, type: 'unknown', name: 'new-kind' };
+      discord.simulateMessage(posted('m-nw', 'nw'));
+      const added = (await expectChanged(client)).added ?? [];
+      const target = (d: unknown) => (d as { capabilities?: { publish?: unknown } }).capabilities?.publish;
+      assert.deepEqual(added.map((d) => [d.id, target(d)]), [['discord:g1:nw', { target: 'root' }]]);
+      await expectPush(client, 'discord:g1:nw');
+      // A guild rename re-derives it from the cache alone, and the target
+      // stays: the message it came from still says one can be posted there.
+      discord.facts.nw = { ...discord.facts.nw!, guildName: 'Renamed' };
+      discord.simulateGuildRename('g1');
+      const updated = (await expectChanged(client)).updated ?? [];
+      const nw = updated.find((d) => d.id === 'discord:g1:nw');
+      assert.deepEqual(target(nw), { target: 'root' });
+    });
+
+    it("keeps no note that a deleted channel of a kind it doesn't classify was posted in", async (t) => {
+      const { client, discord, server } = await started(t);
+      const postedIn = (server as unknown as { postedInUnclassified: Set<string> }).postedInUnclassified;
+      discord.facts.nw = { id: 'nw', guildId: 'g1', guildName: GUILD, type: 'unknown', name: 'new-kind' };
+      discord.simulateMessage(posted('m-nw', 'nw'));
+      await expectChanged(client);
+      await expectPush(client, 'discord:g1:nw');
+      assert.ok(postedIn.has('nw'), 'its message says one can be posted there');
+      discord.simulateChannelDelete('g1', 'nw');
+      assert.equal(postedIn.has('nw'), false, "the note goes with the channel's deletion");
     });
 
     it("reads a registered channel's names from its descriptor, never from its label", async (t) => {
@@ -2262,6 +2310,330 @@ describe('DiscordMcplServer', () => {
 
     client.close();
     await serverPromise;
+  });
+
+  /** A served connection past its channel registration, for the publish
+   *  tests. The test's end ends the client's socket, so the server reads the
+   *  end even when a failed test left it writing (closing the client resets
+   *  a socket with unread data, which mcpl-core's readline doesn't hear,
+   *  leaving the server's connection open and the run waiting). */
+  async function publishing(t: { after: (fn: () => Promise<void>) => void }) {
+    const { client, clientSocket, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serving = server.serve(serverConn);
+    t.after(async () => {
+      clientSocket.end();
+      await serving;
+      client.close();
+    });
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    return { client, discord, regMsg };
+  }
+
+  it('channels/register declares a root publish target on the channels it lists (RFC-011)', async (t) => {
+    const { regMsg } = await publishing(t);
+    assert.equal(regMsg.type, 'request');
+    if (regMsg.type === 'request') {
+      const channels = (regMsg.request.params as { channels: Array<{ id: string; capabilities?: Record<string, unknown> }> }).channels;
+      assert.ok(channels.length > 0);
+      for (const c of channels) {
+        assert.deepEqual(c.capabilities?.publish, { target: 'root' }, `${c.id} declares root`);
+        // The existing per-channel capabilities are kept beside it.
+        assert.ok(c.capabilities?.history && c.capabilities?.acknowledgment, `${c.id} keeps history/acknowledgment`);
+      }
+    }
+  });
+
+  it('channels/publish with threadId null posts to the channel and echoes null', async (t) => {
+    const { client, discord } = await publishing(t);
+
+    const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1', threadId: null,
+      content: [{ type: 'text', text: 'At the root.' }],
+    })) as Record<string, unknown>;
+    assert.equal(res.delivered, true);
+    assert.equal(typeof res.messageId, 'string');
+    assert.ok('threadId' in res && res.threadId === null, 'the explicit root target is echoed');
+    assert.deepEqual(discord.sentMessages.map((m) => [m.channelId, m.content]), [['c1', 'At the root.']]);
+  });
+
+  it('channels/publish naming a thread is refused before anything is posted', async (t) => {
+    const { client, discord } = await publishing(t);
+
+    // Each reason says what's true and what to send instead.
+    const thread = /^Discord channels have no threads inside them, so thread "t-123" can't be posted to here: a Discord thread is its own channel\. Publish to the thread's own channel id, or send threadId null \(or none\) to post in this channel\.$/;
+    const noThread = (shown: string) => new RegExp(`^threadId ${shown} names no thread: send threadId null \\(or none\\) to post in this channel\\.$`);
+    const cases: Array<[unknown, RegExp]> = [
+      ['t-123', thread],
+      ['', noThread('""')],
+      [42, noThread('42')],
+      [{ id: 't' }, noThread('\\{"id":"t"\\}')],
+    ];
+    for (const [threadId, reason] of cases) {
+      const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+        conversationId: 'conv_1', channelId: 'discord:g1:c1', threadId,
+        content: [{ type: 'text', text: 'Into a thread?' }],
+      })) as Record<string, unknown>;
+      assert.equal(res.delivered, false, `threadId ${JSON.stringify(threadId)} refused`);
+      // No message id: a definitive no-post the host may count as failed.
+      assert.equal('messageId' in res, false);
+      assert.equal('threadId' in res, false, 'nothing landed, so no target is echoed');
+      assert.match(String(res.reason), reason);
+    }
+    assert.equal(discord.sentMessages.length, 0, 'nothing was posted');
+  });
+
+  it('channels/publish without threadId answers a legacy caller exactly as before', async (t) => {
+    const { client, discord } = await publishing(t);
+
+    const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1',
+      content: [{ type: 'text', text: 'Legacy.' }],
+    })) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(res).sort(), ['delivered', 'messageId']);
+    assert.equal(res.delivered, true);
+    assert.equal(discord.sentMessages.length, 1);
+    // Nothing to post: the answer it always had, with no reason or echo.
+    const empty = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1',
+      content: [{ type: 'image', data: 'aGk=', mimeType: 'image/png' }],
+    })) as Record<string, unknown>;
+    assert.deepEqual(empty, { delivered: false });
+  });
+
+  it('channels/publish with threadId null and nothing to post is refused with a reason, and echoes null', async (t) => {
+    const { client, discord } = await publishing(t);
+
+    const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1', threadId: null,
+      content: [{ type: 'image', data: 'aGk=', mimeType: 'image/png' }],
+    })) as Record<string, unknown>;
+    assert.equal(res.delivered, false);
+    assert.ok('threadId' in res && res.threadId === null, 'the explicit root target is echoed');
+    // A refusal to a targeted publish says why (RFC-011 §4).
+    assert.equal(res.reason, 'Nothing to post: the content holds no text.');
+    assert.equal(discord.sentMessages.length, 0);
+  });
+
+  it('a stream toward a place a publish would refuse reaches no voice, and one toward the channel itself does (RFC-011 §6)', async (t) => {
+    // A TTS provider and a playback sink that record what voice would
+    // synthesize and queue.
+    const synthesized: string[] = [];
+    const queued: string[] = [];
+    let sinkEvent: (ev: { type: 'cleared'; id: string }) => void = () => {};
+    const provider = {
+      openStream: () => ({
+        sendText: (text: string) => { synthesized.push(text); },
+        end() {}, abort() {}, onAudio() {}, onAlignment() {}, onEnd() {}, onError() {},
+      }),
+    };
+    const sink = {
+      onEvent: (fn: typeof sinkEvent) => { sinkEvent = fn; },
+      play: (item: { id: string }) => { queued.push(item.id); },
+      cancel: () => false,
+    };
+    const voice = new VoiceOutput({ textChannels: null }, provider as never, { voiceId: 'v1' }, sink as never, () => {});
+    const { client, clientSocket, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter, voice);
+    const serving = server.serve(serverConn);
+    t.after(async () => {
+      voice.stop();
+      clientSocket.end();
+      await serving;
+      client.close();
+    });
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+    const stream = (inferenceId: string, place: Record<string, unknown>, delta: string) => {
+      client.sendNotification(method.CHANNELS_OUTGOING_CHUNK, {
+        inferenceId, conversationId: 'conv_1', channelId: 'discord:g1:c1', index: 0, delta, ...place,
+      });
+    };
+    const complete = (inferenceId: string, place: Record<string, unknown>) => {
+      client.sendNotification(method.CHANNELS_OUTGOING_COMPLETE, {
+        inferenceId, conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [], ...place,
+      });
+    };
+    // The server reads in order, so a request's answer comes after it has
+    // handled the notifications sent before it. The publish each stream
+    // heads for is that request here.
+    const publish = (place: Record<string, unknown>, text: string) => client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [{ type: 'text', text }], ...place,
+    }) as Promise<Record<string, unknown>>;
+
+    for (const threadId of ['t-123', '', 42]) {
+      const inferenceId = `toward-${JSON.stringify(threadId)}`;
+      stream(inferenceId, { threadId }, 'Speech for a thread.');
+      complete(inferenceId, { threadId });
+      assert.equal((await publish({ threadId }, 'Speech for a thread.')).delivered, false);
+    }
+    assert.deepEqual(queued, [] as string[], 'no utterance is queued toward a refused place');
+    assert.deepEqual(synthesized, [] as string[], 'and nothing is synthesized');
+    assert.equal(discord.sentMessages.length, 0);
+
+    // The channel itself, named or as a legacy caller leaves it: voiced.
+    for (const [i, place] of [{ threadId: null }, {}].entries()) {
+      const inferenceId = `root-${i}`;
+      stream(inferenceId, place, `Root speech ${i}.`);
+      assert.equal((await publish(place, `Root speech ${i}.`)).delivered, true);
+      const item = streamKey(inferenceId, 'discord:g1:c1');
+      assert.ok(queued.includes(item), `${inferenceId} is queued`);
+      sinkEvent({ type: 'cleared', id: item });
+      complete(inferenceId, place);
+    }
+    assert.deepEqual(synthesized, ['Root speech 0.', 'Root speech 1.']);
+  });
+
+  it("a stream's completion ends only its own channel's utterance, and another channel's stream joins none (RFC-011 §6)", async (t) => {
+    // Voice is configured for c1 only. One inference streams toward c1, and
+    // toward c2 either at a place a publish refuses or at the channel itself.
+    for (const elsewhere of [{ threadId: 't-123' }, { threadId: null }]) {
+      const synthesized: string[] = [];
+      const queued: string[] = [];
+      let ended = 0;
+      let sinkEvent: (ev: { type: 'cleared'; id: string }) => void = () => {};
+      const provider = {
+        openStream: () => ({
+          sendText: (text: string) => { synthesized.push(text); },
+          end() { ended++; }, abort() {}, onAudio() {}, onAlignment() {}, onEnd() {}, onError() {},
+        }),
+      };
+      const sink = {
+        onEvent: (fn: typeof sinkEvent) => { sinkEvent = fn; },
+        play: (item: { id: string }) => { queued.push(item.id); },
+        cancel: () => false,
+      };
+      const voice = new VoiceOutput({ textChannels: ['c1'] }, provider as never, { voiceId: 'v1' }, sink as never, () => {});
+      const { client, clientSocket, serverConn, discord } = await createTestPair();
+      const server = new DiscordMcplServer(discord as unknown as DiscordAdapter, voice);
+      const serving = server.serve(serverConn);
+      t.after(async () => {
+        voice.stop();
+        clientSocket.end();
+        await serving;
+        client.close();
+      });
+      await mcplHandshake(client);
+      const regMsg = await client.nextMessage();
+      if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+
+      const chunk = (channelId: string, place: Record<string, unknown>, delta: string) => {
+        client.sendNotification(method.CHANNELS_OUTGOING_CHUNK, {
+          inferenceId: 'shared', conversationId: 'conv_1', channelId, index: 0, delta, ...place,
+        });
+      };
+      const complete = (channelId: string, place: Record<string, unknown>) => {
+        client.sendNotification(method.CHANNELS_OUTGOING_COMPLETE, {
+          inferenceId: 'shared', conversationId: 'conv_1', channelId, content: [], ...place,
+        });
+      };
+      // The server reads in order, so this request's answer comes after it
+      // has handled the notifications sent before it. It posts nothing.
+      const settle = () => client.sendRequest(method.CHANNELS_PUBLISH, {
+        conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [],
+      });
+
+      chunk('discord:g1:c1', { threadId: null }, 'First words. ');
+      await settle();
+      sinkEvent({ type: 'cleared', id: streamKey('shared', 'discord:g1:c1') });
+      chunk('discord:g1:c2', elsewhere, 'Words for another channel.');
+      complete('discord:g1:c2', elsewhere);
+      chunk('discord:g1:c1', { threadId: null }, 'Last words.');
+      await settle();
+      assert.equal(ended, 0, `c2's completion ends nothing on c1 (c2 ${JSON.stringify(elsewhere)})`);
+      complete('discord:g1:c1', { threadId: null });
+      await settle();
+      assert.deepEqual(queued, [streamKey('shared', 'discord:g1:c1')], 'c2 queues nothing');
+      assert.deepEqual(synthesized, ['First words. ', 'Last words.'], "c2's words aren't voiced, and c1's all are");
+      assert.equal(ended, 1, "c1's own completion ends it");
+      assert.equal(discord.sentMessages.length, 0);
+    }
+  });
+
+  it('a completion naming a place a publish would refuse still ends the utterance its stream began at the channel itself (RFC-011 §6)', async (t) => {
+    // A completion carries the place its chunks did, but a host can get it
+    // wrong on an abort path. It voices nothing either way, and ends what
+    // its own stream began, so the utterance doesn't hold the floor.
+    let ended = 0;
+    const sent: string[] = [];
+    let sinkEvent: (ev: { type: 'cleared'; id: string }) => void = () => {};
+    const provider = {
+      openStream: () => ({
+        sendText(d: string) { sent.push(d); }, end() { ended++; }, abort() {}, onAudio() {}, onAlignment() {}, onEnd() {}, onError() {},
+      }),
+    };
+    const sink = {
+      onEvent: (fn: typeof sinkEvent) => { sinkEvent = fn; },
+      play() {},
+      cancel: () => false,
+    };
+    const voice = new VoiceOutput({ textChannels: null }, provider as never, { voiceId: 'v1' }, sink as never, () => {});
+    const { client, clientSocket, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter, voice);
+    const serving = server.serve(serverConn);
+    t.after(async () => {
+      voice.stop();
+      clientSocket.end();
+      await serving;
+      client.close();
+    });
+    await mcplHandshake(client);
+    const regMsg = await client.nextMessage();
+    if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+    // The server reads in order, so this request's answer comes after it has
+    // handled the notifications sent before it. It posts nothing.
+    const settle = () => client.sendRequest(method.CHANNELS_PUBLISH, {
+      conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [],
+    });
+
+    client.sendNotification(method.CHANNELS_OUTGOING_CHUNK, {
+      inferenceId: 'inf', conversationId: 'conv_1', channelId: 'discord:g1:c1', index: 0, delta: 'Root words.', threadId: null,
+    });
+    await settle();
+    sinkEvent({ type: 'cleared', id: streamKey('inf', 'discord:g1:c1') });
+    // The completion carries the streamed text, as a host's does.
+    client.sendNotification(method.CHANNELS_OUTGOING_COMPLETE, {
+      inferenceId: 'inf', conversationId: 'conv_1', channelId: 'discord:g1:c1',
+      content: [{ type: 'text', text: 'Root words.' }], threadId: 't-123',
+    });
+    await settle();
+    assert.equal(ended, 1);
+    assert.deepEqual(sent, ['Root words.'], 'the chunk is voiced once, and the completion adds nothing');
+    assert.equal(discord.sentMessages.length, 0);
+  });
+
+  it("a reply to a thread-starter message, published with what incoming carried, is delivered", async (t) => {
+    // A host echoes incoming's threadId into its publish (agent-framework's
+    // defaultPublishThreadId). A message that started a thread carries none,
+    // so the reply goes to the channel itself, with or without an explicit
+    // null target.
+    const { client, discord } = await publishing(t);
+    await client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });
+
+    discord.simulateMessage({
+      id: 'starter', content: 'kick off', cleanContent: 'kick off',
+      authorId: 'u1', authorName: 'Bob', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
+      mentions: ['bot_123'], attachments: [], timestamp: new Date(),
+    });
+    let msg = await client.nextMessage();
+    while (msg.type !== 'request' || msg.request.method !== method.CHANNELS_INCOMING) msg = await client.nextMessage();
+    client.sendResponse(msg.request.id, { results: [{ messageId: 'starter', accepted: true }] });
+    const incoming = (msg.request.params as ChannelsIncomingParams).messages[0] as unknown as Record<string, unknown>;
+
+    const carried = 'threadId' in incoming ? { threadId: incoming.threadId } : {};
+    for (const target of [carried, { threadId: (carried as { threadId?: unknown }).threadId ?? null }]) {
+      const res = (await client.sendRequest(method.CHANNELS_PUBLISH, {
+        conversationId: 'conv_1', channelId: 'discord:g1:c1', ...target,
+        content: [{ type: 'text', text: 'On it.' }],
+      })) as Record<string, unknown>;
+      assert.equal(res.delivered, true, `published with ${JSON.stringify(target)}`);
+    }
+    assert.deepEqual(discord.sentMessages.map((m) => [m.channelId, m.content]), [['c1', 'On it.'], ['c1', 'On it.']]);
   });
 
   it('guildCreate registers new guild channels via channels/changed', async () => {

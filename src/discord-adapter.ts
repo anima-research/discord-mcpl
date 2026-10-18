@@ -399,6 +399,9 @@ export interface ChannelFacts {
    *  which the resolver prefers to a voice or stage channel, or another of
    *  its kind. Then its label is its id (channelLabelFor). */
   nameResolves?: boolean;
+  /** A message has been delivered from this channel, so one can be posted
+   *  in it, whatever its kind says (the server's, not the cache's). */
+  postedIn?: boolean;
 }
 
 /** One member of a channel, as the agent should see them. */

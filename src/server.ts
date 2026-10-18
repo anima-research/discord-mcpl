@@ -59,7 +59,7 @@ import { MessageFlags } from 'discord.js';
 import { toolDefinitions } from './tools.js';
 import { withToolClasses } from './tool-classes.js';
 import { featureSets, isEnabled, featureSetForTool } from './feature-sets.js';
-import { ChannelManager, channelLabelFor, mcplChannelId, parseMcplChannelId, toDescriptor, toDmDescriptor } from './channels.js';
+import { ChannelManager, channelLabelFor, inRoot, mcplChannelId, parseMcplChannelId, takesMessages, toDescriptor, toDmDescriptor } from './channels.js';
 import {
   channelLabel,
   isNameAddressableKind,
@@ -772,6 +772,12 @@ export class DiscordMcplServer {
    *  again (registerGuildDelivery). Snowflakes aren't reused, so an id here
    *  stays true. */
   private deletedChannels = new Set<string>();
+  /** Guild channels a message has been delivered from whose kind doesn't say
+   *  a message can be posted in them (a kind this server doesn't classify).
+   *  Holding a message says it, so each is
+   *  described as `postedIn` (a root publish target) on every path that
+   *  describes it, not only the delivery's. */
+  private postedInUnclassified = new Set<string>();
   private stateTracker = new StateTracker();
   /** Buffers for channels/outgoing/chunk streams, keyed by inferenceId */
 
@@ -832,7 +838,9 @@ export class DiscordMcplServer {
           `Heard up to: "${tail}"\nNOT heard: "${head}"\n(The text was still delivered in the text channel as usual.)`;
     this.conn.sendRequest(method.PUSH_EVENT, {
       featureSet: 'discord.messaging',
-      eventId: `discord_voice_${r.status}_${r.inferenceId}`,
+      // One utterance per stream, and an inference can stream to two voiced
+      // channels: the channel keeps their reports' ids apart.
+      eventId: `discord_voice_${r.status}_${r.inferenceId}_${r.channelId}`,
       timestamp: new Date().toISOString(),
       origin: {
         source: 'discord',
@@ -1680,7 +1688,14 @@ export class DiscordMcplServer {
       // moment streaming turned on. Now: chunks feed voice synthesis, and
       // complete finalizes the utterance. Nothing here ever sends text.
       case method.CHANNELS_OUTGOING_CHUNK: {
-        const p = notif.params as ChannelsOutgoingChunkParams;
+        // RFC-011 §6: a stream carries the place its publish will name. A
+        // place inside the channel is one handlePublish refuses, so a stream
+        // toward it renders nothing here either, voice included.
+        const p = notif.params as ChannelsOutgoingChunkParams & { threadId?: unknown };
+        if (!inRoot(p.threadId)) {
+          dbg('outgoing/chunk:refused-target', { inferenceId: p.inferenceId, channelId: p.channelId, threadId: p.threadId });
+          break;
+        }
         this.voice?.handleChunk(p.inferenceId, p.channelId, p.delta);
         break;
       }
@@ -1697,9 +1712,15 @@ export class DiscordMcplServer {
         // NOTE at the capability declaration), reintroduced on a different
         // signal. It was dormant only because the 0.4 boolean `channels`
         // capability made `channels.streaming` undeclarable. Issue #14.
+        // Whatever place it names, it voices nothing of its own: it ends only
+        // what its own stream's accepted chunks began. A stream is its
+        // inferenceId and channelId (RFC-011 §6), so another channel's
+        // completion in the same inference ends nothing here, and a stream
+        // toward a refused place, whose chunks never reached voice, has
+        // nothing to end.
         const p = notif.params as ChannelsOutgoingCompleteParams;
         dbg('outgoing/complete:finalized', { inferenceId: p.inferenceId, channelId: p.channelId });
-        this.voice?.handleComplete(p.inferenceId);
+        this.voice?.handleComplete(p.inferenceId, p.channelId);
         break;
       }
 
@@ -3327,7 +3348,8 @@ export class DiscordMcplServer {
   /** A guild channel's descriptor, by the one rule every path registers by
    *  (toDescriptor), with its subscription and history settings. */
   private guildDescriptor(facts: ChannelFacts): ChannelDescriptor {
-    return toDescriptor(facts, this.isChannelSubscribed(facts.id), this.backscrollLimitFor(facts.id));
+    const described = this.postedInUnclassified.has(facts.id) ? { ...facts, postedIn: true } : facts;
+    return toDescriptor(described, this.isChannelSubscribed(facts.id), this.backscrollLimitFor(facts.id));
   }
 
   /** Register descriptors, and tell a connected host of each one that's new
@@ -3590,6 +3612,9 @@ export class DiscordMcplServer {
     if (!this.discord.channelAdmitted(guildId, channelId, facts.parentId ?? null)) return withheld('not-admitted', named);
     const unarchived = opts.postedAt !== undefined && facts.archivedAt !== undefined && opts.postedAt > facts.archivedAt;
     if (facts.archived && !unarchived) return withheld('archived', named);
+    // The delivery itself says a message can be posted here, whatever the
+    // kind: a forum's or media channel's posts come under their own ids.
+    if (!takesMessages(facts.type)) this.postedInUnclassified.add(channelId);
     this.registerChannels([this.guildDescriptor(facts)]);
     return id;
   }
@@ -3623,6 +3648,7 @@ export class DiscordMcplServer {
     for (const id of ids) {
       this.deletedChannels.delete(id);
       this.deletedChannels.add(id);
+      this.postedInUnclassified.delete(id);
     }
     while (this.deletedChannels.size > DELETED_CHANNELS_KEPT) {
       this.deletedChannels.delete(this.deletedChannels.values().next().value as string);
@@ -3792,11 +3818,32 @@ export class DiscordMcplServer {
     }
   }
 
-  private async handlePublish(params: ChannelsPublishParams): Promise<ChannelsPublishResult> {
+  private async handlePublish(
+    params: ChannelsPublishParams & { threadId?: unknown },
+  ): Promise<ChannelsPublishResult & { threadId?: null; reason?: string }> {
     const parsed = parseMcplChannelId(params.channelId);
     if (!parsed) {
       throw new Error(`Invalid channel ID: ${params.channelId}`);
     }
+
+    // The publish target (MCPL RFC-011). Absent: a legacy caller, answered
+    // exactly as before. `null`: the channel itself, explicitly, echoed back
+    // in every result so the host can check it against its request. Anything
+    // else, '' included, names a thread inside the channel, which no Discord
+    // channel has (a Discord thread is its own channel): refused before
+    // anything is posted, with no message id, so the host can count it as
+    // definitely not sent. Each reason says what to send instead.
+    const target = params.threadId;
+    if (!inRoot(target)) {
+      const reason = typeof target === 'string' && target !== ''
+        ? `Discord channels have no threads inside them, so thread "${target}" can't be posted to here: ` +
+          "a Discord thread is its own channel. Publish to the thread's own channel id, " +
+          'or send threadId null (or none) to post in this channel.'
+        : `threadId ${JSON.stringify(target)} names no thread: send threadId null (or none) to post in this channel.`;
+      dbg('handlePublish:refused-target', { channelId: params.channelId, threadId: target });
+      return { delivered: false, reason };
+    }
+    const echo = target === null ? { threadId: null } : {};
 
     // Extract text from content blocks
     const text = params.content
@@ -3806,7 +3853,11 @@ export class DiscordMcplServer {
 
     if (!text) {
       dbg('handlePublish:skip', { channelId: params.channelId, reason: 'empty-text' });
-      return { delivered: false, messageId: undefined };
+      // A targeted publish's refusal carries its reason (RFC-011 §4). A
+      // legacy caller's answer stays as it was.
+      return target === null
+        ? { delivered: false, messageId: undefined, threadId: null, reason: 'Nothing to post: the content holds no text.' }
+        : { delivered: false, messageId: undefined };
     }
 
     dbg('handlePublish', { channelId: params.channelId, textLen: text.length, preview: text.slice(0, 80) });
@@ -3814,7 +3865,7 @@ export class DiscordMcplServer {
     this.stateTracker.recordSent(result.messageId, parsed.channelId, text);
     dbg('handlePublish:sent', { channelId: params.channelId, messageId: result.messageId });
 
-    return { delivered: true, messageId: result.messageId };
+    return { delivered: true, messageId: result.messageId, ...echo };
   }
 
   // ── Rollback ──

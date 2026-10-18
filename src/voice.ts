@@ -104,7 +104,8 @@ export interface SpeakerInfo {
 }
 
 export interface SinkItem {
-  /** Utterance id (= inferenceId); ties sink events back to accounting. */
+  /** Utterance id, one per stream (streamKey: its inferenceId and channel);
+   *  ties sink events back to accounting. Opaque to the sink. */
   id: string;
   /** 48k stereo raw PCM. */
   stream: Readable;
@@ -278,8 +279,8 @@ export interface UtteranceReport {
   interruptedBy?: SpeakerInfo;
   /** Why playback failed (status 'failed' only), from PlaybackFailure. */
   failure?: string;
-  /** Status 'interrupted' or 'failed' only: the inference was still
-   *  streaming, and what it goes on to say isn't voiced either. */
+  /** Status 'interrupted' or 'failed' only: the stream was still going, and
+   *  what the inference goes on to say in it isn't voiced either. */
   restUnvoiced?: true;
 }
 
@@ -292,8 +293,11 @@ interface ActiveUtterance {
    *  flush must open a fresh one. */
   ttsDead: boolean;
   out: PassThrough;
+  /** The stream this utterance voices: an inference's prose toward one
+   *  channel. */
+  inferenceId: string;
   channelId: string;
-  /** All prose received from the host for this inference. */
+  /** All prose received from the host for this stream. */
   sentText: string;
   /** Received but not yet billed: accumulates until clearance, then flushes
    *  to the provider in one send. Empty once cleared. */
@@ -315,9 +319,17 @@ interface ActiveUtterance {
   done: boolean;
 }
 
+/** A stream's identity, which is also its utterance's sink item id. MCPL
+ *  RFC-011 §6 gives a stream one place per (inferenceId, channelId), so an
+ *  inference streaming to two channels is two streams: each is voiced only if
+ *  its own channel is, and each completion ends only its own utterance. */
+export function streamKey(inferenceId: string, mcplChannelId: string): string {
+  return JSON.stringify([inferenceId, mcplChannelId]);
+}
+
 export class VoiceOutput {
-  private active = new Map<string, ActiveUtterance>(); // inferenceId →
-  private skipped = new Set<string>();                 // inferenceIds we're ignoring
+  private active = new Map<string, ActiveUtterance>(); // streamKey →
+  private skipped = new Set<string>();                 // streamKeys we're ignoring
   private reportFns: Array<(r: UtteranceReport) => void> = [];
 
   constructor(
@@ -335,16 +347,17 @@ export class VoiceOutput {
   onReport(fn: (r: UtteranceReport) => void): void { this.reportFns.push(fn); }
 
   handleChunk(inferenceId: string, mcplChannelId: string, delta: string): void {
-    if (this.skipped.has(inferenceId)) return;
-    let utt = this.active.get(inferenceId);
+    const key = streamKey(inferenceId, mcplChannelId);
+    if (this.skipped.has(key)) return;
+    let utt = this.active.get(key);
     if (!utt) {
       const parsed = parseMcplChannelId(mcplChannelId);
       if (!parsed || (this.cfg.textChannels && !this.cfg.textChannels.includes(parsed.channelId))) {
-        this.skipped.add(inferenceId);
+        this.skipped.add(key);
         return;
       }
-      const opened = this.open(inferenceId, mcplChannelId);
-      if (!opened) { this.skipped.add(inferenceId); return; }
+      const opened = this.open(key, inferenceId, mcplChannelId);
+      if (!opened) { this.skipped.add(key); return; }
       utt = opened;
     }
     if (utt.done) return; // chunks after complete: host bug, drop
@@ -360,9 +373,10 @@ export class VoiceOutput {
     }
   }
 
-  handleComplete(inferenceId: string): void {
-    this.skipped.delete(inferenceId);
-    const utt = this.active.get(inferenceId);
+  handleComplete(inferenceId: string, mcplChannelId: string): void {
+    const key = streamKey(inferenceId, mcplChannelId);
+    this.skipped.delete(key);
+    const utt = this.active.get(key);
     if (!utt || utt.done) return;
     utt.done = true;
     // Cleared → end the provider stream; audio keeps draining into the
@@ -383,10 +397,10 @@ export class VoiceOutput {
     this.skipped.clear();
   }
 
-  private open(inferenceId: string, channelId: string): ActiveUtterance | null {
+  private open(key: string, inferenceId: string, channelId: string): ActiveUtterance | null {
     const out = new PassThrough();
     const utt: ActiveUtterance = {
-      tts: null, ttsDead: false, out, channelId,
+      tts: null, ttsDead: false, out, inferenceId, channelId,
       sentText: '', pendingText: '', billedChars: 0,
       cleared: false, queuedAt: Date.now(), clearedAt: null, holdTimer: null,
       aChars: [], aStartMs: [], aDurMs: [], audioMs: 0, done: false,
@@ -400,13 +414,13 @@ export class VoiceOutput {
     // Queue for playback immediately. The sink's 'cleared' event — after
     // carrier-clear + hold-off, once the player has accepted the item — is
     // what flushes banked text into synthesis.
-    this.sink.play({ id: inferenceId, stream: out });
+    this.sink.play({ id: key, stream: out });
     const maxHold = this.cfg.maxHoldMs;
     if (maxHold != null && maxHold > 0) {
-      utt.holdTimer = setTimeout(() => this.expire(inferenceId), maxHold);
+      utt.holdTimer = setTimeout(() => this.expire(key), maxHold);
       utt.holdTimer.unref?.();
     }
-    this.active.set(inferenceId, utt);
+    this.active.set(key, utt);
     return utt;
   }
 
@@ -465,8 +479,8 @@ export class VoiceOutput {
   /** The sink cleared this utterance to play: flush banked text into
    *  synthesis (opening a fresh stream if the pre-opened one died). This is
    *  the only place characters start billing. */
-  private handleCleared(inferenceId: string): void {
-    const utt = this.active.get(inferenceId);
+  private handleCleared(key: string): void {
+    const utt = this.active.get(key);
     if (!utt || utt.cleared) return;
     utt.cleared = true;
     utt.clearedAt = Date.now();
@@ -492,16 +506,16 @@ export class VoiceOutput {
   /** Max-hold expiry: the floor never opened. Drop the utterance UNSPOKEN
    *  with a receipt — zero characters billed, the model decides whether
    *  re-saying is worth an inference. */
-  private expire(inferenceId: string): void {
-    const utt = this.active.get(inferenceId);
+  private expire(key: string): void {
+    const utt = this.active.get(key);
     if (!utt || utt.cleared) return; // cleared won the race
-    if (!this.sink.cancel(inferenceId)) return; // dequeuing raced us; let it play
-    this.active.delete(inferenceId);
-    if (!utt.done) this.skipped.add(inferenceId); // drop trailing chunks
+    if (!this.sink.cancel(key)) return; // dequeuing raced us; let it play
+    this.active.delete(key);
+    if (!utt.done) this.skipped.add(key); // drop trailing chunks
     utt.tts?.abort();
     utt.out.end();
     this.report({
-      inferenceId, channelId: utt.channelId, status: 'expired',
+      inferenceId: utt.inferenceId, channelId: utt.channelId, status: 'expired',
       playedMs: 0, queuedMs: Date.now() - utt.queuedAt, billedChars: utt.billedChars,
       voicedText: '', unvoicedText: utt.sentText, estimated: false,
     });
@@ -523,7 +537,7 @@ export class VoiceOutput {
     const fullyPlayed = utt.done && utt.audioMs > 0 && ev.playedMs + FULLY_PLAYED_SLACK_MS >= utt.audioMs;
 
     if (ev.type === 'interrupted' || ev.type === 'failed') {
-      // Kill synthesis and drop any not-yet-arrived prose for this inference:
+      // Kill synthesis and drop any not-yet-arrived prose for this stream:
       // the utterance is dead, resuming mid-thought as audio would be worse
       // than the model re-deciding what (and whether) to say. A playback
       // failure ends it the same way, and stops billing for audio no one
@@ -536,7 +550,7 @@ export class VoiceOutput {
         ? { voicedText: utt.sentText, unvoicedText: '', estimated: false }
         : this.split(utt, ev.playedMs);
       this.report({
-        inferenceId: ev.id, channelId: utt.channelId, status: ev.type,
+        inferenceId: utt.inferenceId, channelId: utt.channelId, status: ev.type,
         playedMs: ev.playedMs, queuedMs, billedChars: utt.billedChars,
         ...split,
         ...(ev.type === 'interrupted' ? { interruptedBy: ev.by } : { failure: ev.reason }),
@@ -551,7 +565,7 @@ export class VoiceOutput {
       ? { voicedText: utt.sentText, unvoicedText: '', estimated: false }
       : this.split(utt, ev.playedMs);
     this.report({
-      inferenceId: ev.id, channelId: utt.channelId, status: 'spoken',
+      inferenceId: utt.inferenceId, channelId: utt.channelId, status: 'spoken',
       playedMs: ev.playedMs, queuedMs, billedChars: utt.billedChars,
       ...split,
     });

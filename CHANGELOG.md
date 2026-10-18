@@ -723,6 +723,35 @@ in the git log and PR descriptions.
   claimed for it). Migration: write the key (or let first materialization
   seed it), unset the env, verify `source: "file"`; the alias retires per
   issue #16 once fleet inventory shows migrated files.
+- **Every channel a message can be posted in declares where a publish
+  lands (MCPL RFC-011).** Its descriptor carries
+  `capabilities.publish.target: 'root'`: a Discord thread is its own
+  channel, so no channel has threads inside it, and a publish lands in the
+  channel itself or fails. That covers text, announcement, voice and stage
+  channels, threads, DMs, and any channel a message has been delivered
+  from, whatever its kind, one this server doesn't classify included,
+  since a forum's or media channel's posts arrive under their own
+  thread's id. A category or forum declares nothing. `channels/publish`
+  takes the RFC's `threadId`:
+  - `null` posts to the channel itself (as several messages when the text
+    is long), and every result echoes `threadId: null`, so the host can
+    check it against its request. With no text to post, it's refused with
+    a reason;
+  - any other value, `''` included, is refused before anything is posted,
+    as `delivered: false` with no message id and a reason that says what
+    to send instead;
+  - a request without the field is answered exactly as before.
+
+  A `channels/outgoing/chunk` naming a `threadId` other than `null` is
+  ignored, so voice speaks nothing toward a place a publish would refuse.
+  Voice also takes a stream to be its `inferenceId` and `channelId`
+  together, as the RFC does: an inference streaming toward two channels
+  makes two utterances, each voiced only if its own channel is, and a
+  completion ends only its own stream's. Every stream of an inference used
+  to join one utterance, so words toward a channel that isn't voiced were
+  spoken in a voiced channel's, any channel's completion ended it, and a
+  stream toward a channel that isn't voiced, arriving first, silenced the
+  voiced one. A voice receipt's event id now names the channel as well.
 
 ### Changed
 
