@@ -90,6 +90,12 @@ class MockDiscordAdapter {
   historyIngressReason(): string | null {
     return null;
   }
+  /** No thread's channel here is stale, so the catch-up looks none up. */
+  async lookUpStaleParent(): Promise<void> {}
+  /** Every channel's facts here are known and current. */
+  ingressFactsNotCurrent(): string | null {
+    return null;
+  }
   onChannelCreate(handler: (channel: ChannelFacts) => void): void {
     this._channelCreateHandler = handler;
   }
@@ -101,6 +107,7 @@ class MockDiscordAdapter {
   }
   onGuildDelete(): void {}
   onGuildAvailable(): void {}
+  onThreadsSynced(): void {}
   /** No guild here comes back from an outage. */
   isStale(): boolean {
     return false;
@@ -520,7 +527,7 @@ describe('DiscordMcplServer', () => {
 
     // The enable didn't apply: history stays off, as the request before it left it.
     assert.equal(history?.isError, true);
-    assert.match(history?.content[0]?.text ?? '', /Feature set 'discord\.history' is not enabled/);
+    assert.match(history?.content[0]?.text ?? '', /^fetch_history is turned off here: this host has disabled the "discord\.history" feature set/);
     // Nor did the disable: messaging still works.
     assert.notEqual(reaction?.isError, true, `add_reaction was refused: ${reaction?.content[0]?.text}`);
     assert.deepEqual(discord.reactions.at(-1), { channelId: 'discord:g1:c1', messageId: 'm1', emoji: '👍' });
@@ -642,7 +649,7 @@ describe('DiscordMcplServer', () => {
 
     assert.equal(receipt?.accepted, true, 'the early policy was answered');
     assert.equal(history?.isError, true, "the policy's disable held past notifications/initialized");
-    assert.match(history?.content[0]?.text ?? '', /Feature set 'discord\.history' is not enabled/);
+    assert.match(history?.content[0]?.text ?? '', /^fetch_history is turned off here: this host has disabled the "discord\.history" feature set/);
   });
 
   it("a request whose handler throws something that isn't an Error is answered, and serving goes on", async (t) => {
@@ -651,6 +658,8 @@ describe('DiscordMcplServer', () => {
     (server as unknown as { handleChannelClose: () => never }).handleChannelClose = () => {
       throw undefined;
     };
+    // What the server answers with, as it hands it to its connection.
+    const sendError = t.mock.method(serverConn, 'sendError');
     const serverPromise = server.serve(serverConn);
     let refusal: unknown;
     let answered = false;
@@ -668,8 +677,7 @@ describe('DiscordMcplServer', () => {
 
     const { code, message } = refusal as { code?: number; message?: string };
     assert.equal(code, -32603, `answered with an internal error: ${String(message)}`);
-    // mcpl-core's RpcError prefixes the code to the server's message.
-    assert.match(String(message), /-32603: undefined$/, 'the thrown value as text');
+    assert.deepEqual(sendError.mock.calls.map((call) => call.arguments.slice(1)), [[-32603, 'undefined']], 'the thrown value as text');
     assert.equal(answered, true, 'the next request was answered');
   });
 
@@ -939,6 +947,8 @@ describe('DiscordMcplServer', () => {
     (server as unknown as { handleChannelClose: () => never }).handleChannelClose = () => {
       throw new Error('');
     };
+    // What the server answers with, as it hands it to its connection.
+    const sendError = t.mock.method(serverConn, 'sendError');
     const serverPromise = server.serve(serverConn);
     let refusal: unknown;
     try {
@@ -952,10 +962,9 @@ describe('DiscordMcplServer', () => {
       await serverPromise;
     }
 
-    const { code, message } = refusal as { code?: number; message?: string };
+    const { code } = refusal as { code?: number };
     assert.equal(code, -32603);
-    // mcpl-core's RpcError prefixes the code to the server's message.
-    assert.match(String(message), /-32603: Error$/, 'an empty message falls back to the value as text');
+    assert.deepEqual(sendError.mock.calls.map((call) => call.arguments.slice(1)), [[-32603, 'Error']], 'an empty message falls back to the value as text');
   });
 
   it('tools/list returns tool definitions', async () => {
@@ -2137,7 +2146,7 @@ describe('DiscordMcplServer', () => {
     assert.ok(header.startsWith('<missed channel="#gen\\u202eeral" thread="plan\\u202eend" channelId="th-bidi" guild="Test\\u0085Guild"'), JSON.stringify(header));
   });
 
-  it("the reconnect sweep looks up a cached thread whose channel isn't named, and keeps what the cache knew if that fails", async () => {
+  it("the reconnect sweep looks up a cached thread whose channel isn't named, and keeps what the cache knew if that fails", async (t) => {
     // As the cache holds a thread the client knows only partly: no name, no channel.
     const partly: ChannelMeta = { name: null, guildId: 'g1', guildName: 'Test Guild', isDM: false, threadId: 'th3', threadParentName: null };
     const looked = await sweepOne('th3', partly, {
@@ -2147,10 +2156,14 @@ describe('DiscordMcplServer', () => {
     const lookedText = (looked.payload.content[0] as { text: string }).text;
     assert.ok(lookedText.startsWith('<missed channel="#general" thread="late-thread" channelId="th3"'), lookedText);
     assert.equal((looked.origin as Record<string, unknown>).threadParentName, 'general');
+    const errors = t.mock.method(console, 'error', () => {});
     const failed = await sweepOne('th3', partly, new Error('Missing Access'));
     const failedText = (failed.payload.content[0] as { text: string }).text;
     assert.ok(failedText.startsWith('<missed thread="th3" channelId="th3" guild="Test Guild"'), failedText);
     assert.deepEqual(failed.tags, ['chat:thread'], 'still a thread');
+    // The failure reaches stderr, not only the debug log.
+    const lines = errors.mock.calls.map((c) => String(c.arguments[0]));
+    assert.ok(lines.some((l) => l.includes("couldn't look up channel th3") && l.includes('Missing Access')), lines.join('\n'));
   });
 
   it("the reconnect sweep's header names a thread without its channel, or by its id, when either isn't known", async () => {
