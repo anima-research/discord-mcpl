@@ -220,7 +220,7 @@ describe('explainDiscordError: what was sent, and the id-less branches', () => {
   it('missing access on a channel does not assume a server, and points at list_channels with its limits', () => {
     const text = explainDiscordError(discordError('Missing Access', 50001, 403), { channelId: '444' });
     assert.match(text, /or it's a DM this bot isn't in/);
-    assert.match(text, /within the configured filters; threads and DMs aren't listed/);
+    assert.match(text, /and their active threads, within the configured filters; DMs aren't listed/);
   });
 
   it("reads a message from any thrown value that carries one, not only an Error", () => {

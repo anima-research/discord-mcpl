@@ -173,7 +173,7 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'list_channels',
-    description: "List channels in one Discord server, specified by guildId, subject to configured channel filters. Returns channel IDs, names, types, parent IDs and labels. Listing a channel does not subscribe to its traffic. Use list_subscriptions for ambient subscriptions.",
+    description: "List channels and their active threads in one Discord server, specified by guildId, subject to configured channel filters. Returns IDs, names, types (thread for a thread), parent IDs (a thread's channel) and labels. Listing a channel does not subscribe to its traffic. Use list_subscriptions for ambient subscriptions.",
     inputSchema: {
       type: 'object',
       properties: {

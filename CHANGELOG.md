@@ -19,6 +19,20 @@ in the git log and PR descriptions.
   to react 💤 on every hidden message by default; choose `marks: all` for that.
   The admin commands' entry under Changed has the details.
 
+### Added
+
+- **`list_channels` lists a server's active threads** (#59), each with its
+  type, its channel as `parentId`, and its id, `discord:<guild>:<thread>`,
+  as its label, since names don't address threads. The channel filters
+  admit a thread as they admit its messages: by its own id, its channel's,
+  or its channel's category. Archived threads aren't listed, and nor is a
+  thread whose channel isn't known, such as one known only from a message,
+  or a stale one: the server's stale threads are fetched first, as its
+  channels are, and a thread its server came back without waits until
+  Discord reports it again or a read of it fetches it. A forum's active
+  posts are listed as threads with the forum as their `parentId`. The
+  tool's description now says it lists threads.
+
 ### Changed
 
 - **The admin commands make 💤 awareness marks an explicit choice.**
@@ -66,6 +80,28 @@ in the git log and PR descriptions.
   host's undo places marks that follow branches: they are re-applied on every
   switch, with no frozen audience and no cancel, so no choice here can
   authorize them as a one-shot act.
+
+- **Two error texts that said threads aren't listed now point to
+  `list_channels` for them** (#59). Anything matching the old texts,
+  quoted here, needs the new ones:
+  - A MISSING_ACCESS error for a channel said that, for a server channel,
+    `list_channels` shows the channels the bot can see there "within the
+    configured filters; threads and DMs aren't listed". It now says it
+    shows them "and their active threads, within the configured filters;
+    DMs aren't listed."
+  - A forum's or a media channel's error said "Its posts are threads, and
+    no tool here lists them, so a post's id comes only from a message
+    posted in it or a link to it." It now says that the active posts the
+    channel filters allow are the threads `list_channels` for its server
+    shows with that channel as their parent, and that an archived post's
+    id comes only from a message posted in it or a link to it.
+- **A report that the bot was added to a thread clears the thread's stale
+  mark** (#59), as a fresh fetch, an update, or a sync that lists it
+  already did. Discord sends one when the bot is added to a thread, such
+  as a private thread it was removed from while away, and discord.js
+  applies it to the thread it already holds without an event of its own,
+  so the mark stayed, and a thread its server had come back without stayed
+  out of `list_channels` after the bot was added back.
 
 ## 0.3.0 — 2026-10-18
 

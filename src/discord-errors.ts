@@ -108,7 +108,7 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>,
       why = channel
         ? `This bot can't reach channel ${channel}: the channel's permissions or its server leave this bot ` +
           "out, or it's a DM this bot isn't in. For a server channel, list_channels shows the channels this bot " +
-          "can see there, within the configured filters; threads and DMs aren't listed."
+          "can see there and their active threads, within the configured filters; DMs aren't listed."
         : guild
           ? `This bot can't reach server ${guild}: it isn't in it, or can't see what this call needs there. ` +
             'list_guilds shows the servers it is in.'

@@ -36,9 +36,10 @@ const unusable = (id: string, nothing: string) =>
 const unhandled = (id: string, nothing: string) =>
   `Channel ${id} exists, but it's a kind of channel this version of the adapter can't handle, so ${nothing}. ` +
   'Only an operator updating the adapter can change that.';
-const posts =
-  " Its posts are threads, and no tool here lists them, so a post's id comes only from a message posted in it or a " +
-  "link to it. A post's messages are written through that id, and read through it where the configured channel filters allow.";
+const posts = (id: string) =>
+  ` Its posts are threads. The active ones the configured channel filters allow are the threads list_channels for server ${GUILD} ` +
+  `shows with ${id} as their parent, and an archived post's id comes only from a message posted in it or a link to it. ` +
+  "A post's messages are written through its id, and read through it where the configured channel filters allow.";
 const inCategory = (id: string) =>
   ` The channels in it that the configured channel filters allow are the ones list_channels for server ${GUILD} ` +
   `shows with ${id} as their parent.`;
@@ -129,8 +130,8 @@ describe('a channel that holds no messages', () => {
     for (const [name, call, nothing] of paths) {
       const says: Array<[string, string]> = [
         [CATEGORY, `Channel ${CATEGORY} is a category, which holds no messages, so ${nothing}.${inCategory(CATEGORY)}`],
-        [FORUM, `Channel ${FORUM} is a forum, which holds no messages, so ${nothing}.${posts}`],
-        [MEDIA, `Channel ${MEDIA} is a media channel, which holds no messages, so ${nothing}.${posts}`],
+        [FORUM, `Channel ${FORUM} is a forum, which holds no messages, so ${nothing}.${posts(FORUM)}`],
+        [MEDIA, `Channel ${MEDIA} is a media channel, which holds no messages, so ${nothing}.${posts(MEDIA)}`],
         [DIRECTORY, `Channel ${DIRECTORY} is a directory channel, which holds no messages, so ${nothing}.${servers}`],
         // A kind the table doesn't name, such as one a later discord.js builds, is named by its number.
         [LATER_KIND, `Channel ${LATER_KIND} is a kind of channel (type 99) that this adapter can't read or send to, so ${nothing}. ` +
@@ -146,7 +147,7 @@ describe('a channel that holds no messages', () => {
     const server = new DiscordMcplServer(adapterWith(t).adapter) as unknown as ToolServer;
     const read = await server.handleToolCall('fetch_history', { channelId: FORUM });
     assert.equal(read.isError, true);
-    assert.equal(read.content[0].text, `Channel ${FORUM} is a forum, which holds no messages, so nothing was read.${posts}`);
+    assert.equal(read.content[0].text, `Channel ${FORUM} is a forum, which holds no messages, so nothing was read.${posts(FORUM)}`);
 
     // A send names where it was aimed after the error's own words, and adds nothing else.
     const sent = await server.handleToolCall('send_message', { channelId: CATEGORY, content: 'hello' });
