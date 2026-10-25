@@ -57,7 +57,7 @@ import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, type DmNoticeDecis
 const LATEST_FROM_EXCERPT = 80;
 import type { ChatInputCommandInteraction } from 'discord.js';
 import { headerValue, labelValue, quotedValue, renderSourceHeader } from './source-header.js';
-import { MessageFlags } from 'discord.js';
+import { ApplicationCommandOptionType, MessageFlags } from 'discord.js';
 import {
   boundedReply,
   controlOutcomeUnknown,
@@ -209,12 +209,8 @@ function messagePlace(channelName: string | null | undefined, thread: ThreadPlac
     : { channel: channelName ?? null, thread: null };
 }
 
-/** A thread message's identity, as every lane that delivers it carries it
- *  (channels/incoming metadata, a push's origin, the sweep's): the thread's
- *  name and the channel it hangs off, each left out when it isn't known.
- *  No MCPL threadId: that names a thread within a channel, and a Discord
- *  thread is its own channel, already named by the channel id. Empty for a
- *  message that isn't in a thread. */
+/** No MCPL threadId: that names a thread within a channel, and a Discord
+ *  thread is its own channel, already named by the channel id. */
 function threadFields(thread: ThreadPlace): { threadName?: string; threadParentName?: string } {
   if (!thread.threadId) return {};
   return {
@@ -243,9 +239,8 @@ function addressFlags(
   return { isExplicitMention, isReplyToBot, isMention: isExplicitMention || isReplyToBot };
 }
 
-/** MCPL RFC-001 address tags, reserved chat:* core with umbrellas included so
- *  no host-side implication expansion is needed. The host's wake gate routes
- *  on these, for a create and for each edit. */
+/** MCPL RFC-001 address tags, umbrellas included, so a host needs no
+ *  implication expansion. The host's wake gate routes on these. */
 function addressTags(flags: { isExplicitMention: boolean; isReplyToBot: boolean; isMention: boolean }, isDM: boolean, isBot: boolean): string[] {
   const tags: string[] = [];
   if (flags.isExplicitMention) tags.push('chat:mention');
@@ -543,12 +538,9 @@ function postedPartsNote(p: PostedParts, refused: boolean, history: boolean): st
         : 'sending it again could post it twice, and not sending it could leave it out') + `; ${tell}.`);
 }
 
-/** chx-compat ignore prefix. ChapterX-style Discord bots send `m continue`
- *  as a no-op trigger to wake their model and immediately delete the message
- *  afterward, but messageCreate fires before the delete propagates, so the
- *  message would otherwise leak into Lena's chronicle as ambient noise.
- *  Match by prefix (`startsWith`) so trailing whitespace or auto-appended
- *  text doesn't slip through. Case-sensitive: a literal `m continue` only. */
+/** ChapterX-style Discord bots send `m continue` as a no-op trigger to wake
+ *  their model and delete the message at once, but messageCreate fires before
+ *  the delete propagates, so the message would otherwise be delivered. */
 const CHX_NOOP_PREFIX = 'm continue';
 
 /** discord-mcpl's note on a push from a guild channel or thread where the
@@ -575,17 +567,17 @@ const AGENT_TIMESTAMP_STYLE = resolveTimestampStyle();
 // Image normalization (downsample-on-ingest)
 // ============================================================================
 
-/** Longest edge (px) we keep for inlined images. Matches the ~1568px ceiling
- *  every major vision model downscales to server-side, so resizing to this is
- *  perceptually lossless — the model discards anything finer regardless. */
+/** Anthropic downscales an image whose long edge is over 1568 px or whose
+ *  cost would be over 1568 visual tokens (2576 px and 4784 tokens on Claude 4.7
+ *  and later models). */
 const IMAGE_LONG_EDGE_MAX = 1568;
 /** JPEG quality when re-encoding opaque images. */
 const IMAGE_JPEG_QUALITY = 85;
-/** Cap on the *encoded* bytes we inline (raw, pre-base64). Anthropic accepts
- *  ~5MB/image of base64; staying under ~3.5MB raw keeps us comfortably inside. */
+/** Anthropic accepts up to 5 MB of base64 per image on Amazon Bedrock and
+ *  10 MB on its own API; base64 adds a third, so this raw cap stays under the
+ *  smaller limit. */
 const IMAGE_OUTPUT_RAW_CAP = 3.5 * 1024 * 1024;
-/** Refuse to even download sources larger than this (OOM guard). sharp's own
- *  pixel limit guards the decoded bitmap against decompression bombs. */
+/** sharp's own pixel limit guards the decoded bitmap against decompression bombs. */
 const IMAGE_FETCH_CEILING = 25 * 1024 * 1024;
 
 /** Absolute ceiling on inlined text-attachment bytes. The configurable
@@ -616,12 +608,9 @@ async function normalizeImageForInference(
     const meta = await sharp(buf, { animated: true }).metadata();
     const longest = Math.max(meta.width ?? 0, meta.height ?? 0);
     const isAnimated = (meta.pages ?? 1) > 1;
-    // The pass-through fast paths below may ONLY emit formats the model API
-    // accepts. sharp happily reads svg/tiff/avif/heif too — an SVG small
-    // enough to skip re-encoding used to sail through as `image/svg` and
-    // poison the agent's history with a permanently-400ing block (LabClaude,
-    // 2026-07-11). Non-API formats now fall through to the re-encode
-    // pipeline, which rasterizes them to PNG/JPEG.
+    // The pass-through fast paths below may only emit formats the model API
+    // accepts. sharp also reads SVG, TIFF, AVIF and HEIF, which fall through to
+    // the re-encode.
     const API_SAFE_FORMATS = new Set(['jpeg', 'png', 'gif', 'webp']);
     const apiSafe = API_SAFE_FORMATS.has(meta.format ?? '');
 
@@ -639,9 +628,7 @@ async function normalizeImageForInference(
       return { data: buf.toString('base64'), mimeType: `image/${meta.format}` };
     }
 
-    // Fresh pipeline per encode (sharp instances aren't safely reusable across
-    // multiple toBuffer() calls). resize() with withoutEnlargement is a no-op
-    // when the image is already within bounds but over the byte cap.
+    // resize() with withoutEnlargement is a no-op when the image is already within bounds but over the byte cap.
     const resizeOpts = { width: IMAGE_LONG_EDGE_MAX, height: IMAGE_LONG_EDGE_MAX, fit: 'inside' as const, withoutEnlargement: true };
     const base = () => sharp(buf).resize(resizeOpts);
 
@@ -679,7 +666,7 @@ interface CreateMemory {
   resolve: () => void;
   /** True once `settled` has resolved (lets callers skip the await). */
   done: boolean;
-  /** Coalescing scope the create used: a channel id, or null for feature-set scope. */
+  /** Coalescing scope the create used (RFC-006): a channel id, or null for feature-set scope. */
   scope?: string | null;
   /** The create's rendering context, for a replacement that keeps it. */
   render?: { prefix: string; replyMarker: string; location: string; authorName: string; attachments: ContentBlock[] };
@@ -752,11 +739,9 @@ export class DiscordMcplServer {
    *  saved, or the file couldn't be read, copied aside or rewritten. */
   private reactionChannelsUnsaved = false;
 
-  /** Resolved when the current connection's first featureSets/update
-   *  (either form) has been processed — the signal that §5.3 policy is
-   *  settled and pushes will land inside the granted window. Gates channel
-   *  registration and the reconnect sweep. One per connection (serve()), so
-   *  a host that connects later waits for its own policy too. */
+  /** Resolved when the connection's first featureSets/update has been
+   *  processed: the signal that the §5.3 policy is settled, so pushes land
+   *  inside the granted window. */
   private policyAnswered: Promise<void>;
   private resolvePolicyAnswered!: () => void;
   /** Whether a connection has used the policy gate the constructor made. */
@@ -802,9 +787,8 @@ export class DiscordMcplServer {
    * (deliverOwed). Persisted with the watermarks.
    */
   private readonly owed = new Map<string, OwedMessage[]>();
-  /** DM channel IDs we've forwarded from. Tracked (and persisted with the
-   *  watermark) because discord.js can't enumerate past DM channels, so the
-   *  reconnect sweep needs a remembered list of which DMs to re-scan. */
+  /** discord.js can't enumerate past DM channels, so the reconnect sweep needs
+   *  a remembered list of the DMs to scan again. */
   private dmChannelIds = new Set<string>();
   /** Per-channel tally of ambient messages MISSED since the channel was last
    *  unsubscribed — answers the agent's "how much have I missed in #x since I
@@ -1012,20 +996,15 @@ export class DiscordMcplServer {
   /** Channels forgotten while no host was connected, which the next
    *  connection's sync announces as removed. */
   private unannouncedRemovals = new Set<string>();
-  /** Discord channels and threads deleted lately, oldest first, at most
-   *  DELETED_CHANNELS_KEPT: a message, an edit or the reconnect sweep can
-   *  still be on its way from one when it goes, and must not register it
-   *  again (registerGuildDelivery). Snowflakes aren't reused, so an id here
-   *  stays true. */
+  /** Snowflakes aren't reused, so an id here stays deleted. */
   private deletedChannels = new Set<string>();
   private stateTracker = new StateTracker();
   /** Buffers for channels/outgoing/chunk streams, keyed by inferenceId */
 
   constructor(
     private discord: DiscordAdapter,
-    /** Voice output (Spec 14.3 consumer). Null = voice not configured; the
-     *  handshake then declares no channels.streaming and the host streams
-     *  nothing here. */
+    /** Voice output (MCPL SPEC 14.3 consumer). Null: voice isn't configured,
+     *  so the handshake declares no channels.streaming. */
     private voice: import('./voice.js').VoiceOutput | null = null,
   ) {
     this.policyAnswered = new Promise((resolve) => {
@@ -1094,19 +1073,7 @@ export class DiscordMcplServer {
           interruptedByBot: r.interruptedBy.bot,
         } : {}),
       } as Record<string, unknown>,
-      // RFC-001 tags: hosts route/gate on these. The wake rule is
-      // ball-in-your-court: 'voice:interrupted' and 'voice:expired' both
-      // leave the model with a decision only it can make (someone grabbed
-      // the floor mid-sentence / your words were never said — re-decide),
-      // so hosts should gate them WAKING, like a reply. 'voice:truncated'
-      // is context: the text landed in the text channel, nothing to decide.
-      // Third-party speech while recently-engaged (the engagement-window
-      // rule) is the floor/gate layer's job, not this transport's.
-      // 'voice:failed' is context too, like 'voice:truncated': the text
-      // landed in the text channel. The model sees it on its next turn (the
-      // next person to speak wakes it), and can say the line again then if it
-      // still needs saying. Some causes pass (a slow start, the limit on one
-      // reply), so it isn't an operator's fault to fix each time.
+      // RFC-001 tags: hosts route and gate on these.
       tags: [expired ? 'voice:expired' : interrupted ? 'voice:interrupted' : failed ? 'voice:failed' : 'voice:truncated'],
       payload: { content: [textContent(line)] },
     } satisfies PushEventParams).catch(() => {});
@@ -1126,11 +1093,9 @@ export class DiscordMcplServer {
    */
   async setupSlashCommands(): Promise<void> {
     this.discord.onSlashCommand((interaction) => {
-      // Dispatched without awaiting, so a handler's rejection would be
-      // unhandled — and on Node ≥ 15 an unhandled rejection ends the
-      // process. Discord rejects a late reply ("Unknown interaction" once
-      // its 3-second acknowledgment window has passed), so this must never
-      // take the server down with it.
+      // Not awaited, and on Node ≥ 15 an unhandled rejection ends the process.
+      // Discord refuses a late reply ("Unknown interaction" once its 3-second
+      // acknowledgment window has passed).
       void this.handleSlashCommand(interaction).catch((err) => {
         console.error(
           `[discord-mcpl] /${interaction.commandName} failed:`,
@@ -1144,7 +1109,7 @@ export class DiscordMcplServer {
         description: "Undo the agent's last turn(s) — admin only",
         options: [
           {
-            type: 4, // INTEGER
+            type: ApplicationCommandOptionType.Integer,
             name: 'messages',
             description: 'Number of context messages to remove (any participant; default 1)',
             required: false,
@@ -1159,13 +1124,13 @@ export class DiscordMcplServer {
         description: 'Remove a message (or range) from the agent context by link — admin only',
         options: [
           {
-            type: 3, // STRING
+            type: ApplicationCommandOptionType.String,
             name: 'message',
             description: 'Message link (or ID) to remove',
             required: true,
           },
           {
-            type: 3, // STRING
+            type: ApplicationCommandOptionType.String,
             name: 'to',
             description: 'End of range: a second message link/ID (inclusive)',
             required: false,
@@ -1178,7 +1143,7 @@ export class DiscordMcplServer {
         description: "The host's 💤 awareness marks: list, cancel or retract — admin only",
         options: [
           {
-            type: 3, // STRING
+            type: ApplicationCommandOptionType.String,
             name: 'action',
             description: 'What to do',
             required: true,
@@ -1189,13 +1154,13 @@ export class DiscordMcplServer {
             ],
           },
           {
-            type: 3, // STRING
+            type: ApplicationCommandOptionType.String,
             name: 'target',
             description: 'A batch or retract id (list: show it in full); retract also takes "all"',
             required: false,
           },
           {
-            type: 4, // INTEGER
+            type: ApplicationCommandOptionType.Integer,
             name: 'page',
             description: 'list: which page of the ledger (newest first; default 1)',
             required: false,
@@ -1212,7 +1177,7 @@ export class DiscordMcplServer {
         description: 'Rewind blocked turns and re-run until the model stops refusing — admin only',
         options: [
           {
-            type: 4, // INTEGER
+            type: ApplicationCommandOptionType.Integer,
             name: 'max',
             description: 'Max rewind/retry attempts (default 3)',
             required: false,
@@ -1280,9 +1245,8 @@ export class DiscordMcplServer {
     await interaction.deferReply();
 
     // A host whose undo can't take a marks choice places 💤 marks that follow
-    // branches — re-applied on every switch, with no frozen audience and no
-    // cancel. No option here can authorize that as the one-shot act it names,
-    // so such a host is refused outright.
+    // branches, re-applied on every switch, with no frozen audience and no
+    // cancel, so such a host is refused outright.
     const support = await this.hostMarksSupport(conn);
     if (support !== true) {
       await this.acknowledge(interaction, boundedReply(support === false
@@ -1386,15 +1350,10 @@ export class DiscordMcplServer {
   }
 
   /**
-   * Does the connected host make 💤 awareness marks a choice? Asked for each
-   * command that depends on the answer, with a `marks` request that names no
-   * action, so the host reads nothing to answer it. agent-framework answers
-   * a verb it lacks with "Unknown host command" (at every revision checked,
-   * from 2ea26ffea, where host/command arrived, to #250's 915ad4be); a host
-   * with the verb answers anything else (agent-framework#250 refuses the
-   * missing action). A request that fails (a timeout, a host that
-   * refuses host commands outright) settles nothing, and the command stops
-   * with nothing changed.
+   * agent-framework answers a host command it lacks with "Unknown host command"
+   * (at every revision checked, from 2ea26ffea, where host/command arrived, to
+   * #250's 915ad4be); a host with the `marks` verb answers anything else
+   * (agent-framework#250 refuses the missing action).
    */
   private async hostMarksSupport(conn: McplConnection): Promise<boolean | { reason: string }> {
     let answer: unknown;
@@ -1634,12 +1593,9 @@ export class DiscordMcplServer {
   }
 
   /**
-   * A chosen /hide's 💤, added by this server to each message the host says
-   * it hid, as every /hide did before the choice. Best-effort and in
-   * parallel: discord.js's REST queue sends one channel's reaction requests
-   * one at a time, within Discord's limits. Only what Discord confirmed is
-   * counted, since a request that failed may still have landed. The marks
-   * are outside the host's awareness ledger, which the line says.
+   * discord.js's REST queue sends one channel's reaction requests one at a
+   * time, within Discord's limits. A request that failed may still have
+   * landed, so only what Discord confirmed is counted.
    */
   private async markHidden(refs: HiddenRef[]): Promise<string> {
     let confirmed = 0;
@@ -1659,11 +1615,8 @@ export class DiscordMcplServer {
   }
 
   /**
-   * `/unstick [max]` — admin-gated. Asks the host to force the refusal-rewind
-   * loop: redact the turn that fed the refusal and re-run the model, up to
-   * `max` times, until it stops refusing. Commits to real inference runs, so
-   * the host only ACKs here (started) and posts the outcome — what was shed and
-   * whether it cleared — to this channel when the chain resolves.
+   * The host only acknowledges /unstick here, and posts the outcome to this
+   * channel when the chain resolves.
    */
   private async handleUnstickCommand(interaction: ChatInputCommandInteraction): Promise<void> {
     const max = interaction.options.getInteger('max') ?? undefined;
@@ -1820,24 +1773,18 @@ export class DiscordMcplServer {
       // is answered.
       await this.handleInitialize();
 
-      // ORDERING (Mythos 0.5-canary find, two rounds): NOTHING may run between
-      // initialize and the main loop. A 0.5 host sends its §5.3 initial policy
-      // as a featureSets/update REQUEST right after initialize with a 15s
-      // timeout; until the loop reads, that request sits unanswered. Round 1:
-      // the reconnect sweep blocked the loop → timeout → deny-until-policy.
-      // Round 2: channel registration still ran pre-loop, and its own
-      // server→host Request is itself REJECTED by the host until policy is
-      // established (-32002 after ~15s) — a clean cross-request deadlock; the
-      // policy answer landed ~600ms after the host gave up. So channel
-      // registration AND the sweep both run concurrently with the loop, gated
-      // on the policy being answered (20s grace covers pre-0.5 hosts that
-      // never send the Request form), registration strictly before the sweep
-      // so pushes land on registered channels inside the granted window.
+      // Nothing may run between initialize and the main loop. A 0.5 host sends its
+      // §5.3 initial policy as a featureSets/update request right after
+      // initialize, with a 15 s timeout, and rejects this server's own requests
+      // (-32002) until its policy is established. So channel registration and the
+      // sweep run concurrently with the loop, gated on the policy being answered
+      // (a 20 s grace covers pre-0.5 hosts that never send it), registration
+      // before the sweep, so pushes land on registered channels inside the
+      // granted window.
       void (async () => {
         await Promise.race([
           this.policyAnswered,
-          // unref: a pending grace timer must never hold the process open
-          // (it made the test runner appear to hang for 20s per server).
+          // unref: a pending grace timer must never hold the process open.
           new Promise((r) => {
             const t = setTimeout(r, this.policyGraceMs);
             (t as { unref?: () => void }).unref?.();
@@ -1929,13 +1876,7 @@ export class DiscordMcplServer {
 
   // ── Initialize Handshake ──
 
-  /** Answer the initialize request. Until it comes, nothing a client sends
-   *  ends the session: a ping is answered (MCP lets a client ping before
-   *  initialize), any other request is answered with an error, and a
-   *  notification is dropped with a log line. Rejects with
-   *  ConnectionClosedError when the client leaves first. Nothing after
-   *  initialize is read here: notifications/initialized, and anything a host
-   *  sends before it, go through the main loop like every message. */
+  /** MCP lets a client ping before initialize, so a ping is answered. */
   private async handleInitialize(): Promise<void> {
     const conn = this.conn!;
 
@@ -1969,26 +1910,17 @@ export class DiscordMcplServer {
     const serverCaps: McplCapabilities = {
       version: '0.4',
       pushEvents: true,
-      // Object form (MCPL spec McplChannelCapabilities) when voice is enabled:
-      // `streaming: true` opts this server into the host's routed outgoing
-      // deltas (channels/outgoing/chunk, Spec 14.3) — the input to voice
-      // synthesis. Without voice we keep the legacy boolean: the host then
-      // streams nothing here, which is exactly right. (mcpl-core's type lags
-      // the spec's object form, hence the cast.)
+      // MCPL's object form (McplChannelCapabilities) when voice is enabled:
+      // `streaming: true` opts this server into the host's routed outgoing deltas
+      // (channels/outgoing/chunk, SPEC 14.3). Without voice, the legacy boolean:
+      // the host then streams nothing here. mcpl-core's type lags the spec's
+      // object form, hence the cast.
       channels: (this.voice ? { register: true, publish: true, streaming: true } : true) as unknown as boolean,
       rollback: true,
-      // Legacy array form on the wire, unchanged (see NamedFeatureSetDeclaration
-      // in feature-sets.ts — digest-stable, host-normalized).
+      // The legacy array form on the wire (feature-sets.ts).
       featureSets: featureSets as unknown as McplCapabilities['featureSets'],
-      // NOTE: we intentionally no longer declare `contextHooks.afterInference`.
-      // Output routing ("where does a plain-text reply go") is a HOST concern,
-      // not a per-surface one — only the host sees the merged cross-surface
-      // event stream and can pick the true conversational locus. The host
-      // (agent-framework) now publishes text-only turns to the locus via
-      // channels/publish; this server is a pure publish executor. The old
-      // sticky auto-post that lived here would double-post against the host
-      // router and races the moment a second surface (e.g. Telegram) exists.
-      // See forking-knowledge-miner/docs/LOCUS-ROUTING-DESIGN.md.
+      // No contextHooks.afterInference: agent-framework routes a plain-text reply
+      // itself, publishing text-only turns to the locus via channels/publish.
     };
 
     const capabilities: InitializeCapabilities = {
@@ -2088,28 +2020,18 @@ export class DiscordMcplServer {
         }
 
         case method.FEATURE_SETS_UPDATE: {
-          // §5.3/§6.7 Request form — the host's policy update, awaiting a
-          // degradation receipt. Pre-0.5 this method was notification-only
-          // here; a 0.5 host's initial policy Request then timed out and the
-          // whole MCPL surface stayed deny-until-policy (Mythos canary).
-          // Everything this server declares runs on plain tool/channel
-          // machinery, so there is nothing to degrade: accept plainly.
+          // §5.3/§6.7's request form of a host's policy update, which awaits a
+          // degradation receipt. Everything this server declares runs on plain tool and
+          // channel machinery, so there's nothing to degrade.
           this.applyFeatureSetsUpdate(params as unknown as FeatureSetsUpdateParams);
           conn.sendResponse(req.id, { accepted: true });
           break;
         }
 
         case 'context/afterInference': {
-          // RETIRED no-op (see handleAfterInference). The capability is not
-          // advertised; this case survives only so a stray call from an older
-          // host is answered instead of erroring. It does NOT post anything —
-          // an earlier comment here described the retired sticky-reply as if
-          // live, and misled a reviewer into believing the capability was
-          // still advertised. Issue #14.
-          // Literal wire string: mcpl-core 0.5 removed method.CONTEXT_AFTER_
-          // INFERENCE from the method map (the 0.2.1 constant equaled this
-          // string); a back-compat shim for old hosts is exactly where the
-          // removed name must not be load-bearing.
+          // An older host may still call afterInference, so it's answered as a no-op.
+          // The literal wire string: mcpl-core 0.5 removed
+          // method.CONTEXT_AFTER_INFERENCE from its method map.
           await this.handleAfterInference(params);
           conn.sendResponse(req.id, { featureSet: 'discord.messaging' });
           break;
@@ -2198,22 +2120,15 @@ export class DiscordMcplServer {
   private handleNotification(notif: JsonRpcNotification): void {
     switch (notif.method) {
       case method.FEATURE_SETS_UPDATE: {
-        // §6.7 Notification form. A 0.5 host sends grant-bearing updates
-        // (including the §5.3 initial policy) as a Request (see the
-        // handleRequest case), but hosts before 0.5 send every update this
-        // way, so it gets the same body and changes the grants too: whole, or
-        // not at all when it's malformed.
+        // §6.7's notification form: hosts before 0.5 send every policy update this
+        // way, so it gets the same body as the request form.
         this.applyFeatureSetsUpdate(notif.params as FeatureSetsUpdateParams);
         break;
       }
 
-      // Spec 14.3: outgoing streaming is ADVISORY — the authoritative delivery
-      // is channels/publish. The previous handler here posted complete's text
-      // to Discord; that was a never-exercised alternative delivery path
-      // (no host emitted these until agent-framework wired Spec 14.3,
-      // 2026-07-26) and would double-post against the host's publish the
-      // moment streaming turned on. Now: chunks feed voice synthesis, and
-      // complete finalizes the utterance. Nothing here ever sends text.
+      // SPEC 14.3: outgoing streaming is advisory, and the authoritative delivery
+      // is channels/publish. Chunks feed voice synthesis, and complete finalizes
+      // the utterance; nothing here sends text.
       case method.CHANNELS_OUTGOING_CHUNK: {
         const p = notif.params as ChannelsOutgoingChunkParams;
         this.voice?.handleChunk(p.inferenceId, p.channelId, p.delta);
@@ -2221,17 +2136,8 @@ export class DiscordMcplServer {
       }
 
       case method.CHANNELS_OUTGOING_COMPLETE: {
-        // SPEC §14.5: delivery is NEVER a side effect of a lifecycle event —
-        // delivery happens only via `channels/publish` (handlePublish, which
-        // also records the send in the state tracker so it is recognized as
-        // self-authored). This terminator only finalizes the chunk stream:
-        // release the buffer, nothing else. The previous body called
-        // discord.sendMessage() here, which would double-post against
-        // handlePublish the moment a host grants `channels.streaming` — the
-        // same bug class as the retired afterInference sticky-reply (see the
-        // NOTE at the capability declaration), reintroduced on a different
-        // signal. It was dormant only because the 0.4 boolean `channels`
-        // capability made `channels.streaming` undeclarable. Issue #14.
+        // SPEC §14.5: delivery is never a side effect of a lifecycle event, only of
+        // channels/publish, so complete sends no text.
         const p = notif.params as ChannelsOutgoingCompleteParams;
         dbg('outgoing/complete:finalized', { inferenceId: p.inferenceId, channelId: p.channelId });
         this.voice?.handleComplete(p.inferenceId);
@@ -2952,11 +2858,7 @@ export class DiscordMcplServer {
 
   // ── Sticky-reply state mutators ──
 
-  /** A send receipt names the destination actually sent to: the canonical
-   *  `discord:<guild|dm>:<channel>` id (what the host's registry uses), the
-   *  raw Discord id, and the channel's label. It says nothing about where
-   *  later plain speech will go; the host owns that routing. `_shifted` is
-   *  kept in the signature for call-site compatibility but no longer used. */
+  /** A send receipt says nothing about where later plain speech will go: the host owns that routing. */
   private async augmentSendResult(
     messageId: string,
     channelId: string,
@@ -2992,18 +2894,8 @@ export class DiscordMcplServer {
     return err;
   }
 
-  /** Whether fetch_history would show this channel's messages here: by the
-   *  two checks handleToolCall gives it, its feature set is enabled, or no
-   *  host gates tools by feature set, and the channel filters' inspection
-   *  boundary admits the channel (DiscordAdapter.inspectionRefusal), which a
-   *  send doesn't meet; by its own cap, the channel's history cap
-   *  (DISCORD_BACKSCROLL_CHANNELS, capHistoryLimit) isn't 0; and by
-   *  Discord's, this bot holds Read Message History there
-   *  (DiscordAdapter.readsMessageHistory). Under a cap of 0, or without that
-   *  permission, fetch_history answers with no messages, which would read as
-   *  nothing posted. A lookup that fails counts as not readable, as
-   *  fetch_history would fail with it, so the note doesn't point at a check
-   *  that may refuse. */
+  /** Without Read Message History, Discord answers a read of a channel's
+   *  messages with none, which would read as nothing posted. */
   private async historyReadable(channelId: string): Promise<boolean> {
     // fetch_history always belongs to a feature set (featureSetForTool).
     if (this.mcplEnabled && !isEnabled(featureSetForTool('fetch_history')!, this.enabledFeatureSets)) return false;
@@ -3015,17 +2907,6 @@ export class DiscordMcplServer {
     }
   }
 
-  /** Where a Discord channel sits, for self-contained renderings: its
-   *  canonical id, the registry's label (else one built from cached names),
-   *  and the visible header `[source: <canonical id> · <label>]`, the same
-   *  grammar the host stamps on inbound messages minus the host-only server
-   *  segment, with values that could read as structure quoted as the host
-   *  quotes them (source-header.ts). An unknown label is left out; the
-   *  canonical id is authoritative when a label differs. A channel the server
-   *  can't place has no canonical id (null) and the header says
-   *  discord:?:<channel>. channelLabel is the raw label, a field: a host that
-   *  renders it into its own header quotes it by the same rule
-   *  (agent-framework's labelValue), as channels/open's history items rely on. */
   private channelProvenance(
     discordChannelId: string,
     dm?: { recipientName: string },
@@ -3094,15 +2975,8 @@ export class DiscordMcplServer {
     return shifted;
   }
 
-  /** RETIRED: sticky auto-reply.
-   *
-   *  Output routing is now host-owned (the framework publishes text-only turns
-   *  to the conversational locus via channels/publish — see
-   *  LOCUS-ROUTING-DESIGN.md). This server no longer declares the
-   *  `contextHooks.afterInference` capability, so the host won't call this. The
-   *  stub is retained only so a stray afterInference request (e.g. from an
-   *  older host that still calls it) is a harmless no-op rather than a
-   *  double-post against the host router. */
+  /** An older host may still call afterInference; it's answered as a no-op,
+   *  since agent-framework now routes plain-text turns itself. */
   private async handleAfterInference(_params: unknown): Promise<void> {
     this.sentInCurrentTurn = false;
     dbg('afterInference:noop', { reason: 'sticky-retired-host-owns-routing' });
@@ -3994,9 +3868,7 @@ export class DiscordMcplServer {
         const current = this.forwardedWatermark.get(channelId);
         if (!current || newestId.localeCompare(current, 'en-US-u-kn-true') > 0) {
           this.forwardedWatermark.set(channelId, newestId);
-          // Saved at once, as live forwarding saves each message: the process
-          // can end before the sweep does (the stdio transport exits when its
-          // host goes), and a later start would deliver this block again.
+          // Saved at once: the process can end before the sweep does, since the stdio transport exits when its host goes.
           this.saveWatermark();
         }
       };
@@ -4063,12 +3935,7 @@ export class DiscordMcplServer {
         '</missed>',
       ].join('\n');
 
-      // Register the channel this push delivers from before naming it (MCPL
-      // RFC-011 §3), as the live path does, or re-derive what's registered:
-      // a missed DM or thread is otherwise unknown to a freshly started host,
-      // which can then neither open it nor tell where a reply would land.
-      // The bot's own messages are filtered out above, so every kept message
-      // in a DM is from the other party.
+      // MCPL RFC-011 §3: the channel a push delivers from is registered before the push names it.
       const guildDelivery = !isDM && guildId ? this.registerGuildDelivery(guildId, channelId) : undefined;
       const sweptMcplId = isDM
         ? this.registerDmDelivery(channelId, { id: kept[0].authorId, name: kept[0].authorName })
@@ -4176,17 +4043,9 @@ export class DiscordMcplServer {
 
   // ── Channel Operations ──
 
-  /** Give a host connection the whole registry: every listed channel the bot
-   *  can see now (getPostingChannels, refreshed without announcing, since
-   *  the register request carries it), and everything registered earlier in
-   *  this process, whichever connection was there then: threads, DMs and
-   *  other channels messages came from. The delivery paths announce a
-   *  channel only when it's new to the registry, so they rely on this: a
-   *  connection that wasn't given the registry would never hear of what was
-   *  registered before it. Channels forgotten while no host was connected
-   *  are announced as removed after it, since a host may keep a server's
-   *  channels across a reconnect (agent-framework keeps them until it drops
-   *  the server). */
+  /** A host may keep a server's channels across a reconnect (agent-framework
+   *  keeps them until it drops the server), so channels forgotten while no
+   *  host was connected are announced as removed after it. */
   private async syncChannelsWithHost(): Promise<void> {
     const conn = this.conn;
     if (!conn || !this.mcplEnabled) {
@@ -4353,17 +4212,7 @@ export class DiscordMcplServer {
     }));
   }
 
-  /**
-   * A guild is back (from an outage, or in a new gateway session) with what
-   * it has now: its listed channels, and the ids of every channel and live
-   * thread it holds. Discord doesn't replay what happened while it was away,
-   * so a registered channel or thread it no longer has is forgotten (deleted,
-   * or a thread archived, meanwhile), and so is a listed channel, or a
-   * thread, the filters no longer admit; its listed channels are registered
-   * or re-derived, and
-   * the threads that remain with them. Nothing is remembered as deleted
-   * (deletedChannels): what's gone may only have been archived.
-   */
+  /** Discord doesn't replay what happened while a guild was away. */
   private guildReturned(guildId: string, channels: ChannelFacts[], present: ReadonlySet<string>): void {
     const listed = new Set(channels.map((c) => c.id));
     this.forgetChannels(this.registeredInGuild(guildId).filter((d) => {
@@ -4411,10 +4260,7 @@ export class DiscordMcplServer {
     return address?.guildId && address.guildId !== 'dm' ? address.guildId : undefined;
   }
 
-  /** Whether a guild channel was deleted lately, or the channel a thread is
-   *  under was (deletedChannels): a delivery from it set out before the
-   *  deletion. A channel's own parent is its category, whose channels
-   *  outlive it, so only a thread's counts. */
+  /** A channel's own parent is its category, whose channels outlive it. */
   private deletedLately(guildId: string, channelId: string): boolean {
     if (this.deletedChannels.has(channelId)) return true;
     const facts = this.discord.getCachedChannelFacts(channelId);
@@ -4427,55 +4273,12 @@ export class DiscordMcplServer {
   }
 
   /**
-   * Register the guild channel a message is delivered from (created live or
-   * swept, edited or deleted), before the delivery names it, or re-derive
-   * what's registered from what's known now (a rename, or a parent's or the
-   * guild's name learned since). Returns the channel's MCPL id when it is
-   * registered, which is when the delivery names it (origin.mcplChannelId),
-   * and whether this delivery registered it (`registered`), having found it
-   * live, admitted and unarchived, with its facts current. A channel it
-   * withholds isn't registered by it: one registered before keeps its
-   * registration, and is named, except where "Neither registered nor named"
-   * below says otherwise.
-   *
-   * The channel is described as the client's cache has it now: a thread the
-   * client knows only partly by the partial it holds, labelled by its id
-   * (channelLabelFor); one registered already keeps its name
-   * (registerChannels). Not registered, and named only if registered:
-   * - a channel the cache doesn't hold: a message's channel is always there,
-   *   as a partial at least, until it's removed;
-   * - a channel whose cached facts may be older than what Discord has
-   *   reported since (DiscordAdapter.isStale): its guild came back, from an
-   *   outage or a gap in the gateway connection, without it, or its fetch
-   *   kept landing after newer reports. It may have been archived or
-   *   deleted meanwhile, whatever the cache still says of it. A delivery
-   *   from it fetches it again first, so it's stale here when the delivery
-   *   decided on facts from before the mark, or that fetch failed or was
-   *   overtaken;
-   * - a channel the channel filters no longer admit (channelAdmitted), a
-   *   thread through its channel: an update moved it out while the delivery
-   *   was on its way;
-   * - an archived thread, unless the message was posted in it after the
-   *   archive (`postedAt` later than `archivedAt`, by Discord's clocks),
-   *   which unarchived it, whatever the cache has heard yet. A message
-   *   posted before the archive, whose thread was archived while it was on
-   *   its way, leaves it archived, and so does one whose time equals the
-   *   archive's, or one whose thread's archive time isn't known: the next
-   *   message registers a thread wrongly left out, and nothing would remove
-   *   one wrongly registered. A thread is registered
-   *   while it's live and forgotten when it's archived, so the registry
-   *   holds the live threads, and a swept message from a thread archived
-   *   since is delivered without one.
-   * Neither registered nor named:
-   * - a channel of a guild the bot isn't in (hasGuild): it left, or was
-   *   removed, while the delivery was on its way. Leaving takes the
-   *   channels the guild's cache holds, with their threads, out of the
-   *   client's cache, but not a channel the guild had stopped listing, or
-   *   that channel's threads;
-   * - a channel deleted lately, or a thread whose channel was
-   *   (deletedLately): the delivery set out before the deletion;
-   * - a category or forum, which hold no messages.
-   * A withheld registration is written to the debug log with its reason.
+   * A message's channel is always in discord.js's cache, as a partial at least,
+   * until it's removed. Discord unarchives a thread when a message is posted
+   * in it, so a message posted after a thread's archive time came from a live
+   * thread. Leaving a guild takes the channels its cache holds, with their threads, out
+   * of the client's cache, but not a channel the guild had stopped listing, or
+   * that channel's threads. Categories and forums hold no messages.
    */
   private registerGuildDelivery(
     guildId: string,
@@ -4539,13 +4342,7 @@ export class DiscordMcplServer {
     return this.channelManager.get(id) ? id : undefined;
   }
 
-  /** A Discord channel or thread was deleted: forget it, and the threads
-   *  under a deleted channel, those registered and those the client's cache
-   *  held (`threadIds`; Discord sends no threadDelete for them); drop their
-   *  watermarks and missed tallies, since there is nothing left to catch up
-   *  on; and remember the ids a while (deletedChannels), so a delivery from
-   *  one that set out before the deletion registers nothing. An archived
-   *  thread keeps its watermark (it isn't deleted, and can come back). */
+  /** Discord sends no threadDelete for the threads under a deleted channel. */
   private channelDeleted(guildId: string, channelId: string, threadIds: string[] = []): void {
     const ids = [...new Set([
       channelId,
@@ -4825,11 +4622,9 @@ export class DiscordMcplServer {
     return found.kind === 'guild' ? { desc, facts: found.facts } : { desc, facts: null, dmRecipientId: found.recipientId };
   }
 
-  /** Whether a channel found by an exact open's lookup isn't one this server
-   *  serves now: deleted lately, a thread of a channel deleted lately, or in
-   *  a guild the bot has left. The bot may leave a guild during the lookup,
-   *  and discord.js keeps a channel the guild had stopped listing past the
-   *  leave. A channel outlives its deleted category (deletedLately). */
+  /** The bot may leave a guild during a lookup, and discord.js keeps a channel
+   *  the guild had stopped listing past the leave. A channel outlives its
+   *  deleted category. */
   private notServed(channelId: string, facts: ChannelFacts | null): boolean {
     if (this.deletedChannels.has(channelId)) return true;
     if (!facts) return false;
@@ -5014,13 +4809,8 @@ export class DiscordMcplServer {
       : undefined;
   }
 
-  /**
-   * RFC-006 §3.2: the channel scope for a message's subject — the registered
-   * MCPL channel id — when the host accepts channel-scoped pushes and we have
-   * declared that channel to it (guild channels at registration, DMs when
-   * first seen). Otherwise undefined: the subject stays in feature-set scope,
-   * which still coalesces as long as every occurrence uses the same scope.
-   */
+  /** RFC-006 §3.2: a subject outside channel scope stays in feature-set scope,
+   *  which still coalesces as long as every occurrence uses the same scope. */
   private coalesceChannelScope(guildId: string | null, channelId: string): string | undefined {
     if (!this.hostCoalescing?.channelScopedPush) return undefined;
     const id = mcplChannelId(guildId ?? 'dm', channelId);
@@ -5096,21 +4886,15 @@ export class DiscordMcplServer {
     // Name the author the way a create does (`username: text`) so the agent
     // doesn't attribute the edit to whoever it was last talking to.
     const who = info?.authorName ? `${info.authorName}: ` : '';
-    // When the edit may REPLACE the unread create (RFC-006 §4.1), it must be
-    // as self-contained as the create was: same backscroll/guidance prefix,
-    // reply marker, location header and attachments, with the new body and
-    // an [edited] mark. Without a remembered create, or for a host that only
-    // appends, a bare edit line.
+    // An edit may replace the unread create (RFC-006 §4.1), so it must be as self-contained as the create was.
     const render = this.hostCoalescing?.pushEvents ? mem?.render : undefined;
     const content: ContentBlock[] = render
       ? [textContent(`${render.prefix}${render.replyMarker}${render.location}${render.authorName}: ${info?.cleanContent ?? newContent} [edited]`), ...render.attachments]
       : [textContent(`[message edited] ${who}${newContent}`)];
     const params: CoalescedPushEventParams = {
       featureSet: 'discord.messaging',
-      // The OCCURRENCE id (RFC-006 §3.1): a second edit of one message is a
-      // new occurrence, not a duplicate of the first — `discord_edit_<id>`
-      // alone made every later edit of a message vanish at the host's dedup.
-      // The counter keeps two edits that share a millisecond distinct.
+      // The occurrence id (RFC-006 §3.1): a second edit of one message is a new
+      // occurrence. The counter keeps two edits that share a millisecond distinct.
       eventId: `discord_edit_${messageId}_${timestamp}_${mem ? ++mem.edits : ++this.editSeq}`,
       timestamp,
       origin: this.messageEventOrigin(channelId, messageId, info, registeredId),
@@ -5158,8 +4942,7 @@ export class DiscordMcplServer {
       timestamp,
       origin: this.messageEventOrigin(channelId, messageId, info, registeredId),
       tags: ['chat:deleted', ...threadTags(info ?? {})],
-      // The deletion notice (RFC-006 §6): shown only if a model read a
-      // version of the message; an unread message is withdrawn without trace.
+      // The deletion notice (RFC-006 §6): a coalescing host leaves it out only when it knows no model read a version of the message.
       payload: { content: [textContent(`[message deleted] ${messageId}${info?.authorName ? ` by @${info.authorName}` : ''}`)] },
       ...(this.hostCoalescing?.pushEvents
         ? { coalesce: { key: `message:${messageId}`, retract: true, ...(scope ? { channelId: scope } : {}) } }
@@ -5261,16 +5044,12 @@ export class DiscordMcplServer {
           let result: 'sent' | 'failed' | 'unknown' = 'sent';
           let detail = '';
           try {
-            // The nonce is the reservation's own identity: one notice per
-            // refused message, so the REST layer's retries can't duplicate it.
+            // The nonce is the reservation's own identity: Discord answers a repeat within a few minutes with the message already made.
             await this.discord.sendDmNotice(ev.channelId, DM_NOTICE_TEXT, `dmn${ev.messageId}`);
           } catch (err) {
-            // Only a definite rejection counts as failed: the send never
-            // started, or Discord refused the request (refusedByDiscord). A
-            // 4xx is Discord evaluating it, and with the enforced nonce an
-            // earlier attempt that had posted would have been returned
-            // instead. A 5xx, a timeout or a lost connection may have posted
-            // it, so it's unknown. Either way the reservation stands; no retry.
+            // Only a definite rejection counts as failed: the send never started, or
+            // Discord refused the request. A 5xx, a timeout or a lost connection may have
+            // posted it, so it's unknown.
             const e = err as { notPosted?: unknown; message?: unknown };
             const rejected = e.notPosted === true || refusedByDiscord(err);
             result = rejected ? 'failed' : 'unknown';
@@ -5321,17 +5100,10 @@ export class DiscordMcplServer {
     this.discord.onReaction((ev) => {
       if (!this.conn || !this.mcplEnabled) return;
       if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
-      // Reaction visibility is a per-channel opt-in (default off). Reactions
-      // NEVER wake the agent — the reaction tags match no wake policy — they
-      // just land in context so the agent sees them when next active. A
-      // reaction in a thread names the thread in its origin but keeps the
-      // reaction tags only, so a gate rule keyed on chat:thread, written for a
-      // thread's messages, doesn't start matching its reactions.
-      // SPEC §16.2 defines `chat:reaction` and `chat:reaction-remove` as
-      // distinct tags: collapsing both onto `chat:reaction` made any consumer
-      // rule for "reactions to my messages" fire on un-reactions too, with the
-      // distinction surviving only in origin.action, which gate policy cannot
-      // match on. Issue #14.
+      // A reaction in a thread names the thread in its origin but keeps the
+      // reaction tags only, so a host gate rule keyed on chat:thread doesn't start
+      // matching its reactions. SPEC §16.2 defines `chat:reaction` and
+      // `chat:reaction-remove` as distinct tags.
       this.ensureReactionChannelsLoaded();
       if (!this.reactionChannels.has(ev.channelId)) return;
       // A muted channel delivers nothing, its reactions included, as its
@@ -5430,9 +5202,7 @@ export class DiscordMcplServer {
       }
     });
 
-    // Bot joined a new guild after startup: register its existing channels
-    // of a listed kind so they show up in the host's channel list
-    // (channelCreate only covers channels created *after* the join).
+    // channelCreate covers only channels created after the join, so a new guild's existing channels are registered here.
     this.discord.onGuildCreate((guildId, channels) => {
       const { added } = this.registerChannels(channels.map((c) => this.guildDescriptor(c)));
       this.rederiveNamed('every');
@@ -5449,9 +5219,7 @@ export class DiscordMcplServer {
       this.rederiveNamed('every');
     });
 
-    // A guild back from an outage or a gateway gap: Discord doesn't replay
-    // what happened while it was away, so the registry is reconciled with
-    // what the guild has now (guildReturned).
+    // Discord doesn't replay what happened while a guild was away.
     this.discord.onGuildAvailable((guildId, channels, present) => this.guildReturned(guildId, channels, present));
 
     // A guild's name is in every label of its channels.
@@ -5460,11 +5228,6 @@ export class DiscordMcplServer {
       this.rederiveNamed('every');
     });
 
-    // A registered thread that's archived is forgotten, so the registry
-    // holds the live threads; the next message posted in it, which
-    // unarchives it, registers it again. Its watermark stays, since it can
-    // come back. A registered thread otherwise changed (renamed, locked) is
-    // re-derived. An unregistered one waits for a message.
     this.discord.onThreadUpdate((thread) => this.threadReported(thread));
 
     // A fetch left a channel stale: its current name isn't known, so no
@@ -5483,13 +5246,7 @@ export class DiscordMcplServer {
 
     this.discord.onChannelDelete((guildId, channelId, threadIds) => this.channelDeleted(guildId, channelId, threadIds));
     this.discord.onThreadDelete((guildId, threadId) => this.channelDeleted(guildId, threadId));
-    // Discord synced a guild's threads (onThreadsSynced). A registered
-    // thread it doesn't list is forgotten when its registration places it
-    // under a channel the sync covers (any, for a whole-guild sync), or the
-    // sync dropped it from the cache, which places a thread by the channel
-    // the cache knew for it. It isn't remembered as deleted, since it may
-    // only have been archived. A thread whose channel neither knows is under
-    // none. A registered thread the sync lists is taken as updated.
+    // Discord's thread sync covers the channels it names, or the whole guild when it names none.
     this.discord.onThreadsSynced((guildId, covered, listed, dropped) => {
       const channelOf = (d: ChannelDescriptor) => (d.address as { channelId: string }).channelId;
       const threads = this.registeredInGuild(guildId)
@@ -5532,17 +5289,7 @@ export class DiscordMcplServer {
     });
   }
 
-  /** Fetch + convert a message's attachments into MCPL content blocks so the
-   *  agent actually sees them. Images are downloaded and inlined as base64
-   *  image blocks (robust against Discord's expiring CDN URLs) — the text
-   *  inline cap below deliberately does NOT apply to them; an image block is
-   *  the model-native representation, not a text paste. Text files inline
-   *  only up to attachmentInlineMaxBytes (issue #30), enforced on actual
-   *  bytes: a declared-over-cap file skips the fetch entirely, and a
-   *  misdeclared one is streamed to at most cap+1 bytes before degrading to
-   *  a name+size+URL note. Anything else degrades to a short note with
-   *  name + URL. Best-effort: a failed fetch becomes a note rather than
-   *  dropping the message. */
+  /** Images are inlined as base64 because Discord's CDN URLs expire. */
   private async buildAttachmentBlocks(attachments: DiscordAttachment[]): Promise<ContentBlock[]> {
     const TEXT_EXT =
       /\.(txt|md|markdown|json|jsonl|csv|tsv|log|ya?ml|xml|html?|css|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cpp|hpp|sh|bash|zsh|toml|ini|cfg|conf|sql|diff|patch|env)$/i;
@@ -5677,9 +5424,7 @@ export class DiscordMcplServer {
             }
           }
         } else if (isText) {
-          // Budget is charged from bytes actually consumed, not Discord's
-          // advisory size — the capped read bounds the overdraft past the
-          // pre-check above to at most cap+1.
+          // Charged from the bytes actually read: Discord's declared size is advisory.
           const { text, overflow, bytesRead } = await fetchTextCapped(att.url, inlineCap);
           fetchBudgetLeft -= bytesRead;
           if (overflow) {
@@ -5847,8 +5592,7 @@ export class DiscordMcplServer {
           before: msg.id, // never include the triggering message itself
           ...(watermark ? { after: watermark } : {}),
         });
-        // discord.js returns newest-first; backscroll reads more naturally
-        // oldest-first when Lena scans it as a transcript.
+        // discord.js returns history newest-first.
         backscrollMsgs.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
         // Filter out:
         //  - the bot's own past messages — already in Lena's chronicle as
@@ -5903,24 +5647,14 @@ export class DiscordMcplServer {
     const guildId = msg.guildId ?? 'dm';
     const channelMcplId = mcplChannelId(guildId, msg.channelId);
 
-    // discord.js's `cleanContent` resolves <@id> / <@&role> / <#channel>
-    // mentions to @username / @role / #channel — always use that in the
-    // rendered body so Lena never sees raw <@123456789> blobs.
-    //
-    // For the location header (which channel/guild we're in), only prepend
-    // it when the message's channel differs from the last communication
-    // channel (compare BEFORE updating the tracker). Outbound sends also
-    // advance lastChannelId via markOutboundSend, so an inbound after Lena
-    // sent elsewhere correctly gets a fresh header back to her original
-    // conversation.
+    // discord.js's `cleanContent` resolves the mentions it can, to cached names,
+    // and leaves the rest as raw tokens.
     const contextChanged = this.lastChannelId !== msg.channelId;
     let location = '';
     if (contextChanged) {
-      // Discord-chosen names, rendered by the header rule (source-header.ts),
-      // so one can't read as structure; a thread name is always quoted. A
-      // channel name with a space is quoted too, so one can't carry this
-      // prefix's own words (` in <guild>`): a text channel's name never has
-      // one, but a voice, stage or forum channel's can.
+      // Discord-chosen names, rendered by the header rule (source-header.ts). A
+      // text channel's name never has a space, but a voice, stage or forum
+      // channel's can, so a channel name with a space is quoted.
       const locationParts: string[] = [];
       // Posted in a thread: the channel it hangs off, then the thread.
       const place = messagePlace(msg.channelName, msg);
@@ -5988,9 +5722,8 @@ export class DiscordMcplServer {
       path: channelIsOpen ? 'channels/incoming' : 'push/event',
     });
 
-    // MCPL RFC-001 event tags — emit reserved chat:* core (umbrellas included,
-    // so no host-side implication expansion is needed) derived from the address
-    // flags computed above. The host's wake gate routes on these.
+    // MCPL RFC-001 event tags, umbrellas included, so a host needs no
+    // implication expansion. The host's wake gate routes on these.
     const eventTags: string[] = (() => {
       const t = new Set<string>(addressTags(flags, isDM, isBot));
       for (const tag of threadTags(msg)) t.add(tag);
@@ -6022,9 +5755,9 @@ export class DiscordMcplServer {
       const message: CoalescedIncomingMessage = {
           channelId: channelMcplId,
           messageId: msg.id,
-          // RFC-006: the create is the subject's first occurrence (`initial`),
-          // keyed by the stable platform message id so later edits/deletes —
-          // which always arrive as push/event — address the same subject.
+          // RFC-006: the create is the subject's first occurrence (`initial`), keyed by
+          // the platform message id, so later edits and deletes, which arrive as
+          // push/event, address the same subject.
           ...(this.hostCoalescing?.channelsIncoming
             ? { eventId: `discord_msg_${msg.id}`, coalesce: { key: `message:${msg.id}`, initial: true } }
             : {}),
@@ -6071,10 +5804,9 @@ export class DiscordMcplServer {
             messages: [{
               ...message,
               content,
-              // A refused item was never admitted (the host validates before
-              // its coalescer accepts, so no receipt or subject exists for
-              // it); a fresh occurrence id still keeps the resend clear of
-              // any receipt or dedup keyed on the first one.
+              // The host validates an item before its coalescer accepts it, so a refused
+              // item has no receipt or subject; a fresh occurrence id keeps the resend
+              // clear of any dedup keyed on the first one.
               ...(resend && message.eventId ? { eventId: `${message.eventId}_media_omitted` } : {}),
             } as CoalescedIncomingMessage],
           };
@@ -6106,8 +5838,7 @@ export class DiscordMcplServer {
         featureSet: 'discord.messaging',
         eventId: `discord_msg_${msg.id}`,
         // RFC-006: channel-scoped when the host accepts that and the channel is
-        // declared (guild channels at registration, DMs announced just above),
-        // so an edit or delete addresses the same subject whichever lane
+        // declared, so an edit or delete addresses the same subject whichever lane
         // delivered the create.
         ...(this.hostCoalescing?.pushEvents
           ? { coalesce: { key: `message:${msg.id}`, initial: true, ...(scope ? { channelId: scope } : {}) } }
@@ -6119,13 +5850,7 @@ export class DiscordMcplServer {
           guildId: msg.guildId,
           guildName: msg.guildName,
           channelId: msg.channelId,
-          // The MCPL composite channel id (`discord:{guild|dm}:{channel}`) — the
-          // form the host registers and routes replies to. Raw `channelId` above
-          // is Discord-internal; DMs especially only ever arrive via push/event
-          // (channel closed), so without this the host can't route a reply back
-          // to the DM (item-3 redux, DM sub-case). Named when the channel is
-          // registered (registerGuildDelivery and registerDmDelivery say when
-          // it isn't).
+          // The MCPL composite channel id, the form the host registers and routes replies to.
           ...(registeredId ? { mcplChannelId: registeredId } : {}),
           channelName: msg.channelName,
           // Display only; the composite channel id already names the thread.
@@ -6244,10 +5969,8 @@ export class DiscordMcplServer {
       this.owedFollow(conn, discordChannelId);
       return;
     }
-    // channels/incoming answers each message without a code, so there the
-    // host's own failure ("host is stopping", say) reads the same as a
-    // refusal, and that lane's line says only that the host didn't take the
-    // message.
+    // channels/incoming answers each message without a code, so there the host's
+    // own failure ("host is stopping", say) reads the same as a refusal.
     const verb = (code: number | undefined) => (lane === 'channels/incoming' && code === undefined ? "didn't take" : 'rejected');
     const attachments = summarizeAttachments(content);
     console.error(`[discord-mcpl] host ${verb(first.code)} message ${messageId} in ${channelMcplId}: ${first.reason}`);
@@ -6301,9 +6024,8 @@ export class DiscordMcplServer {
     });
   }
 
-  /** The retry window (RFC-006 §3.1) of the current host for `lane`: what it
-   *  advertises, or the spec's default hour, when it advertises event
-   *  coalescing for that lane; undefined when it doesn't. */
+  /** RFC-006 §3.1's retry window: what the host advertises, or the spec's
+   *  default hour, when it advertises event coalescing for the lane. */
   private retryWindowFor(lane: 'channels/incoming' | 'push/event'): number | undefined {
     const c = this.hostCoalescing;
     const coalesces = lane === 'channels/incoming' ? c?.channelsIncoming : c?.pushEvents;
@@ -6344,8 +6066,7 @@ export class DiscordMcplServer {
       if (left <= 0) return 'no host connection was ready in time';
       await new Promise<void>((resolve) => {
         const wake = (): void => { clearTimeout(timer); this.readyWaiters.delete(wake); resolve(); };
-        // Not unref'd: the wait is bounded by the deadline, and a stdio
-        // server exits on its own when its host goes (serveStdio).
+        // Not unref'd: the wait is bounded by the deadline, and a stdio server exits when its host goes.
         const timer = setTimeout(wake, left);
         this.readyWaiters.add(wake);
       });
@@ -6379,52 +6100,14 @@ export class DiscordMcplServer {
   }
 
   /**
-   * Send an occurrence and, while its answer leaves it worth sending again,
-   * send the SAME occurrence again (`attempt` sends the same params: the same
-   * eventId and coalesce member). What decides is only what the MCPL spec
-   * defines (answerClass), never a particular host's words, since this
-   * server serves more than one kind of host:
-   *
-   * - `unknown-channel` (-32023): the channel is announced to the host again
-   *   (channels/changed) and the occurrence sent once more, at once. The host
-   *   didn't admit it, so that can't make a duplicate, on any host.
-   * - `refused` (a refusal the spec gives no meaning): sent once more, after
-   *   the first wait.
-   * - `uncertain` (no answer, -32603, an implementation-defined server
-   *   error): sent again after each wait in retryDelaysMs while answers stay
-   *   uncertain.
-   *
-   * `refused` and `uncertain` occurrences are sent again only when they carry
-   * `coalesce` to a host that advertises event coalescing for their lane.
-   * RFC-006 §3.1 then obliges the host to recognize a repeated eventId for
-   * its retry window and return the first result without repeating its
-   * effects, so an occurrence admitted after all is never admitted twice.
-   * Other hosts promise less (the base spec's deduplication is a SHOULD,
-   * §9.4), and get each occurrence once. Resends stop at half the window
-   * after the first send (the spec's limit is the window itself; half leaves
-   * room for a slow last answer), over the shortest window advertised
-   * meanwhile, as §3.1 asks.
-   *
-   * A permission refusal (isAuthorityRefusal) answered before the
-   * connection's start-up had settled is "not yet": a host denies with them
-   * until its §5.3 policy is in place. The occurrence wasn't admitted, so it
-   * is sent once more, on any host, once a connection is ready.
-   *
-   * A resend goes to the current connection once it is ready
-   * (readyConnection), waiting at most reconnectWaitMs for one: after a
-   * reconnect, the host connected since (§3.1's guarantee survives
-   * reconnects and host restarts; only the TCP transport reconnects, as a
-   * stdio server exits with its host). Never to a host that doesn't
-   * advertise coalescing for the lane, and never when the occurrence,
-   * built for the first host, doesn't fit the one connected now (`fits`).
-   * `superseded`, when given, is asked before each resend, and a superseded
-   * occurrence isn't sent again.
-   *
-   * A resend reaches the host after messages that came after it, each with
-   * its own timestamp; the waits are kept short for that reason (1 s, 5 s,
-   * 30 s, and at most reconnectWaitMs for a host to come back).
-   *
-   * Returns the last answer and the connection it came on.
+   * RFC-006 §3.1 obliges a host that advertises event coalescing to recognize
+   * a repeated eventId for its retry window and return the first result
+   * without repeating its effects, so an occurrence admitted after all is
+   * never admitted twice; other hosts promise less (the base spec's
+   * deduplication is a SHOULD, §9.4). §3.1 limits resends to the window, the
+   * shortest advertised meanwhile; half of it leaves room for a slow last
+   * answer. The guarantee survives reconnects and host restarts; only the TCP
+   * transport reconnects, as a stdio server exits with its host.
    */
   private async sendWithRetries(args: {
     lane: 'channels/incoming' | 'push/event';
@@ -6686,13 +6369,8 @@ function sleep(ms: number): Promise<void> {
   return ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve();
 }
 
-/** Serve a stdio host until its connection ends, then exit. A stdio server
- *  can't be reached again once its host has gone, so it exits, as MCP's
- *  stdio shutdown expects (the client closes the server's stdin, then waits
- *  for it to exit), rather than stay logged in to Discord with no host. The
- *  status is 0 whatever ended the connection: a host that goes away, before
- *  initialize or after, is a normal end. `exit` is process.exit, given here
- *  so a test can watch it. */
+/** MCP's stdio shutdown expects the server to exit once the client closes
+ *  its stdin, so a stdio server exits when its host has gone. */
 export async function serveStdio(
   server: DiscordMcplServer,
   conn: McplConnection,
@@ -6704,31 +6382,11 @@ export async function serveStdio(
 }
 
 /**
- * Serve MCPL clients on a listening TCP server, one at a time, for as long as
- * the process runs. It owns the server's 'connection' and 'error' events for
- * the server's life, which a one-at-a-time server needs: mcpl-core's
- * `acceptTcp` takes a single connection, and leaves no listener that logs
- * the server's errors.
- *
- * - A client that connects while none is served is served: `serve` runs with
- *   its connection, and once `serve` settles, whether it resolves, rejects
- *   or throws, the connection is closed and the next client can be served.
- *   A rejection or a throw is logged. A client counts as served until then,
- *   after its socket has closed too.
- * - A client that connects while another is served is refused: its socket
- *   is destroyed at once, and the refusal logged. Its 'error' listener goes
- *   on first, so nothing that socket reports can go unheard.
- * - An 'error' the server emits (an accept that fails, say) is logged
- *   whenever it comes, and serving goes on: Node's server keeps listening.
- *
- * A read error on the served client's own socket (a reset, say) still ends
- * the process: it also reaches mcpl-core's readline interface, which listens
- * for none (see serve()).
- *
- * The server must be listening already, or this throws: a failure to listen
- * (a port already taken) belongs to the caller, and with the 'error'
- * listener added here it would only be logged, and the caller would wait for
- * a 'listening' that never comes.
+ * mcpl-core's `acceptTcp` takes a single connection and leaves no listener
+ * that logs the server's errors, so this owns the server's 'connection' and
+ * 'error' events. Node's server keeps listening after an 'error'. A read
+ * error on the served client's socket still ends the process: it also
+ * reaches mcpl-core's readline interface, which listens for none.
  */
 export function serveTcp(
   tcpServer: net.Server,

@@ -240,6 +240,7 @@ describe('a send refused for its files says nothing was sent, and what to send i
   }
   const send = (adapter: DiscordAdapter, files: unknown) =>
     adapter.sendMessage('123456789012345678', 'hi', { files: files as never });
+  const TEXT_SENT_IN_PARTS = 'x'.repeat(2500);
 
   it('files that are not a list', async (t) => {
     const { adapter, sends } = adapterWithChannel(t);
@@ -344,7 +345,7 @@ describe('a send refused for its files says nothing was sent, and what to send i
     const missing = join(dir, 'missing.png');
     const end = 'on the machine running discord-mcpl. Give the path of a file there that it can read.';
     await assert.rejects(send(adapter, [{ path: missing }]), { message: `Nothing was sent: "${missing}" doesn't exist ${end}` });
-    // A path through a file, as if it were a directory (ENOTDIR), doesn't exist either.
+    // A path through a file, as if it were a directory, fails with ENOTDIR.
     const plain = join(dir, 'plain.txt');
     writeFileSync(plain, 'x');
     const through = join(plain, 'inner.png');
@@ -367,8 +368,7 @@ describe('a send refused for its files says nothing was sent, and what to send i
     });
     await send(adapter, files);
     assert.equal((sends[0] as { files?: unknown[] }).files?.length, 10);
-    // Long enough to be sent in parts: the file goes with the last, named and described as given.
-    await adapter.sendMessage('123456789012345678', 'x'.repeat(2500), {
+    await adapter.sendMessage('123456789012345678', TEXT_SENT_IN_PARTS, {
       files: [{ path: files[0].path, name: 'report.txt', description: 'the report' }],
     });
     const [first, last] = sends.slice(1) as Array<{ files?: Array<{ name?: string; description?: string }> }>;
@@ -382,8 +382,7 @@ describe('a send refused for its files says nothing was sent, and what to send i
     const locked = join(tempDir(t), 'locked.png');
     writeFileSync(locked, 'x');
     chmodSync(locked, 0o000);
-    // Long enough to be sent in parts: the file would go with the last.
-    await assert.rejects(adapter.sendMessage('123456789012345678', 'x'.repeat(2500), { files: [{ path: locked }] }), {
+    await assert.rejects(adapter.sendMessage('123456789012345678', TEXT_SENT_IN_PARTS, { files: [{ path: locked }] }), {
       message: `Nothing was sent: "${locked}" can't be read (EACCES) on the machine running discord-mcpl. ` +
         'Give the path of a file there that it can read.',
     });

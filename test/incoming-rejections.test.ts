@@ -1,15 +1,8 @@
 /**
- * A host's refusal of a forwarded message is read, logged, and — when it is
- * about the message's inline media — answered with one resend that keeps the
- * text.
- *
  * agent-framework's coalescing hosts before 0.22.2, its 0.21 line included,
  * check a coalesced message's whole content against 1 MiB, inline base64
  * included, and refuse a message with a large screenshot per item
  * (`coalesce_invalid` on channels/incoming, a -32602 error on push/event).
- * discord-mcpl didn't read the per-item result and logged the
- * channels/incoming refusal as sent, so the message, text and all, was lost
- * with nothing on either side saying so.
  */
 
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -353,8 +346,7 @@ describe('edits and deletes: a refusal is logged', () => {
 });
 
 describe('an edit that replaces a create carries what the agent was sent', () => {
-  // Refuses the create as a budgeted host does, on either lane, and accepts
-  // the resend and the edit.
+  // Refuses the create as a budgeted host does, on either lane.
   const refuseCreate: Responder = (m, _p, n) => {
     if (m === 'channels/incoming') {
       return n === 1
@@ -474,8 +466,8 @@ describe('incoming-results helpers', () => {
     assert.equal(errorRejection(rpcError(-32650, 'reserved')), undefined);
     assert.equal(errorRejection(rpcError(-32100, 'reserved')), undefined);
     // mcpl-core 0.2.1's own timeout comes from mcpl-core in the lanes' tests.
-    // This stands in for a later mcpl-core's ConnectionTimeoutError, an
-    // RpcError with -32000, which 0.2.1 can't make.
+    // This stands in for a later mcpl-core's ConnectionTimeoutError (an RpcError
+    // with -32000), which 0.2.1 doesn't have.
     const later = Object.assign(new Error('push/event timed out: no reply came within 50 ms, so whether it ran is unknown.'),
       { name: 'ConnectionTimeoutError', code: -32000 });
     assert.equal(errorRejection(later), undefined);
@@ -514,14 +506,7 @@ describe('incoming-results helpers', () => {
   });
 });
 
-/**
- * Sending the same occurrence again, by what the MCPL spec defines and never
- * by one host's words: answerClass reads an answer as done, final, an
- * unknown channel, a refusal the spec gives no meaning, or no verdict. A
- * coalescing host's retry window (RFC-006 §3.1) is what makes the same
- * eventId safe to send again, so only a host that advertises one gets resends
- * of a refusal or of an uncertain answer.
- */
+/** A coalescing host's retry window (RFC-006 §3.1) is what makes the same eventId safe to send again. */
 describe('sending the same occurrence again, by what the spec defines', () => {
   const info = { guildId: 'g1', authorId: 'u1', authorName: 'someone' };
   const delays = (server: DiscordMcplServer, ms: number, n = 5) => { (server as any).retryDelaysMs = Array(n).fill(ms); };

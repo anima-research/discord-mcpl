@@ -210,7 +210,7 @@ describe('resolveLatestFrom', () => {
     assert.deepEqual(reads, [ALLOWED, THREAD_IN_ALLOWED, DM]);
   });
 
-  it('checks a private thread past one page of members through the real listings, warming the member cache once', async (t) => {
+  it("checks a private thread whose namesake is past Discord's 100-member page and the listing's 200 cap, through the real listings, warming the member cache once", async (t) => {
     const THREAD = '300000000000000011';
     const PARENT = '300000000000000012';
     const MOD = '100000000000000009';
@@ -295,7 +295,7 @@ describe('resolveLatestFrom', () => {
   });
 
   it('recognizes id-only members by their shape even when the list gives no count', async (t) => {
-    // Wren's probe: both Ra identities came back id-only from a thread listing.
+    // A thread's member listing gives its members by id only.
     const idOnly = [RA, RA2].map((id) => ({ id, username: id, displayName: id, isBot: false }));
     const { adapter } = adapterFixture(t, history, idOnly);
     const r = await adapter.resolveLatestFrom('c1', 'Ra');
@@ -322,7 +322,7 @@ describe('resolveLatestFrom', () => {
       };
     });
     const reference = (i: number) => bodies[i].message_reference as Record<string, unknown>;
-    // Today discord.js's default (failIfNotExists: true) covers every reply.
+    // discord.js's failIfNotExists defaults to true, which covers every reply.
     await adapter.sendMessage('dm1', 'by id', { replyTo: '1200000000000000001' });
     await adapter.sendMessage('dm1', 'by latestFrom', { replyTo: '1200000000000000002', requireReplyTarget: true });
     assert.equal(reference(0).fail_if_not_exists, true, "a reply by id carries discord.js's default");

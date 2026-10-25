@@ -1,51 +1,4 @@
-/**
- * Name-based channel addressing.
- *
- * WHY
- * Send tools require the raw channel snowflake verbatim. Models *regenerate*
- * these token-by-token rather than copying them, and snowflakes are worst-case
- * objects for that: pure digit sequences, no semantic redundancy, no checksum.
- * Three observed failure modes (see the feature request in the memory repo,
- * `shared/projects/channel_addressing_patch.md`):
- *
- *   1. Mangled id      — blends two in-context ids. Bounces loudly. Annoying.
- *   2. Stale default   — id-less send falls back to "most recent channel",
- *                        which is state, and state goes stale. SILENT.
- *   3. Wrong-valid-id  — plucks a real-but-wrong id from context. SILENT.
- *
- * The silent ones are the dangerous ones.
- *
- * DESIGN: accept back the string we already print.
- * `toDescriptor` (channels.ts) already labels channels `#name (GuildName)`, and
- * the server already announces channels to agents in that form. So this adds no
- * new naming scheme — anything visible in a channel listing becomes pasteable
- * into a send. Display form == address form.
- *
- * Guild qualification matters more than it looks. Bare `#general` collides
- * across guilds, and a bot in several servers hits that constantly rather than
- * rarely — so "hard-error on ambiguity" alone would send agents straight back to
- * snowflakes exactly as the channel count grows. The qualified form resolves
- * NORMALLY but not always: Discord permits duplicate text-channel names within
- * one guild, so two candidates can share a label. That case falls through to the
- * ambiguity error, which then quotes ids because labels no longer separate them.
- *
- * NO FUZZY MATCHING. Exact name, case-insensitive, leading `#` optional. A
- * "did you mean" would reintroduce silent wrong-room delivery in friendlier
- * packaging, which is failure mode 3 with better manners.
- *
- * IDS ARE A CO-EQUAL ADDRESS FORM, NOT A FAILURE STATE. The problem this
- * solves is MONOCULTURE — ids being the only thing to paste — not ids being
- * bad. An id is stable across renames, unambiguous by construction, and the
- * only way to reach the threads and categories this resolver excludes. So the
- * ambiguity error quotes ids alongside labels whenever labels alone cannot
- * separate the candidates, which is exactly the voice/text case.
- *
- * This module is deliberately free of discord.js so it can be unit-tested
- * without a gateway connection; the adapter supplies live candidates.
- */
-
-/** Discord snowflakes are 17-20 digits. Anything all-digits in that range is
- *  treated as an id and passed through untouched (backwards compatible). */
+/** Discord snowflakes are 17-20 digits. */
 export function isSnowflake(value: string): boolean {
   return /^\d{17,20}$/.test(value);
 }
@@ -56,9 +9,8 @@ export interface ChannelCandidate {
   name: string;
   guildId: string;
   guildName: string;
-  /** Needed for tie-breaking: a stock Discord server ships a VOICE channel
-   *  named "General" beside text #general, and matching is case-insensitive,
-   *  so a name collision across types is the DEFAULT state, not an edge case. */
+  /** A stock Discord server ships a voice channel named "General" beside text
+   *  #general, and matching is case-insensitive. */
   type: 'text' | 'announcement' | 'voice' | 'stage' | 'forum' | 'unknown';
 }
 
@@ -80,19 +32,8 @@ export function formatChannelLabel(name: string, guildName: string): string {
 }
 
 /**
- * A thread's label: `#parent › thread (GuildName)`. Display only, and
- * deliberately NOT the `#name (GuildName)` address form: this resolver
- * excludes threads (they are addressed by id), and a thread labelled like a
- * channel would paste as a same-named channel, the silent wrong-room failure
- * this module exists to prevent. Without a known parent: `› thread (GuildName)`.
- *
- * Pasted back, it must fail loudly, and its shape alone doesn't ensure that:
- * a voice or stage channel's name may hold spaces and `›`, so a voice room
- * named `general › design-chat` would match the label as a name. So the
- * resolver (DiscordAdapter.resolveChannelRef) refuses a name in this shape
- * before anything else about it (threadLabelRefusal), and such a voice room
- * is labelled by its id instead (channelLabelFor in channels.ts), since its
- * `#name (Guild)` would be refused too.
+ * A voice or stage channel's name may hold spaces and `›`, so a voice room
+ * named `general › design-chat` would match a thread label as a name.
  */
 export function formatThreadLabel(parentName: string | null | undefined, threadName: string, guildName: string): string {
   return `${parentName ? `#${parentName} ` : ''}› ${threadName} (${guildName})`;
@@ -224,14 +165,9 @@ export function resolveChannelName(
     matches = matches.filter((c) => c.guildName.toLowerCase() === wantGuild);
   }
 
-  // TIE-BREAK BY TYPE before declaring ambiguity. "General" the voice channel
-  // sitting beside #general the text channel is the stock Discord layout, so
-  // without this the most ordinary server on earth is unaddressable by name.
-  // Only applied when it fully disambiguates; two text channels still collide.
-  //
-  // Announcement channels count as text here: they are ordinary message
-  // channels that happen to support crossposting, so `#announcements` beside a
-  // voice channel of the same name should tie-break exactly as text would.
+  // "General" the voice channel beside #general the text channel is the stock
+  // Discord layout. Announcement channels are ordinary message channels that
+  // support crossposting, so they count as text here.
   if (matches.length > 1) {
     const sendable = matches.filter((c) => TEXTLIKE.has(c.type));
     if (sendable.length === 1) matches = sendable;
@@ -279,6 +215,7 @@ export function resolveChannelName(
   // error, forcing the fall back to a regenerated snowflake that this whole
   // feature exists to prevent. In that case the id is the only distinguishing
   // fact, so include it. Ids are a co-equal address form, not a shameful one.
+  // Discord lets two channels in one server share a name, so two matches can share a label.
   const labels = matches.map(channelLabel);
   const labelsDistinguish = new Set(labels).size === matches.length;
   const options = matches
@@ -330,21 +267,10 @@ export interface GuildLike {
  *  what the ambiguity tie-break prefers over a same-named voice channel. */
 const TEXTLIKE: ReadonlySet<string> = new Set(['text', 'announcement']);
 
-/** Channel kinds that can actually receive a message. Everything else stays
- *  addressable by id: categories and forum roots are not sendable, and thread
- *  names are not unique even within one channel.
- *
- *  This is an ALLOWLIST OF NAMED KINDS, deliberately not "everything except the
- *  few we exclude". It used to admit `'unknown'`, which was wrong in one
- *  direction (a media channel holds its posts as threads, like a forum);
- *  excluding `'unknown'` wholesale was then wrong in the other, because
- *  GuildAnnouncement (5) also landed in that bucket and `#announcements` is
- *  about as common a channel name as exists. An overloaded catch-all cannot be
- *  right either way — so kinds are named, and a new Discord channel type
- *  defaults to id-only addressing until someone deliberately classifies it.
- *  Failing closed here costs a bounce; failing open costs a send to something
- *  that cannot receive it. A stage channel has a text chat, as a voice channel
- *  does, and is named like one. */
+/** Channel kinds that can receive a message. Categories and forum roots
+ *  aren't sendable, a media channel holds its posts as threads, thread names
+ *  aren't unique even within one channel, and a stage channel has a text
+ *  chat, as a voice channel does. */
 const SENDABLE: ReadonlySet<string> = new Set([...TEXTLIKE, 'voice', 'stage']);
 
 /** Whether a channel kind can be addressed by NAME. Exported so the mapping

@@ -1,47 +1,26 @@
 /**
- * The server's small persisted JSON files: the muted channels, the reaction
- * channels and the watermarks, each read once, when its store is first used,
- * and rewritten whole after every change. The filters file is saved here too;
- * its reader is loadFiltersFile. The server owns these files while it runs:
- * a save writes over whatever is at the path then, so to edit or restore one,
- * an operator stops the server first.
+ * The server owns its persisted files while it runs: a save writes over
+ * whatever is at the path then, so to edit or restore one, an operator stops
+ * the server first.
  *
- * Reading (readJsonFile):
- * - No file means a store with nothing in it yet.
- * - A file that isn't exactly what its store writes (not JSON, the wrong
- *   shape, or entries the store doesn't write) is copied aside first, to
- *   `<file>.unreadable-<hash>`, named by its content so that reading the same
- *   content again keeps one copy. Once the copy is on disk, the file itself
- *   is rewritten by an ordinary save with the entries its store can use, or
- *   emptied when there are none, so it keeps its mode, owner, group and
- *   links. The store starts with those entries.
- * - A file that can't be read at all (EACCES, EIO, EMFILE…) says nothing
- *   about its content, so it stays as it is, and nothing saves over it until
- *   it's read again: at a restart, or by a new store. The store runs empty
- *   in memory meanwhile. When the copy or the rewrite fails, the file stays
- *   as it is the same way, and the store runs in memory on the entries it
- *   could use.
+ * A file that isn't exactly what its store writes (not JSON, the wrong shape,
+ * or entries the store doesn't write) is copied aside first, to
+ * `<file>.unreadable-<hash>`, named by its content (or by the time, when a
+ * copy of that name already holds other bytes), and then rewritten with the
+ * entries its store can use. A file that can't be read at all stays as it
+ * is, and nothing saves over it until it's read again.
  *
- * Saving (writeJsonFile) replaces a plain file the server owns atomically: a
- * temp file beside it, given the file's group and its whole mode before any
- * content goes in, renamed over it. So a process crash partway through can't
- * leave a torn file. There's no fsync, so on some filesystems a power loss
- * can still leave it empty, and the reader then copies that aside. A full
- * disk or quota (ENOSPC, EDQUOT) fails the save, and the file keeps what was
- * last saved. Everything else is written in place, as it was before saves
- * were atomic, where a crash or full disk partway through can still tear the
- * file: a symlink, a file with other hard links or another owner, a group the
- * server isn't in or its user namespace doesn't map, and a file whose
- * directory, filesystem or name won't take the temp file and rename (no
- * write access to the directory, a read-only filesystem around a
- * bind-mounted file, a filesystem without permissions, a name with no room
- * for `.tmp`). The first time a path is written in place for such an error,
- * the log says so. A file the server couldn't write in place isn't replaced
- * either. What Node can't see doesn't carry over a replacement: extended
- * attributes and a POSIX ACL on the file itself are lost at its first
- * replacement, the rewrite after a copy included (a directory's default ACL
- * still applies), so a store that needs them should be a symlink to its
- * file, which is written in place.
+ * A save replaces a plain file the server owns through a temp file and a
+ * rename, so a process crash partway through can't leave a torn file. There's
+ * no fsync, so on some filesystems a power loss can still leave it empty. A
+ * symlink, a file with other hard links or another owner, a file whose group
+ * the temp file can't be given, and a file whose directory or filesystem
+ * refuses the temp file or the rename (permissions, a read-only or
+ * cross-device mount, an unsupported operation) are written in place, where a
+ * crash partway through can tear the file. A full disk fails the save. Extended attributes
+ * and a POSIX ACL on the file itself are lost at its first replacement, so a
+ * store that needs them should be a symlink to its file, which is written in
+ * place.
  */
 import {
   accessSync,
@@ -68,9 +47,7 @@ import { dbg } from './debug-log.js';
  *  their file couldn't be read, copied aside or rewritten, so saving over it
  *  could destroy it. */
 const unsaveable = new Map<string, string>();
-/** Errors from the temp file, its chown or chmod, or the rename that mean this
- *  path can't be saved by replacement, so it's written in place. EINVAL is the
- *  chown's, for a group the user namespace doesn't map. */
+/** EINVAL is chown's, for a group the user namespace doesn't map. */
 const WRITE_IN_PLACE_ON = new Set([
   'EACCES', 'EPERM', 'EBUSY', 'EXDEV', 'EROFS', 'ENAMETOOLONG', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EINVAL',
 ]);
@@ -118,8 +95,7 @@ export function writeJsonFile(path: string, value: unknown): void {
   const mode = old ? old.mode & 0o7777 : undefined;
   const tmp = `${path}.tmp`;
   try {
-    // A stale temp file keeps its own mode and owner, so it's never reused:
-    // the temp file is created fresh, never more open than its target.
+    // A stale temp file keeps its own mode and owner, so it's never reused.
     rmSync(tmp, { force: true });
     const fd = openSync(tmp, 'wx', mode ?? 0o666);
     try {

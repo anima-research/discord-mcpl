@@ -1,12 +1,6 @@
 /**
- * Edit/delete forwarding.
- *
- * Discord emits MESSAGE_UPDATE for more than content edits: link-preview /
+ * Discord emits MESSAGE_UPDATE for more than content edits: link-preview and
  * embed refreshes re-send old messages with `edited_timestamp` still null.
- * Those were forwarded as "[message edited] …" events — weeks-old,
- * never-edited messages reaching the agent as fresh edits — with no author and
- * no guild, so the host placed them at `discord:dm:<guildChannelId>` and the
- * agent attributed them to whoever it had last been talking to.
  */
 
 import { describe, it } from 'node:test';
@@ -109,8 +103,7 @@ describe('edit/delete push events', () => {
     open(server);
     edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
     del('chan1', 'm1', false, { guildId: 'g1' });
-    // Occurrence ids are unique per edit/delete (RFC-006 §3.1): a fixed
-    // `discord_edit_<id>` collided with itself at the host's dedup.
+    // Occurrence ids are unique per edit or delete (RFC-006 §3.1).
     assert.deepEqual(sent.map(({ method, params }) => [method, params.eventId.replace(/_[^_]+_\d+$/, ''), params.origin.mcplChannelId]), [
       ['push/event', 'discord_edit_m1', 'discord:g1:chan1'],
       ['push/event', 'discord_delete_m1', 'discord:g1:chan1'],

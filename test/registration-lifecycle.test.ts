@@ -1,25 +1,8 @@
 /**
- * The registry follows a channel's life as discord.js tells it, including
- * the removals it makes without an event for each channel: a deleted channel
- * takes its threads with it, a guild the bot leaves takes all of its
- * channels, a channel Discord answers with Unknown Channel is deleted, a sync
- * of a guild's threads drops the live threads it doesn't list, and a
- * guild back from an outage is reconciled with what it has now, what it no
- * longer lists held as stale until Discord reports it again. A delivery
- * that set out before such a removal, or before an
- * archive, neither names nor registers what was removed or archived, and a
- * deleted channel's watermark stays dropped; a message posted after an
- * archive registers the thread it unarchived. A guild left and joined again
- * is registered again, as at boot, since its channels still exist, and an
- * outage removes nothing while it lasts. A forum or media channel's rename
- * reaches its posts' labels, and a hidden channel's rename its own. A
- * `#name (Guild)` label is kept only while it resolves back to its channel,
- * and a batch of labels reads one view of the channels names resolve among.
- * A fetch that a report on its channel overtakes is made again, and a
- * channel moved out of what the filters admit is forgotten.
- *
- * The cases drive discord.js's own actions and gateway handlers, each
- * gateway report dispatched as the gateway dispatches it (dispatch).
+ * discord.js removes channels without an event for each: a deleted channel
+ * takes its threads with it, a guild the bot leaves takes all of its cached
+ * channels, and a thread list sync drops the live threads it doesn't list in
+ * the channels it covers.
  */
 import { it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
@@ -348,8 +331,7 @@ for (const type of [ChannelType.GuildText, ChannelType.GuildForum, ChannelType.G
     assert.equal(f.adapter.getCachedChannelFacts(TH)?.parentName, 'after', "discord.js's cache has the new name");
     assert.equal(f.server.channelManager.get(threadMcplId)?.label, '#after › topic (Guild)');
     assert.ok(f.announced('updated', threadMcplId));
-    // A text channel is registered by its update. A forum or media channel
-    // holds no messages, so it isn't.
+    // A forum or media channel holds no messages.
     assert.equal(f.server.channelManager.get(parentMcplId) !== undefined, type === ChannelType.GuildText);
   });
 }
@@ -479,8 +461,7 @@ it('a create in a thread known only partly, which Discord answers Unknown Channe
   });
   const lookup = (f.adapter as any).threadLookups.get(TH);
   assert.ok(lookup, 'the create waits for the thread to be looked up');
-  // Its channel is deleted meanwhile. The thread, known only partly, isn't
-  // in the channel's threads.cache, so the deletion can't name it.
+  // The thread, known only partly, isn't in the channel's threads.cache, so the deletion can't name it.
   f.client.actions.ChannelDelete.handle({ id: P, guild_id: G, type: ChannelType.GuildText });
   release();
   await lookup;
@@ -777,8 +758,7 @@ it('a thread known only partly that its guild came back without is registered by
   f.comesBack();
   assert.ok(f.adapter.isStale(TH));
   t.mock.method(f.client.rest, 'get', async () => threadAt(false, T));
-  // An edit as the gateway delivers it: its thread is a partial, so the
-  // adapter looks it up before placing the edit.
+  // An edit as the gateway delivers it: its thread is a partial.
   f.client.emit('messageUpdate', { partial: true }, {
     id: M, channelId: TH, guildId: G, partial: true, channel: f.client.channels.cache.get(TH),
     content: 'edited', editedTimestamp: T + 2000, author: { id: U, username: 'Bob' },
@@ -1359,8 +1339,7 @@ for (const [event, d] of [
     const { release, calls } = lookups(t, f, [channelData(X, ChannelType.GuildText, 'news')]);
     const meta = f.adapter.getChannelMeta(X);
     await until(() => calls() === 1);
-    // The adapter hears the report as the gateway dispatches it; what
-    // discord.js then does with it doesn't matter here.
+    // The adapter hears the report as the gateway dispatches it.
     f.client.ws.emit(event, d, 0);
     release();
     await meta;
@@ -1794,7 +1773,7 @@ it("a channel addressed by its composite id fetches no stale channel first", asy
 it("a fetch that every report overtakes labels the channel by its id, and the channels sharing its name too", { timeout: 5000 }, async (t) => {
   // P is a voice channel, and text channel W holds the name they share.
   const W = '100000000000000026';
-  // (Its thread is the partly known one: a voice channel holds no threads cache.)
+  // A voice channel holds no threads cache.
   const f = fixture(t, { type: ChannelType.GuildVoice, sparse: true, channels: [channelData(W, ChannelType.GuildText, 'before')] });
   f.server.registerGuildDelivery(G, P);
   f.server.registerGuildDelivery(G, W);
@@ -2266,8 +2245,7 @@ it("a sync forgets a thread it drops from the cache whose registration doesn't k
   const f = fixture(t, { sparse: true });
   assert.equal(f.server.registerGuildDelivery(G, TH).id, threadMcplId);
   assert.equal(f.server.channelManager.get(threadMcplId)?.metadata.parentId, undefined);
-  // A tool's fetch teaches the cache the thread's channel, and puts it in P's
-  // threads cache, without deriving the registration again.
+  // A tool's fetch teaches the cache the thread's channel, and puts it in P's threads cache.
   t.mock.method(f.client.rest, 'get', async () => threadAt(false, T));
   await (f.adapter as any).refetchChannel(TH);
   assert.equal(f.client.channels.cache.get(P).threads.cache.has(TH), true);

@@ -106,14 +106,10 @@ async function main(): Promise<void> {
   await discord.connect();
   await discordReady;
 
-  // Voice output (optional): DISCORD_VOICE_CHANNEL_ID gates the whole leg.
-  // Built BEFORE the server so the initialize handshake can declare
-  // channels.streaming. Failures degrade to text-only, never fatal — which
-  // is why ./voice.js is imported only AFTER the env check and inside the
-  // try: it pulls @animalabs/voice-kit at top level, and a box that never
-  // configured voice must not hard-require that package to boot (fleet
-  // deploys are pull + tsc; ../voice-kit may simply not exist there).
-  // voice-env.js is dependency-free by contract.
+  // Built before the server, so the initialize handshake can declare
+  // channels.streaming. ./voice.js is imported only after the env check, inside
+  // the try: it pulls @animalabs/voice-kit at top level, which a box without
+  // voice configured may not have.
   const { voiceEnv } = await import('./voice-env.js');
   let voice = null as import('./voice.js').VoiceOutput | null;
   const vEnv = voiceEnv();
@@ -188,9 +184,7 @@ async function main(): Promise<void> {
     poll.unref();
   }
 
-  // Register slash commands (/undo) and wire the interaction handler.
-  // Fail-open: command registration needs the applications.commands scope;
-  // a failure shouldn't take down the surface.
+  // Command registration needs the applications.commands scope; a failure shouldn't take down the surface.
   try {
     await server.setupSlashCommands();
     console.error('[discord-mcpl] Slash commands registered');
@@ -199,8 +193,7 @@ async function main(): Promise<void> {
   }
 
   if (useStdio) {
-    // Stdio transport — single client, MCP-compatible
-    // Log to stderr (stdout is the protocol channel)
+    // Log to stderr: stdout is the protocol channel.
     console.error('[discord-mcpl] Starting on stdio');
     // Exits once the host closes stdin or the connection otherwise ends.
     await serveStdio(server, McplConnection.fromStreams(process.stdin, process.stdout));
@@ -210,9 +203,7 @@ async function main(): Promise<void> {
     const tcpServer = net.createServer();
     tcpServer.listen(tcpPort, '127.0.0.1');
 
-    // A failure to listen (the port taken) emits 'error' with no listener
-    // yet, which ends the process, as it should. serveTcp's own listener
-    // goes on only once it's listening.
+    // A failure to listen (the port taken) emits 'error' with no listener yet, which ends the process, as it should.
     await new Promise<void>((resolve) => tcpServer.once('listening', resolve));
 
     // One client at a time, for as long as the process runs.

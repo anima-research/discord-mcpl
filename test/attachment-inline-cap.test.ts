@@ -1,15 +1,4 @@
-/**
- * Tests for the text-attachment inline cap (issue #30) and inlined attachment URLs.
- *
- * The invariant under test: no more than DISCORD_ATTACHMENT_INLINE_MAX_BYTES
- * of attachment text ever becomes a context block, and the bound holds on
- * ACTUAL bytes — Discord's declared attachment.size is advisory. Images are
- * out of scope by design (native image blocks, their own ceilings).
- *
- * buildAttachmentBlocks is private; tests reach it with the same cast-hack
- * precedent server.test.ts uses for private access. No Discord connection —
- * the adapter is a bare cast, globalThis.fetch is stubbed per test.
- */
+/** Discord's declared attachment.size is advisory. */
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert/strict';
@@ -277,9 +266,7 @@ describe('attachment inline cap (issue #30)', () => {
   });
 
   it('retains at most cap+1 bytes from one giant stream chunk and cancels immediately', async () => {
-    // A reader may deliver far more than the remaining allowance in a single
-    // chunk. The helper must slice retention to cap+1 and cancel — not hold
-    // the whole chunk before noticing overflow.
+    // A reader may deliver far more than the remaining allowance in a single chunk.
     let pulls = 0;
     let cancelled = false;
     const giant = new Uint8Array(10 * 1024 * 1024).fill(0x79); // 10MB of 'y'
@@ -293,8 +280,7 @@ describe('attachment inline cap (issue #30)', () => {
           cancelled = true;
         },
       },
-      // highWaterMark 0: no internal prefetch, so each pull corresponds to
-      // an actual reader.read() — making "one read, then cancel" assertable.
+      // highWaterMark 0: no internal prefetch, so each pull corresponds to an actual reader.read().
       { highWaterMark: 0 },
     );
     globalThis.fetch = (async (url: string | URL | Request) => {

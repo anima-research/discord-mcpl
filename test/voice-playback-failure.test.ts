@@ -498,10 +498,7 @@ test('a failed utterance ends its stream, and audio that comes after is dropped 
 
 test('a reply whose provider is unavailable at clearance plays nothing and is reported spoken, nothing heard', async (t) => {
   noUnhandledRejections(t);
-  // As the review found with a real player: the item's stream is ended empty,
-  // so the player starts and ends it at once, and the report is a 'spoken'
-  // one with nothing voiced, which the server words as cut short by a
-  // synthesis error (its cause).
+  // A real player starts and ends an empty stream at once.
   class DownProvider implements TtsProvider {
     readonly name = 'down';
     readonly outputRateHz = 44100;

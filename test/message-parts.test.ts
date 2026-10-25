@@ -76,15 +76,12 @@ describe('a message sent in parts', () => {
   });
 
   it('cuts a single character longer than 1,900 units inside, never between the halves of a pair', async (t) => {
-    // A letter with 2,000 combining marks is one grapheme: no boundary to cut
-    // at, so the cut falls at 1,900.
+    // A letter with 2,000 combining marks is one grapheme.
     const marks = `a${'\u0301'.repeat(2000)}`;
     const parts = await partsOf(t, marks);
     assert.equal(parts.join(''), marks);
     assert.equal(parts[0].length, 1900);
-    // Skin-tone modifiers extend the letter before them into one grapheme, and
-    // each is a surrogate pair from an odd unit: the one at 1,899 is kept
-    // whole, so the first part ends at 1,899.
+    // Skin-tone modifiers extend the letter before them into one grapheme, and each is a surrogate pair.
     const tones = `a${'\u{1F3FB}'.repeat(1000)}`;
     const toned = await partsOf(t, tones);
     assert.equal(toned.join(''), tones);

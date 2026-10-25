@@ -1,17 +1,7 @@
 /**
- * The admin slash commands and the host's 💤 awareness marks
- * (agent-framework#250's `marks` host command).
- *
- * - /undo takes an optional `marks` choice (none, addressed, all), passed to
- *   a host that has the `marks` verb, which places the marks and returns a
- *   `markers` receipt. A host without the verb places branch-following marks
- *   on undo that no option can make a one-shot act, so /undo is refused there.
- * - /hide takes an optional choice of none or all. Its 💤 is this server's
- *   own, added to the hidden messages when all is chosen, outside the host's
- *   awareness ledger, on any host.
- * - /marks lists the ledger and cancels or retracts.
- *
- * The host is a stub answering host/command; Discord is a stub adapter.
+ * agent-framework#250 adds the host's `marks` verb. A host without it places
+ * branch-following marks on undo that no option can make a one-shot act, so
+ * /undo is refused there.
  */
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
@@ -36,8 +26,7 @@ type Sent = Record<string, unknown>;
 /** The probe: a `marks` request naming no action. */
 const isProbe = (p: Sent): boolean => p.command === 'marks' && p.action === undefined;
 
-/** How agent-framework#250 answers the probe, and how every older framework
- *  with host/command answers a verb it lacks. */
+/** How agent-framework#250 answers the probe. */
 const VERB_ANSWER = { ok: false, error: 'marks needs action list, cancel or retract' };
 const NO_VERB_ANSWER = { ok: false, error: 'Unknown host command: marks' };
 /** What a refusal after a failed probe ends with, at /undo and /marks. */
@@ -91,10 +80,8 @@ function serverWith(conn: unknown, refuse: string[] | Record<string, string> = [
   return { server, reactions };
 }
 
-/** A slash interaction from an admin, recording what it was answered.
- *  `rejectEdits` refuses that many edits first, standing for any refusal of
- *  a full reply; `acceptEdits` accepts that many and refuses every one after,
- *  as Discord does once an interaction has expired. */
+/** A slash interaction from an admin. `acceptEdits` accepts that many edits
+ *  and refuses every one after, as Discord does once an interaction has expired. */
 function interaction(
   commandName: string,
   options: Record<string, string | number | undefined>,
@@ -104,7 +91,7 @@ function interaction(
   let toAccept = opts.acceptEdits ?? Infinity;
   let held = opts.holdFirstEdit;
   let editStarted!: () => void;
-  const firstEdit = new Promise<void>((resolve) => { editStarted = resolve; });
+  const firstEditStarted = new Promise<void>((resolve) => { editStarted = resolve; });
   const out: { replies: string[]; files: Array<{ attachment: Buffer; name: string }[]>; deferred?: unknown; ephemeral: boolean[] } = {
     replies: [],
     files: [],
@@ -112,8 +99,7 @@ function interaction(
   };
   return {
     out,
-    /** Settles when the first edit starts. */
-    firstEdit,
+    firstEditStarted,
     value: {
       commandName,
       user: { id: 'admin-1', username: 'Admin' },
@@ -135,7 +121,7 @@ function interaction(
           await gate;
         }
         const content = typeof o === 'string' ? o : o.content;
-        // Discord refuses a reply over its limit; a test can also refuse edits outright.
+        // Discord refuses a reply over its limit.
         if (toReject > 0 || toAccept <= 0 || content.length > REPLY_LIMIT) {
           if (toReject > 0) toReject--;
           throw new Error(content.length > REPLY_LIMIT ? 'Invalid Form Body: content too long' : 'Unknown interaction');
@@ -267,8 +253,7 @@ describe('the marks probe', () => {
   });
 
   it('reads any answer but "Unknown host command" as the verb, and asks for each command', async () => {
-    // agent-framework#250 refuses the probe for its missing action; any other
-    // answer that isn't "Unknown host command" proves the verb as well.
+    // agent-framework#250 refuses the probe for its missing action.
     for (const answer of [VERB_ANSWER, { ok: false, error: 'marks is busy' }, { ok: true, awareness: [] }]) {
       const conn = {
         sent: [] as Sent[],
@@ -456,19 +441,19 @@ describe('replies stay within one message, and never misreport an applied surger
       ['yes', 'hide', { message: '111111111111111111' }, false, false],
       ['no', 'hide', { message: '111111111111111111', marks: 'none' }, false, false],
     ];
-    for (const [marksVerb, name, options, pointer, marked] of cases) {
+    for (const [marksVerb, name, options, pointsToLedger, saysNoneAdded] of cases) {
       const command = name === 'undo' ? 'Undo' : 'Hide';
-      const check = `Check the agent's context${pointer ? ledger : ''} before trying again.`;
+      const check = `Check the agent's context${pointsToLedger ? ledger : ''} before trying again.`;
       const { server } = serverWith(failing(marksVerb));
       const i = interaction(name, options);
       await asAdmin(() => server.handleSlashCommand(i.value));
       const what = `${marksVerb} ${name} ${JSON.stringify(options)}`;
       assert.equal(i.out.replies.at(-1), `⚠️ ${command} outcome unknown (request timed out): the host may or may not have applied it. ${check}` +
-        (marked ? `\n${notAdded}` : ''), what);
+        (saysNoneAdded ? `\n${notAdded}` : ''), what);
       const refused = interaction(name, options, { rejectEdits: 1 });
       await asAdmin(() => server.handleSlashCommand(refused.value));
       assert.equal(refused.out.replies.at(-1), `⚠️ ${command} outcome unknown: the host may or may not have applied it. ${check}` +
-        `${marked ? ` ${notAdded}` : ''} (The full reply couldn't be shown: Unknown interaction.)`, what);
+        `${saysNoneAdded ? ` ${notAdded}` : ''} (The full reply couldn't be shown: Unknown interaction.)`, what);
     }
   });
 
@@ -653,7 +638,7 @@ describe('/hide and its 💤', () => {
     let early = 0;
     const { server, reactions } = serverWith(h.conn, [], { gate: Promise.resolve(), onCall: () => { if (i.out.replies.length === 0) early++; } });
     const done = asAdmin(() => server.handleSlashCommand(i.value));
-    await i.firstEdit;
+    await i.firstEditStarted;
     // A turn of the event loop, for any marking that didn't wait for the first reply.
     await new Promise((resolve) => setImmediate(resolve));
     open();
@@ -808,10 +793,7 @@ const retractView = (at: number): AwarenessView => ({
   mayStillLand: 1,
 });
 
-/** agent-framework#250's own answers as merged (e0f40cd9), run: a version 2 ledger shaped as in #250's own
- *  import test, rewritten at a start; a batch with one add confirmed, one on the wire and one still owed,
- *  cancelled; a batch with one add answered unknown, retracted, and that retract cancelled; the imported
- *  batch retracted; then a retract of all. */
+/** agent-framework#250's own answers as merged (e0f40cd9), run. */
 const AF250 = {
   cancel: { target: 'b897e6cb-25af-4485-8f94-0c8e39d4f23a', kind: 'batch', cancelled: 1, confirmed: 1, mayStillLand: 1 },
   cancelRetract: { target: '4d103eee-13c6-4c81-a6fc-3306b0e2c794', kind: 'retract', cancelled: 2, confirmed: 0, mayStillLand: 1 },

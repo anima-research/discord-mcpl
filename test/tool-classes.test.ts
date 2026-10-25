@@ -101,7 +101,6 @@ describe('MCPL RFC-008 tool classes', () => {
       inputSchema: { type: 'object', properties: {} },
     };
     assert.equal(withToolClasses(tool), tool);
-    // Names inherited from Object.prototype are not classes either.
-    assert.equal(withToolClasses({ ...tool, name: 'constructor' })._meta, undefined);
+    assert.equal(withToolClasses({ ...tool, name: 'constructor' })._meta, undefined, 'a name inherited from Object.prototype is no class');
   });
 });

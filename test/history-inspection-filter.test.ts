@@ -9,6 +9,7 @@
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import type { Client } from 'discord.js';
+import { ERR_CHANNEL_OPEN_FAILED } from '@animalabs/mcpl-core';
 import { DiscordAdapter, mapAllAttachments, type DiscordAdapterConfig } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
 import { mcplChannelId, toDescriptor } from '../src/channels.js';
@@ -41,8 +42,7 @@ function adapterWith(t: TestContext, config: Partial<DiscordAdapterConfig>) {
   const adapter = new DiscordAdapter({ token: 'unused', guildChannels: { [G1]: [ALLOWED, CATEGORY] }, ...config });
   const client = (adapter as unknown as { client: Client }).client;
   t.after(() => client.destroy());
-  // channelAllowed reads a thread's channel from the cache to find its
-  // category (#73), as the gateway leaves it there for a guild's channels.
+  // The gateway leaves a guild's channels in the cache, where channelAllowed reads a thread's channel.
   client.channels.cache.set(UNDER_CATEGORY, { id: UNDER_CATEGORY, isDMBased: () => false, ...channels[UNDER_CATEGORY], parentId: CATEGORY } as never);
   (client.channels as unknown as { fetch: unknown }).fetch = async (id: string) => {
     if (id === DM) return { id, isDMBased: () => true };
@@ -236,8 +236,7 @@ describe('channels/open backscroll', () => {
       await assert.rejects(
         server.handleChannelOpen({ channelId: mcplChannelId(G1, id), type: 'discord', history: { limit: 20 } }),
         (err: Error & { code?: unknown }) => {
-          // MCPL's open failed: the open couldn't go ahead.
-          assert.equal(err.code, -32024, id);
+          assert.equal(err.code, ERR_CHANNEL_OPEN_FAILED, id);
           assert.match(err.message, /is outside this residence's configured channel filters — filters bound inspection as well as delivery\. Nothing was read\. Nothing was opened\.$/, id);
           return true;
         },
@@ -266,7 +265,7 @@ describe('channels/open backscroll', () => {
     await assert.rejects(
       server.handleChannelOpen({ channelId: mcplChannelId(G1, ALLOWED), type: 'discord', history: { limit: 20 } }),
       (err: Error & { code?: unknown }) => {
-        assert.equal(err.code, -32024);
+        assert.equal(err.code, ERR_CHANNEL_OPEN_FAILED);
         assert.equal(
           err.message,
           `The channel filters stopped admitting ${mcplChannelId(G1, ALLOWED)} while its history was fetched, so none of it is returned. ` +
@@ -283,7 +282,7 @@ describe('channels/open backscroll', () => {
     await assert.rejects(
       server.handleChannelOpen({ channelId: mcplChannelId(G1, LOOKUP_FAILS), type: 'discord', history: { limit: 20 } }),
       (err: Error & { code?: unknown }) => {
-        assert.equal(err.code, -32024);
+        assert.equal(err.code, ERR_CHANNEL_OPEN_FAILED);
         assert.equal(err.message, `${mcplChannelId(G1, LOOKUP_FAILS)} couldn't be checked against the channel filters, so nothing was opened: Unknown Channel`);
         return true;
       },

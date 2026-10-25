@@ -1,16 +1,7 @@
 /**
- * An event in a thread the client knows only partly waits for the thread's
- * lookup. While that lookup is pending, discord.js can replace the thread's
- * cache entry: the guild is removed and joined again, which builds a new
- * thread object. Each lane, the create, the deletion and the reaction, then
- * names and filters its event by what the cache holds after the lookup, not
- * by the object it held before.
- *
- * Found in review by Daphne, whose probe this test is built from. It drives
- * discord.js's own actions and gateway handler, with the REST reply held.
- * The create and reaction lanes read `message.channel`, a getter that
- * resolves the cache each time; the deletion lane holds the channel across
- * its lookup and reads the cache again after it.
+ * While a thread's lookup is pending, discord.js can replace the thread's
+ * cache entry: a guild removed and joined again builds a new thread object.
+ * A message's `channel` is a getter that resolves the cache each time.
  */
 import { it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';

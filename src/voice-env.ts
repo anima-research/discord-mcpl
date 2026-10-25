@@ -1,17 +1,12 @@
 /**
- * Voice env detection, dependency-free by design: this module must import
- * NOTHING beyond node built-ins, so index.ts can decide whether voice is
- * configured without touching ./voice.js — whose top-level voice-kit import
- * would make every discord-mcpl instance hard-require @animalabs/voice-kit
- * at startup, voice or not. Fleet boxes deploy by pull + tsc with symlinked
- * packages; a resolvable-only-after-install dependency is a hard-down at the
- * next restart for residents that never asked for voice (#28 review).
+ * Imports only Node built-ins, so index.ts can tell whether voice is
+ * configured without loading ./voice.js, whose top-level
+ * @animalabs/voice-kit import would make every instance require voice-kit at
+ * startup.
  */
 
-/** Default voiced threshold (dBFS) for the carrier VAD. Live finding: a
- *  client with noise suppression off transmits CONTINUOUSLY — packet
- *  presence reads as "speaking" forever. The carrier is defined by acoustic
- *  ENERGY; override per deployment with DISCORD_VOICE_VAD_DB. */
+/** A client with noise suppression off transmits continuously, so packet
+ *  presence would read as speaking forever. */
 export const VAD_THRESHOLD_DB = -45;
 
 export interface VoiceEnv {

@@ -1,69 +1,7 @@
 /**
- * Sender notices for DMs the DM allowlist refuses.
- *
- * A refused DM is never forwarded to the agent. Without a notice the sender
- * can't tell a contact filter from a resident ignoring them, so the connector
- * tells them once. This module holds the durable per-sender state that keeps
- * the notice to once per message, at most once a day per sender, and at most
- * DM_NOTICE_HOURLY_CEILING in any hour across all senders, through
- * restarts, reconnect catch-up and duplicate gateway events:
- *
- *   - floorId: a Discord snowflake. A message older than it never
- *     notifies, on any path: a gateway event can carry an older message as
- *     well as the catch-up sweep can. A new state's floor is the moment the
- *     state is created, and turning notices on moves it to that moment, so
- *     nothing refused before then notifies later: while they are off nothing
- *     is recorded, and a new state starts off. It also follows the retention
- *     horizon below.
- *   - per sender, lastHandledId: the newest refused message already handled.
- *     A message whose id isn't newer never notifies again.
- *   - per sender, lastNotice: the last notice's message, when it was
- *     reserved, and its outcome. It's reserved (persisted, outcome
- *     "pending") BEFORE the send and settled to sent / failed / unknown
- *     after. A reservation found still pending when the state is opened
- *     was interrupted (say, by a crash after dispatch): it becomes unknown,
- *     is reported once, and is never retried.
- *
  * The hourly ceiling bounds what a wave of new accounts DMing the bot can
  * cause: each would get its one notice, an unbounded burst of outbound DMs,
- * which is the pattern Discord's anti-spam watches bot accounts for. It
- * counts the senders whose last notice was reserved within the hour. Each
- * sender has at most one notice a day, so that is every notice reserved
- * within the hour, durable with the rest of the state. Past the ceiling, a
- * refused DM gets no notice. A sender the state already holds is recorded
- * as handled, so that message never notifies later. A sender it doesn't
- * hold yet isn't recorded at all, so a wave of new accounts adds no senders
- * and costs no writes: the file grows by at most the ceiling's worth of new
- * senders an hour. Their message got no notice, so a later sight of it can
- * still notify, within the usual limits.
- *
- * A sender is kept for DM_NOTICE_RETENTION_MS after their latest refusal
- * or notice, and dropped when the state next changes while notices are on,
- * and the floor follows that horizon, so a message from before it can't
- * notify once its sender is gone. While notices are off nothing is written,
- * so the state keeps the senders it held. The file holds the senders
- * refused within the retention while notices were on, not everyone ever
- * refused.
- *
- * The same file holds the resident's on/off setting for notices. It is off
- * until the resident turns it on with filters_update setDmNotice: a bot
- * account shouldn't start sending text to strangers because the connector was
- * upgraded, with nobody having chosen it. The choice survives restarts
- * whether or not a filters file is configured.
- *
- * The state lives in its own file, separate from the filters file. If it
- * can't be read or written, notices are suspended rather than sent without a
- * durable limit; refusals themselves are unaffected. A refusal decided
- * meanwhile gets no notice, and nothing retries it: only a later sight of
- * the same message decides it again, such as a duplicate gateway event, or
- * the catch-up at the next start for a refusal heard live in a DM channel
- * the bot knows (the catch-up moves its watermark past what it decided).
- *
- * The file is read and written asynchronously, so a slow disk never stalls
- * the gateway, and the state's operations (open, decide, recordOutcome,
- * setEnabled) run one at a time, in the order they were called: each sees the
- * state the one before it left. Every change rewrites the whole file. While
- * notices are off, a refusal changes nothing, so nothing is written.
+ * which is the pattern Discord's anti-spam watches bot accounts for.
  */
 import { mkdir, open, readFile, rename, type FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -436,12 +374,9 @@ export class DmNoticeState {
     }
   }
 
-  /** Durable replace: the new content is flushed before it takes the old
-   *  file's place, and the rename is flushed with its directory, so a
-   *  reservation that returned has survived a host crash. Private to the
-   *  bot's user: a 0600 file, in a directory created 0700 when it doesn't
-   *  exist (an existing one keeps its mode). A failure before the rename
-   *  leaves the old file in place; one after it is an UnflushedReplace. */
+  /** The content is flushed before it takes the old file's place, and the
+   *  rename is flushed with its directory, except on Windows, which can't flush
+   *  one. A 0600 file, in a directory created 0700 when it doesn't exist. */
   private async write(file: NoticeFile): Promise<void> {
     if (!this.path) throw new Error('DM notice state has no path');
     const path = this.path;

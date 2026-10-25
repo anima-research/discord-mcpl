@@ -227,16 +227,9 @@ export function resolveStartupFilters(
   return { filters, fileBroken };
 }
 
-/** Poll-cycle interpreter for the filters file's presence/mtime, so the
- *  poller can tell an atomic-rename blink from a real deletion and can
- *  force a reload when a vanished file reappears with a preserved mtime
- *  (restored-from-backup files can carry different bytes under identical
- *  timestamps).
- *
- *  One missing observation is grace (a non-atomic editor mid-replace);
- *  persistent absence is a real state the plane must witness — a deleted
- *  desired config reporting as healthy is exactly disk≠process with no
- *  witness. */
+/** One missing observation is grace: a non-atomic editor may be mid-replace.
+ *  A file restored from a backup can carry different bytes under an
+ *  identical mtime, so a vanished file that reappears forces a reload. */
 export class FiltersFilePollTracker {
   private lastMtime: number | null;
   private missedPolls = 0;
@@ -258,35 +251,23 @@ export class FiltersFilePollTracker {
   }
 }
 
-/* ------------------------------------------------------------------------- *
- * Plane state + reaction suppression (issue #21, folded per PR #13 review)
- *
+/*
  * Hosts mark inference refusals by reacting to the triggering message with a
- * category emoji. Letting those reactions re-enter agent context feeds
- * classifier-meta back into the very windows that are refusing: a
- * self-amplifying loop, observed cross-agent (Mythos 2026-08-03).
- *
- * The suppression list lives in this plane as `suppressedReactionEmojis`.
- * The 2026-08-03 emergency env (DISCORD_SUPPRESS_REACTION_EMOJIS) seeds the
- * file on first materialization and otherwise survives as a deprecated
- * PROCESS-STATIC source: it is read once at startup, and changing it
- * requires a restart — a running process's environment cannot be edited
- * from outside, so no hot-apply is claimed for it. Hot reload belongs to
- * the file plane alone. The alias retires once fleet inventory shows
- * migrated files (issue #16).
- * ------------------------------------------------------------------------- */
+ * category emoji; letting those reactions back into an agent's context feeds
+ * the refusal back into the windows that are refusing. The Agent Framework
+ * owns the refusal-category-to-reaction map, and host composition injects the
+ * set as DISCORD_SUPPRESSED_REACTIONS_BASELINE. A running process's
+ * environment can't be changed from outside it, so
+ * DISCORD_SUPPRESS_REACTION_EMOJIS is read once, at startup.
+ */
 
-/** Normalize a reaction emoji for suppression matching: strip VS-16
- *  (U+FE0F) so "☣️" and "☣" compare equal, and strip surrounding colons so a
- *  custom emoji matches whether configured as ":sigil:" or "sigil". */
+/** Discord may send a reaction emoji with or without VS-16 (U+FE0F), and a
+ *  custom emoji may be configured with or without its colons. */
 export function normalizeReactionEmoji(emoji: string): string {
   return emoji.replace(/\uFE0F/g, '').trim().replace(/^:|:$/g, '');
 }
 
-/** Discord snowflakes are 64-bit decimal ids; every real one is 17–20
- *  digits. A numeric suppression entry gains id matching for custom emojis
- *  without losing its literal string match (an emoji *name* that happens to
- *  be digits still matches by name). */
+/** Discord snowflakes are 64-bit decimal ids; every real one is 17–20 digits. */
 const SNOWFLAKE = /^\d{17,20}$/;
 
 /** Comma-separated env value → raw suppression tokens. Unset, empty, and
@@ -317,13 +298,13 @@ function sha256(s: string): string {
 
 export interface FiltersPlaneStatus {
   /** live: file configured, last parse applied, desired state readable.
-   *  stale: desired state is unreadable/missing; the last-known-good
-   *  filters (whitelists AND suppression alike) are still enforced —
-   *  process-lifetime only, they do not survive a restart. unavailable:
-   *  desired state is unreadable/missing and no good parse ever happened
-   *  this process (whitelists run on the env fallback; reactions are
-   *  withheld). env-static: no DISCORD_FILTERS_FILE — filters came from
-   *  env at startup and cannot change without a restart. */
+   *  stale: the desired state is unreadable or missing, and the last-known-good
+   *  whitelists are still enforced, for this process only; the suppression
+   *  status says what suppression enforces. unavailable: unreadable or missing
+   *  with no good parse this process: the whitelists run on the environment
+   *  fallback, and reactions are withheld. env-static: no
+   *  DISCORD_FILTERS_FILE; the filters came from the environment at startup
+   *  and can't change without a restart. */
   status: 'live' | 'stale' | 'unavailable' | 'env-static';
   /** What the on-disk desired state looks like right now. Only present
    *  when a filters file is configured. */
@@ -351,14 +332,12 @@ export interface ReactionSuppressionBaselineDelta {
 }
 
 export interface ReactionSuppressionStatus {
-  /** not-configured: no suppression anywhere — reported plainly, never
-   *  implying protection. configured-empty: the file key exists with zero
-   *  entries (deliberate operator clear). active: entries are being
-   *  enforced. stale: the plane broke after a good load and the
-   *  last-known-good entries are still enforced. unavailable: the
-   *  withhold-everything posture (see suppressingAllReactions). Plane-level
-   *  facts (desiredState, staleSince, loadedAt) live on the plane status,
-   *  not here. */
+  /** not-configured: no suppression anywhere. configured-empty: an explicitly
+   *  empty list in the file, or an empty legacy variable where it overrides
+   *  the baseline. active: entries are being
+   *  enforced. stale: the plane broke after a good load with entries, and those
+   *  last-known-good entries are still enforced. unavailable: every reaction is
+   *  withheld until the file is repaired. */
   status: 'not-configured' | 'configured-empty' | 'active' | 'stale' | 'unavailable';
   /** True whenever reactions are actually being withheld from the model. */
   protectionActive: boolean;
@@ -370,11 +349,8 @@ export interface ReactionSuppressionStatus {
   /** status 'unavailable' only: the plane is broken with no usable prior
    *  set, so every reaction is withheld until the file is repaired. */
   suppressingAllReactions?: true;
-  /** baseline-default: the host-injected protective baseline is in force
-   *  because no operator configuration exists (key absent everywhere).
-   *  Not deprecated — this is the intended default-protective path for
-   *  host-launched deployments; a standalone Discord with no baseline
-   *  injected honestly reports none. */
+  /** baseline-default: no operator configuration exists anywhere, so the
+   *  host-injected baseline is in force. */
   source: 'file' | 'legacy-env' | 'baseline-default' | 'none';
   /** The deprecated DISCORD_SUPPRESS_REACTION_EMOJIS env is set but the
    *  file key is authoritative — the env is ignored, never unioned. */

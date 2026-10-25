@@ -8,6 +8,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 
+import { ChannelType } from 'discord.js';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 
 // ── Fixtures ──
@@ -42,14 +43,13 @@ function fakeGuild(members: ReturnType<typeof member>[], opts: {
 function guildChannel(id: string, guild: FakeGuild, viewers: ReturnType<typeof member>[], parentId: string | null = null) {
   return {
     id,
-    type: 0, // GuildText
+    type: ChannelType.GuildText,
     name: `chan-${id}`,
     guild,
     guildId: guild.id,
     parentId,
     isThread: () => false,
-    // discord.js's members getter (permission-computed); fixtures hand us the
-    // post-permission answer directly.
+    // discord.js's members getter is computed from permissions; the fixture gives its answer directly.
     members: new Map(viewers.map((m) => [m.id, m])),
   };
 }
@@ -57,7 +57,7 @@ function guildChannel(id: string, guild: FakeGuild, viewers: ReturnType<typeof m
 function thread(id: string, guild: FakeGuild, joinedIds: string[], parentId: string) {
   return {
     id,
-    type: 11, // PublicThread
+    type: ChannelType.PublicThread,
     name: `thread-${id}`,
     guild,
     guildId: guild.id,
@@ -83,8 +83,7 @@ function makeAdapter(
   internals.client.destroy();
   internals.client = {
     destroy() {},
-    // As discord.js's client does: guild channels are in the cache too
-    // (the channel allowlist reads a thread's channel from it).
+    // As discord.js's client does: guild channels are in the cache too.
     channels: { fetch: async (id: string) => channels[id] ?? null, cache: new Map(Object.entries(channels)) },
     users: { fetch: async () => null },
     user: { id: 'bot_1', username: 'bot', displayName: 'Bot', bot: true },
@@ -249,7 +248,7 @@ describe('listChannelMembers: DMs', () => {
   it('returns the two parties', async () => {
     const dm = {
       id: 'd1',
-      type: 1, // DM
+      type: ChannelType.DM,
       isThread: () => false,
       recipient: { id: 'u9', username: 'ra', displayName: 'Ra', bot: false },
     };

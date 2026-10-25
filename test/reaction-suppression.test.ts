@@ -226,9 +226,7 @@ describe('DiscordFiltersState — suppression', () => {
     const st = new DiscordFiltersState({ fileConfigured: true });
     st.applyParsed({});
     assert.equal(st.isSuppressed({ emoji: ENV_ONLY_GLYPH }), true);
-    // Mutating the process env after construction changes nothing — the
-    // source is a startup snapshot, exactly like a real external edit to
-    // the environment of a running process (which cannot happen at all).
+    // A running process's environment can't be changed from outside it, so the source is read once, at startup.
     process.env.DISCORD_SUPPRESS_REACTION_EMOJIS = HARMLESS;
     assert.equal(st.isSuppressed({ emoji: ENV_ONLY_GLYPH }), true, 'snapshot still enforced');
     assert.equal(st.isSuppressed({ emoji: HARMLESS }), false, 'new env value not picked up');

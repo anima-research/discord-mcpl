@@ -1,9 +1,6 @@
 /**
- * A message's thread fields name the thread it was posted IN (Discord threads
- * are channels, so threadId equals channelId), never the thread it started:
- * discord.js `message.thread` is "the thread started by this message", a
- * different conversation. The channel a thread hangs off is read from the
- * client's channel cache by parentId, as the channel filters read it.
+ * Discord threads are channels, and discord.js's `message.thread` is the
+ * thread a message started, not the one it was posted in.
  */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
@@ -84,6 +81,10 @@ function fixture(t: TestContext, options: Partial<ConstructorParameters<typeof D
 const thread = (extra: Partial<Cached> = {}): Cached => ({
   id: 'thread-1', name: 'design-chat', type: ChannelType.PublicThread, parentId: 'chan-1', isThread: () => true, ...extra,
 });
+
+const letOtherWorkRun = async () => {
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+};
 
 describe('thread fields', () => {
   it('name the thread a message was posted in, and the channel it hangs off', (t) => {
@@ -231,11 +232,9 @@ describe('thread fields', () => {
     assert.equal('threadId' in channel, false, 'a channel is no thread');
   });
 
-  // The thread the next three tests share: built, as discord.js builds one
-  // from a message event, with its type but not its name or its channel.
-  // A lookup gets past the cache, as discord.js's fetch with force does, and
-  // fills it in. Given a gate, the first lookup waits for it, and any later
-  // one answers at once.
+  // Built as discord.js builds a thread from a message event: its type, but
+  // not its name or its channel. A lookup gets past the cache, as discord.js's
+  // fetch with force does, and fills it in.
   function partlyKnownThread(f: ReturnType<typeof fixture>, t: TestContext, gate?: Promise<void>, fails = false) {
     const partly: Cached = { id: 'thread-2', type: ChannelType.PublicThread, parentId: null, isThread: () => true };
     f.cache.set('thread-2', partly);
@@ -266,8 +265,7 @@ describe('thread fields', () => {
     f.emit('messageCreate', posted);
     f.emit('messageUpdate', { ...posted, partial: false }, { ...posted, content: 'edited', cleanContent: 'edited', editedTimestamp: Date.now() });
     f.emit('messageDelete', posted);
-    // Let anything not waiting for the create's lookup run its course first.
-    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    await letOtherWorkRun();
     assert.deepEqual(f.order, [], "all three wait for the create's lookup");
     release();
     await f.settle();
@@ -279,8 +277,7 @@ describe('thread fields', () => {
   });
 
   it('come with an edit and a delete in a thread the client knows only partly, which they look up past the cache', async (t) => {
-    // No filters, and no create of the thread's waiting: nothing else would
-    // fetch it, and discord.js's cache would hand back the same partial.
+    // Nothing else would fetch the thread, and discord.js's cache would hand back the same partial.
     const f = fixture(t);
     const { partly, forced } = partlyKnownThread(f, t);
     const posted = f.message({ channelId: 'thread-2', channel: partly });
@@ -327,7 +324,7 @@ describe('thread fields', () => {
     const user = { id: 'u2', username: 'ann', partial: false };
     f.emit('messageCreate', posted);
     f.emit('messageReactionAdd', { partial: false, emoji: { name: '👍', id: null }, message: posted }, user);
-    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    await letOtherWorkRun();
     assert.deepEqual(f.order, [], "the reaction waits for the create's lookup");
     release();
     await f.settle();

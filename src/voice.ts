@@ -1,49 +1,10 @@
 /**
- * Voice output: speaks the host's streamed prose (MCPL `channels/outgoing/*`,
- * Spec 14.3) into a Discord voice channel under this agent's own bot.
+ * Voice output for the host's streamed prose (MCPL `channels/outgoing/*`,
+ * SPEC 14.3). That stream is advisory: the authoritative delivery is
+ * `channels/publish`, so this module never posts text.
  *
- * The hard problems live elsewhere by design: the HOST routes prose per line
- * (fail-closed) and only streams chunks whose destination is settled, so by
- * the time a delta reaches us it is speech, for a known channel, in order.
- * This module: filters to the voiced text channel(s), feeds deltas into a
- * streaming TTS provider (@animalabs/voice-kit — pluggable), and plays the
- * audio as it synthesizes. Latency = provider time-to-first-audio (~0.7 s),
- * overlapping generation instead of following it.
- *
- * PHYSICS LAYER (floor-control.md §1.1) — audio is a destructive-interference
- * medium; these rules run regardless of any social protocol above them:
- *
- *  - CARRIER-SENSE: never begin emitting while anyone else in the channel is
- *    speaking. On silence, wait a random hold-off (150–500 ms), re-check,
- *    then emit. Implemented via the connection receiver's speaking events
- *    (events only — we stay deaf to CONTENT; STT is portal-relay's job).
- *  - ZERO-COST-LOSER (convergence review, Sol 8/5): carrier-clear before
- *    synthesis. The provider SOCKET pre-opens at first delta (free — only
- *    characters bill), but text banks locally and flushes into synthesis
- *    only on the sink's 'cleared' event. An utterance dropped while queued
- *    (interruption of the queue via stop(), or maxHoldMs expiry) bills zero
- *    characters and never re-runs inference: the banked text simply waits,
- *    and on expiry the model gets an 'expired' receipt and decides for
- *    itself whether re-saying is worth a turn.
- *  - HUMAN BARGE-IN: a human speaking mid-utterance aborts playback AND
- *    upstream synthesis immediately. Humans are above the protocol (I1).
- *    Unknown speakers are treated as human — physics yields when unsure.
- *  - BOT COLLISION: two bots starting near-simultaneously (within the
- *    collision window) resolve deterministically — higher snowflake yields.
- *    A bot that starts speaking AFTER our window is ignored: its own
- *    carrier-sense should have held it, and physics must not reward barging.
- *  - INTERRUPTION ACCOUNTING: the model must know what was and was not
- *    heard. Per utterance we track sent text + provider char alignment +
- *    played-audio ms, and report the voiced/unvoiced split upward
- *    (server.ts pushes it to the host as an event). Without alignment the
- *    split is estimated from audio duration and flagged `estimated`.
- *
- * Spec discipline: `channels/outgoing/*` is ADVISORY — the authoritative
- * delivery is `channels/publish`. This module must never post text.
- *
- * Testability: the TTS provider and the audio sink are injected; CarrierGate
- * is pure; Discord specifics live in DiscordVoiceSink below (dynamic imports
- * keep @discordjs/voice out of the graph unless voice is configured).
+ * A TTS provider's socket is free to hold open; only the characters sent
+ * bill.
  */
 import { PassThrough, type Readable } from 'node:stream';
 import {
@@ -63,24 +24,13 @@ import { VAD_THRESHOLD_DB, type VoiceEnv } from './voice-env.js';
 const HOLDOFF_MIN_MS = 150;
 const HOLDOFF_MAX_MS = 500;
 const COLLISION_WINDOW_MS = 250;
-/** Human speech must be SUSTAINED this long before it counts as barge-in.
- *  A single packet burst is not speech: Discord clients emit ~100 ms blips
- *  on unmute (mic pop) and on VAD false-triggers (keyboard, cough), and
- *  live-testing showed an unmute alone killing an utterance before the
- *  human said a word. Asymmetric with carrier-sense on purpose: for
- *  STARTING to speak, a false carrier only costs politeness (we wait a
- *  beat longer); for ABORTING mid-utterance, a false trigger costs the
- *  whole utterance. Total worst-case yield latency stays conversational:
- *  debounce + player stop ≈ half a second. */
+/** Discord clients send ~100 ms bursts on unmute (a mic pop) and on VAD
+ *  false triggers (a keyboard, a cough), so a single burst isn't speech. */
 const BARGE_IN_SUSTAIN_MS = 250;
 /** Played-vs-synthesized slack under which a completed utterance counts as
  *  fully voiced (avoids alignment-jitter noise in the common happy path). */
 const FULLY_PLAYED_SLACK_MS = 250;
-/** Provider sockets pre-opened at once. Sockets are billing-free but not
- *  limit-free (providers cap concurrent connections); a deep queue would
- *  hold one idle socket per waiting utterance. Deeper items open at
- *  clearance instead — their connection latency hides inside a queue wait
- *  that is already long (#28 review, nonblocking 1). */
+/** Sockets bill nothing, but providers cap concurrent connections. */
 const PRE_OPEN_MAX = 3;
 
 export interface VoiceOutputConfig {
@@ -557,11 +507,7 @@ export class VoiceOutput {
     });
   }
 
-  /** Voiced/unvoiced split at a playback position. Alignment chars map onto
-   *  the input text (voice-kit contract), so counting played chars and
-   *  slicing sentText by that count is exact; text the provider never
-   *  synthesized (alignment shorter than sentText) is unvoiced by
-   *  construction. */
+  /** Alignment characters map onto the input text (voice-kit's contract). */
   private split(utt: ActiveUtterance, playedMs: number):
     { voicedText: string; unvoicedText: string; estimated: boolean } {
     // Nothing played is an exact boundary, as an expired item's is.
@@ -639,18 +585,13 @@ export class DiscordVoiceSink implements PcmSink {
   /** Per-frame speaker levels (dBFS) — live threshold calibration. */
   onLevel(fn: (userId: string, db: number) => void): void { this.levelFns.push(fn); }
 
-  /** Decoded per-speaker audio (48k stereo PCM16), as it flows. This is the
-   *  tap for STT consumers (voice-chat harness, a future channel listener):
-   *  the sink already decodes for the energy VAD, so hearing-as-listening
-   *  costs nothing extra here. Only fires in VAD mode. */
+  /** Decoded per-speaker audio, 48k stereo PCM16. */
   onSpeakerAudio(fn: (speaker: SpeakerInfo, pcm: Buffer) => void): void { this.speakerAudioFns.push(fn); }
 
   async connect(client: unknown, guildId: string, channelId: string): Promise<void> {
     const { joinVoiceChannel, createAudioPlayer, entersState, NoSubscriberBehavior, VoiceConnectionStatus, EndBehaviorType } =
       await import('@discordjs/voice');
-    // prism-media rides in with @discordjs/voice; opus decode runs on
-    // opusscript (already a dep). If either is missing we fall back to
-    // packet-presence carrier sensing (worse with hot mics, never fatal).
+    // prism-media comes with @discordjs/voice, and opus decoding runs on opusscript.
     let prism: typeof import('prism-media') | null = null;
     try { prism = (await import('prism-media')).default ?? await import('prism-media'); }
     catch { this.vadMode = false; }
@@ -661,14 +602,8 @@ export class DiscordVoiceSink implements PcmSink {
     const conn = joinVoiceChannel({
       channelId, guildId,
       adapterCreator: guild.voiceAdapterCreator,
-      // NOT deafened: the carrier gate needs to hear the MEDIUM. In VAD
-      // mode we decode each speaker's audio just far enough to measure
-      // loudness — RMS per 20 ms frame, discarded immediately. No STT, no
-      // content, nothing stored or forwarded: meaning-deaf, not
-      // energy-deaf. (Hearing-as-listening is portal-relay's job.)
-      // Consequence: the Discord UI shows this bot as listening
-      // (undeafened) — which is honest, it does receive audio; anyone
-      // auditing what it retains should be pointed at this comment.
+      // Not deafened: a deafened connection receives no audio, and Discord shows
+      // an undeafened bot as listening.
       selfDeaf: false,
     });
     await entersState(conn, VoiceConnectionStatus.Ready, 15_000);
@@ -688,14 +623,7 @@ export class DiscordVoiceSink implements PcmSink {
       // released here too.
       if (!this.vadMode || this.packetFallback.delete(userId)) this.gate.speakingEnd(userId);
     });
-    // Bot collision: immediate (synthesized streams don't blip — a bot's
-    // first voiced frame is real audio). Human barge-in: in VAD mode it is
-    // wired per-pipeline on ≥250 ms of cumulative VOICED audio (see
-    // ensurePipeline) — NOT on gate presence, which the VAD hangover keeps
-    // alive past any presence-based debounce (live finding: an unmute
-    // transient opened speech, hangover carried it through the 250 ms
-    // presence check, utterance died to a spike). Packet-fallback speakers
-    // (no VAD) get the presence-based debounce as a lesser evil.
+    // A synthesized stream doesn't blip: a bot's first voiced frame is real audio.
     this.gate.onSpeakerStart((s) => { if (s.bot) this.maybeYield(s); });
     this.gate.onSpeakerSustained(BARGE_IN_SUSTAIN_MS, (s) => {
       if (!s.bot && (this.packetFallback.has(s.userId) || !this.vadMode)) this.maybeYield(s);
@@ -763,10 +691,7 @@ export class DiscordVoiceSink implements PcmSink {
     this.kick();
   }
 
-  /** Start pump() unless it is already running. pump() settles every
-   *  failure it can name as a 'failed' item, and no path rejects it today.
-   *  The catch is there so a future one can't end the whole process, as an
-   *  unhandled rejection would (Node >= 15). */
+  /** The catch is there because an unhandled rejection ends the process (Node ≥ 15). */
   private kick(): void {
     void this.pump().catch((err) => {
       console.error('[discord-mcpl voice] playback pump:', err);
@@ -795,9 +720,8 @@ export class DiscordVoiceSink implements PcmSink {
       compareSnowflakes(this.selfId, s.userId) > 0;
     if (!human && !collision) return;
     cur.interruptedBy = s;
-    // The stop takes a playing item to Idle, which ends the wait for Idle.
-    // An item still waiting for Playing never gets there once stopped, so
-    // the abort ends that wait too, and pump() emits 'interrupted' at once.
+    // A stop takes a playing item to Idle. An item still waiting for Playing
+    // never gets there once stopped, so the abort ends that wait.
     cur.yielded.abort();
     this.player?.stop(true);
   }
@@ -850,19 +774,12 @@ export class DiscordVoiceSink implements PcmSink {
           this.emit({ type: 'failed', id: item.id, playedMs: 0, reason: PlaybackFailure.refused });
           continue;
         }
-        // Billing gate: VoiceOutput flushes banked text into synthesis on
-        // this event — audio starts flowing into item.stream from here. It
-        // comes only once the player has accepted the item (until audio
-        // arrives the player just buffers), so a refused item bills nothing.
+        // The player accepts the item before any audio arrives, and buffers until
+        // it does, so a refused item bills nothing.
         this.emit({ type: 'cleared', id: item.id });
-        // An item the player doesn't start, or doesn't finish, in time is one
-        // that couldn't be played to its end: it fails, naming which limit it
-        // reached, unless someone barged in. A barge-in (maybeYield) stops the
-        // player, which ends the wait for Idle, and aborts the item's waits,
-        // which ends the wait for Playing that the stop alone wouldn't.
-        // entersState rejects with an AbortError when its signal fires, and
-        // with the player's own error when the playing stream fails meanwhile
-        // (its once() listener is what hears that 'error').
+        // entersState rejects with an AbortError when its signal fires, and with
+        // the player's own error when the playing stream fails meanwhile (its
+        // once() listener is what hears that 'error').
         const yielded = this.current.yielded.signal;
         const wait = async (status: import('@discordjs/voice').AudioPlayerStatus, ms: number, limit: string): Promise<string | null> => {
           const { signal, done } = DiscordVoiceSink.waitSignal(ms, yielded);
@@ -929,9 +846,7 @@ export class DiscordVoiceSink implements PcmSink {
   }
 }
 
-/** Discord snowflakes are u64 decimal strings; numeric compare via length
- *  then lexicographic (avoids BigInt on hot paths and non-numeric ids in
- *  tests). */
+/** Snowflakes are u64 decimal strings, so they compare by length, then lexicographically. */
 export function compareSnowflakes(a: string, b: string): number {
   if (a.length !== b.length) return a.length - b.length;
   return a < b ? -1 : a > b ? 1 : 0;

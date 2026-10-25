@@ -3,8 +3,6 @@
  * rejection must be caught at the dispatch: on Node >= 15 an unhandled
  * rejection ends the process. Discord refuses a late reply ("Unknown
  * interaction" once its 3-second acknowledgment window has passed).
- *
- * Run: node --import tsx --test test/slash-dispatch.test.ts
  */
 import { test } from 'node:test';
 import * as assert from 'node:assert/strict';

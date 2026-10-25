@@ -27,27 +27,18 @@ export function parseMcplChannelId(id: string): { guildId: string; channelId: st
 }
 
 /**
- * A guild channel's label, from what is known of it: the one rule for every
- * path that registers a channel (boot, a channel's or guild's events, a
- * message delivered from it, an edit or delete), so a label means the same
- * whichever path made it.
- * - A channel the resolver names (text, announcement, voice, stage): its
+ * A guild channel's label, the same whichever path registered it:
+ * - a channel the resolver names (text, announcement, voice, stage): its
  *   address, `#name (Guild)`, the string a tool's channelId accepts back,
- *   while that resolves back to it (nameResolves).
- * - A thread: `#parent › thread (Guild)`, display only (formatThreadLabel
- *   says why), or `› thread (Guild)` when its channel's name isn't known.
- *   Threads are addressed by id.
- * - Anything else: its composite id, `discord:<guild>:<channel>`, which
- *   addresses exactly this channel. That is the label when the guild's or
- *   the channel's name isn't known (a bare `#name` would resolve to a
- *   same-named channel in whichever guild has one), for a kind the resolver
- *   doesn't name, for a voice or stage channel whose name has a thread
- *   label's shape (`general › design`), which the resolver refuses as a
- *   name, and for a channel whose name resolves to another channel: a voice
- *   channel beside a same-named text channel, which the resolver prefers,
- *   or two channels of one name and kind.
- * The server re-derives a registered label when what it's made from changes,
- * another channel's name included.
+ *   while that resolves back to it;
+ * - a thread: `#parent › thread (Guild)`, display only, or `› thread (Guild)`
+ *   when its channel's name isn't known. Threads are addressed by id;
+ * - anything else: its composite id, `discord:<guild>:<channel>`, which
+ *   addresses exactly this channel. That is the label when the guild's or the
+ *   channel's name isn't known, for a kind the resolver doesn't name, for a
+ *   voice or stage channel whose name has a thread label's shape
+ *   (`general › design`), and for a channel whose name resolves to another
+ *   channel.
  */
 export function channelLabelFor(c: ChannelFacts): string {
   if (c.guildName && c.name) {
@@ -109,9 +100,7 @@ export function toDmDescriptor(
     label: `DM: ${recipientName}`,
     direction: 'bidirectional',
     address: { guildId: 'dm', channelId },
-    // recipientName/recipientId make DM addressing people-first: the host
-    // resolves `>>@name` and `<@id>` mention tokens against them (explicit
-    // prose routing), instead of forcing agents through raw channel ids.
+    // The host resolves `>>@name` and `<@id>` mention tokens against recipientName and recipientId.
     metadata: { channelType: 'dm', recipientName, ...(recipientId ? { recipientId } : {}) },
     initiallyOpen,
     capabilities: {
@@ -160,33 +149,10 @@ export type OpenTarget =
   | { kind: 'refused'; code: number; reason: string };
 
 /**
- * Resolve a channels/open request against the registered channels: its
- * channelId first, then its address, then its type alone. Nothing here opens
- * anything.
- *
- * type is required in MCPL, and every host we know sends it (agent-framework's
- * ChannelsOpenParams makes it a required field, so its exact thread opens
- * carry it too). So it must be a non-empty string, and the channel opened must
- * be of that type; a missing or invalid type is refused, never read as "any".
- *
- * channelId, when given, is the exact selector, and it alone selects: an
- * address beside it isn't read, whatever it says. MCPL's SPEC has no channelId
- * on channels/open; agent-framework's ChannelsOpenParams gives it as "Exact
- * registered id. Preferred over type/address matching.", and hosts code
- * against that. Absent or null means no channelId. An empty string
- * or a non-string is refused, since it names nothing.
- *
- * Without a channelId, an address naming a guildId and a channelId (both
- * non-empty strings) is the exact selector. An address that is absent, null or
- * {} names nothing, and anything else is refused.
- *
- * An exact selector that names a registered channel opens it. One that is
- * well-formed but not registered is handed back as `unregistered`, for the
- * server to look up in Discord: it may be a channel this server serves that
- * no traffic has registered yet (a DM after a restart, say). An exact
- * selector never falls back to another channel. With no selector at all, a
- * request opens the one channel of its type, every registered kind counted
- * (DMs among them), and is refused when there are none or several.
+ * MCPL's channels/open requires `type` and has no `channelId`.
+ * agent-framework's ChannelsOpenParams adds `channelId`, the exact registered
+ * id to open, and asks a server that doesn't know the id to refuse rather
+ * than open another channel.
  */
 export function resolveOpenTarget(
   params: { channelId?: unknown; type?: unknown; address?: unknown },

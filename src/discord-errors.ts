@@ -1,27 +1,13 @@
 /**
- * What Discord's answer means for the id a tool was given.
- *
- * An id Discord doesn't know comes back as two words, "Unknown Channel",
- * which says nothing about what went wrong or what to do instead. A name has
- * the resolver's own answers (channel-names.ts); an id has no candidates to
- * list, so the explanation names what the answer means for the id that was
- * passed and how to get a real one. Ids get misremembered: one recalled
- * rather than copied is the commonest way to reach this.
- *
- * The explanation is appended after the error's own text, so the error's
- * words stay as they were. Two refusals the agent can't change itself,
- * Missing Permissions and a DM Discord won't deliver, are explained too:
- * what Discord refused, who can change it, what calling again will do
- * until then, and, for Missing Permissions on a message with files, what
- * may still go through. Errors with other codes pass through unchanged.
+ * Discord answers an id it doesn't know with two words, "Unknown Channel",
+ * which say nothing about what went wrong or what to do instead.
  */
 import { isSnowflake } from './channel-names.js';
 import { parseMcplChannelId } from './channels.js';
 import type { PostedParts } from './discord-adapter.js';
 import { quotedValue } from './source-header.js';
 
-/** Discord's JSON error codes for an id it can't resolve, or can't reach. A
- *  channel Discord answers with Unknown Channel no longer exists. */
+/** Discord's JSON error codes for an id it can't resolve, or can't reach. */
 export const UNKNOWN_CHANNEL = 10003;
 const UNKNOWN_GUILD = 10004;
 const UNKNOWN_MESSAGE = 10008;

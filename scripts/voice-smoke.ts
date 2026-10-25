@@ -1,19 +1,10 @@
 /**
- * Live smoke test for the voice physics layer — no MCPL host needed.
- *
- * Drives VoiceOutput + DiscordVoiceSink directly: type a line on stdin, the
- * bot speaks it in the voice channel. While it speaks, talk over it — you
- * should hear it stop within ~300 ms, and the interruption report (voiced/
- * unvoiced split, who cut in) prints here. Start talking BEFORE pressing
- * enter to watch carrier-sense hold the utterance until you've been silent
- * for the hold-off.
- *
  * Usage (from discord-mcpl/):
  *   env $(grep -v '^#' .env.voice-test | xargs) npx tsx scripts/voice-smoke.ts --list
  *   env $(grep -v '^#' .env.voice-test | xargs) npx tsx scripts/voice-smoke.ts \
  *     --guild <guildId> --vc <voiceChannelId> [--voice Opus4]
  *
- * --list: print every guild + voice channel the bot can see, then exit.
+ * --list prints every guild and voice channel the bot can see, then exits.
  */
 import { createInterface } from 'node:readline';
 import { Client, GatewayIntentBits, ChannelType } from 'discord.js';

@@ -1,13 +1,8 @@
 /**
  * The REST client sends a request again after a 5xx, a timeout or a reset
  * connection, so a part of a message whose first attempt posted, and whose
- * answer was lost, would post twice. Each part carries a nonce of its own
- * that Discord enforces: Discord answers a repeat sent within a few minutes
- * with the message it already made. These tests send through discord.js's
- * own channel send and REST client, with the REST client's makeRequest
- * answering in Discord's place.
- *
- * Run: node --import tsx --test test/send-nonces.test.ts
+ * answer was lost, would post twice. Discord enforces a nonce: it answers a
+ * repeat sent within a few minutes with the message it already made.
  */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
@@ -34,11 +29,9 @@ const messageData = (id: string, content: string) => ({
   author: { id: BOT, username: 'bot', discriminator: '0', bot: true },
 });
 
-/** The real adapter, with a DM to RECIPIENT cached, over a stand-in for
- *  Discord: each request makes a message unless its nonce is enforced and
- *  already made one, which it returns instead, as Discord's enforce_nonce
- *  does. `lost` lists the requests (by their place, from 0) whose message is
- *  made but whose answer is a 503. */
+/** A stand-in for Discord: each request makes a message unless its nonce is
+ *  enforced and already made one, which it returns instead, as Discord's
+ *  enforce_nonce does. */
 function overStandIn(t: TestContext, lost: number[] = []) {
   const adapter = new DiscordAdapter({ token: 'unused' });
   const client = (adapter as unknown as { client: Client }).client;

@@ -1,16 +1,4 @@
-/**
- * channels/open reads its selectors in the order hosts code against
- * (agent-framework's ChannelsOpenParams prefers channelId): a channelId alone
- * selects; without one, an address does; with neither, the one channel of
- * the request's type. An exact selector names exactly one channel or is
- * refused with its code, and an id the registry doesn't hold is looked up in
- * Discord and opened when this server serves it. Nothing is fetched, opened
- * or subscribed before the channel is named. Requests are handled one at a
- * time, so a close or a mute sent during an open is handled after it; what
- * arrives meanwhile is Discord's: a deletion or the bot leaving the guild
- * during the lookup or the history fetch refuses the open as unknown, and a
- * channel unregistered during the history fetch isn't opened.
- */
+/** channels/open reads its selectors in the order hosts code against: agent-framework's ChannelsOpenParams prefers channelId. */
 import { after, before, describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -431,7 +419,7 @@ describe("channels/open: an id the registry doesn't hold", () => {
 
   it('refuses a channel of a guild the bot has left, read after the lookup, and registers nothing', async () => {
     const kept: ChannelFacts = { id: 'c8', guildId: 'g2', guildName: 'Gone', name: 'kept', type: 'text' };
-    // discord.js can keep a channel past the leave, so the lookup still finds it.
+    // discord.js keeps a channel past the leave when it hadn't cached the guild, so the lookup still finds it.
     const f = fixture([general], { served: () => ({ kind: 'guild', facts: kept }) });
     f.left.add('g2');
     await f.refused({ channelId: 'discord:g2:c8', type: 'discord', history: { limit: 5 } }, UNKNOWN_CHANNEL, /^No channel this server serves matches/);

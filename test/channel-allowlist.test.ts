@@ -70,10 +70,9 @@ function fixture(t: { after: (fn: () => void) => void }, fetchFails = false) {
     messageEventDeliveries: Map<string, Promise<void>>;
   };
   t.after(() => internals.client.destroy());
-  // The guild's channels as the GUILDS intent caches them; UNCACHED_CHANNEL
-  // is deliberately missing. The partly known threads are cached as
-  // discord.js caches a thread built from a message event: a thread type,
-  // and a null parentId.
+  // The guild's channels as the GUILDS intent caches them. A thread built from a
+  // message event is cached as discord.js caches it: a thread type, and a null
+  // parentId.
   const cache = internals.client.channels.cache as unknown as Map<string, FixtureChannel>;
   const isThread = (id: string) => id.startsWith('53') || id.startsWith('54');
   for (const [id, parentId] of Object.entries(PARENT)) {

@@ -27,8 +27,7 @@ test('invalid AGENT_TIMEZONE falls back loudly instead of throwing at import', (
   const original = console.error;
   console.error = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
   try {
-    // Must not throw — a throw here kills the stdio child before the MCPL
-    // handshake, and a dead subprocess is never respawned by reconnect.
+    // Must not throw: a throw at import kills the stdio child before the MCPL handshake.
     const zone = resolveAgentTimeZone('Amrica/New_York');
     assert.equal(zone, systemDefault); // same default as when unset
     assert.equal(warnings.length, 1);

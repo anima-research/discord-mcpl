@@ -5,18 +5,9 @@
  * tools/list carries each tool's classes as `_meta["mcpl/class"]`. Hosts use
  * them to decide how a tool is handled, notably what tool-lifecycle observers
  * may see of its calls. A tool may name several classes; the host applies the
- * union of their restrictions, so adding a class can only make handling
- * stricter.
- *
- * The comms rule: a tool that sends people's messages, or reads them, is
- * `comms`, whichever direction the words travel. Classing such a tool as
- * anything else is the one dangerous mistake here, because comms arguments
- * are never shared with observers and other classes may be.
- *
- * An unclassed tool (no key) is treated as the most restrictive class, so
- * leaving a tool out is always safe. Deliberate omissions go in UNCLASSED;
- * test/tool-classes.test.ts fails until every tool the server lists or
- * dispatches is in one of the two.
+ * union of their restrictions. Comms arguments are never shared with
+ * observers, and other classes' may be. A host treats an unclassed tool (no
+ * key) as the most restrictive class.
  */
 
 import type { ToolDefinition } from './tools.js';
@@ -78,7 +69,7 @@ export const TOOL_CLASSES: Record<string, readonly ToolClass[]> = {
   unsubscribe_channel: ['control'],
 };
 
-/** Tools deliberately left unclassed. Hosts treat them as most restrictive. */
+/** Tools left unclassed, which hosts treat as most restrictive. */
 export const UNCLASSED: ReadonlySet<string> = new Set<string>([]);
 
 /** The tool definition as tools/list should carry it: its RFC-008 classes

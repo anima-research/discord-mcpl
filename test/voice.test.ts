@@ -266,7 +266,7 @@ test('billedChars receipt: cleared-then-interrupted bills exactly the flushed te
 test('socket pre-open is capped: deep-queue items open at clearance instead', () => {
   const { provider, sink, out } = setup();
   for (let i = 0; i < 5; i++) out.handleChunk('inf' + i, 'discord:g:100', 'text ' + i);
-  assert.equal(provider.streams.length, 3); // PRE_OPEN_MAX sockets, not 5
+  assert.equal(provider.streams.length, 3, 'PRE_OPEN_MAX sockets, not one per item');
   sink.clear('inf4');                       // deep item clears → opens now
   assert.equal(provider.streams.length, 4);
   assert.deepEqual(provider.streams[3]!.sent, ['text 4']);
@@ -283,9 +283,8 @@ test('socket died while queued: flush reopens a fresh stream and resends the ban
   assert.deepEqual(provider.streams[1]!.sent, ['resent text']);
 });
 
-/** Drive setTimeout and Date together from a fixed epoch. On the real clock
- *  the hold timer runs on the event loop's cached time, in whole
- *  milliseconds, so it can fire before Date.now() has moved by its delay. */
+/** On the real clock the hold timer runs on the event loop's cached time, in
+ *  whole milliseconds, so it can fire before Date.now() has moved by its delay. */
 function mockClock(t: TestContext): void {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
 }

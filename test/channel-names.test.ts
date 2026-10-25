@@ -175,12 +175,7 @@ describe('resolveChannelName', () => {
   });
 
   it('handles duplicate names within a single guild -- ACTIONABLY', () => {
-    // Discord permits two same-named channels in different categories. The
-    // earlier version of this test asserted only reason === 'ambiguous', which
-    // passed while the message was a DEAD END: both suggestions rendered
-    // identically, so re-sending either returned the same error and the agent
-    // had no way forward but a regenerated snowflake. Classification is not
-    // usefulness; assert the suggestions can actually be told apart.
+    // Discord permits two same-named channels in different categories.
     const dupe = ch('100000000000000004', 'general', 'g1', 'Separatrix');
     const r = resolveChannelName({ name: 'general', guild: 'Separatrix' },
       [SEPARATRIX_GENERAL, dupe]);
@@ -191,10 +186,7 @@ describe('resolveChannelName', () => {
   });
 
   it('TIE-BREAKS text over voice -- the stock-Discord collision', () => {
-    // Nearly every server ships a VOICE channel named "General" beside text
-    // #general, and matching is case-insensitive, so this is the DEFAULT state
-    // of an ordinary server -- not an edge case. Without the tie-break the most
-    // common configuration on Discord is unaddressable by name.
+    // Discord's default server layout has a voice channel named General beside text #general.
     const voice = ch('100000000000000005', 'General', 'g1', 'Separatrix', 'voice');
     const r = resolveChannelName({ name: 'general', guild: 'Separatrix' },
       [SEPARATRIX_GENERAL, voice]);
@@ -297,9 +289,7 @@ describe('buildCandidates', () => {
     ]);
     const got = buildCandidates([g], { mapType, allowed: allowAll });
     assert.deepEqual(got.map((c) => c.name).sort(), ['a-stage', 'text-room', 'voice-room']);
-    // Forums 400 on a bare send, and media lands in 'unknown'. All still
-    // reachable by id -- excluded from NAME addressing only. A stage
-    // channel's text chat takes messages, as a voice channel's does.
+    // Discord refuses a bare send to a forum with a 400; a stage channel's text chat takes messages, as a voice channel's does.
   });
 
   it('carries the type through, so the tie-break has something to work with', () => {
@@ -473,21 +463,22 @@ describe('looksLikeExplicitName', () => {
 import { mapChannelType } from '../src/discord-adapter.js';
 import { isNameAddressableKind, formatChannelLabel } from '../src/channel-names.js';
 import { toDescriptor } from '../src/channels.js';
+import { ChannelType } from 'discord.js';
 
 describe('channel type classification', () => {
   // Discord's documented channel types, and what each should mean for us.
   const TYPES: Array<[number, string, boolean]> = [
     // type, kind, name-addressable?
-    [0,  'text',         true],   // GuildText
-    [2,  'voice',        true],   // GuildVoice — has text chat
-    [4,  'category',     false],  // not sendable
-    [5,  'announcement', true],   // GuildAnnouncement — REGRESSION GUARD
-    [10, 'thread',       false],  // AnnouncementThread — names not unique
-    [11, 'thread',       false],  // PublicThread
-    [12, 'thread',       false],  // PrivateThread
-    [13, 'stage',        true],   // Stage — has text chat, as voice does
-    [15, 'forum',        false],  // Forum root — a bare send 400s
-    [16, 'unknown',      false],  // Media — forum-like
+    [ChannelType.GuildText,          'text',         true],
+    [ChannelType.GuildVoice,         'voice',        true],   // has text chat
+    [ChannelType.GuildCategory,      'category',     false],  // not sendable
+    [ChannelType.GuildAnnouncement,  'announcement', true],
+    [ChannelType.AnnouncementThread, 'thread',       false],  // names not unique
+    [ChannelType.PublicThread,       'thread',       false],
+    [ChannelType.PrivateThread,      'thread',       false],
+    [ChannelType.GuildStageVoice,    'stage',        true],   // has text chat, as voice does
+    [ChannelType.GuildForum,         'forum',        false],  // a bare send 400s
+    [ChannelType.GuildMedia,         'unknown',      false],  // forum-like
   ];
 
   for (const [type, kind, addressable] of TYPES) {

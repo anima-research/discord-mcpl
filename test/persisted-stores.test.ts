@@ -129,8 +129,7 @@ describe('a store whose file has content it can not use', () => {
   it('copies an unparsable muted list aside and empties it, so the next mute writes a fresh list', async (t) => {
     const log = errors(t);
     process.env.DISCORD_MCPL_DEBUG_LOG = join(dir, 'debug.log');
-    // One id per line, as a hand edit might leave it: V8's parse error
-    // quotes text like this, and the log mustn't.
+    // V8's JSON parse error quotes text like this, and the log mustn't.
     writeFileSync(join(dir, 'muted.json'), 'chan-a\nchan-b\n');
     const s = server(t);
     s.ensureMutedLoaded();
@@ -384,7 +383,7 @@ describe('a store whose file is left in place', () => {
   it("leaves a path it can't read as a file where it is, and refuses to save over it, as root too", async (t) => {
     const log = errors(t);
     process.env.DISCORD_MCPL_DEBUG_LOG = join(dir, 'debug.log');
-    mkdirSync(join(dir, 'muted.json')); // its read fails with EISDIR, which root gets too
+    mkdirSync(join(dir, 'muted.json')); // on Linux its read fails with EISDIR, which root gets too
     const s = server(t);
     // The first call changes nothing, but the file may not hold the list.
     const first = String(await s.executeToolCall('unmute_channel', { channelId: 'chan-z' }));

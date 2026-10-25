@@ -11,12 +11,8 @@ export function isValidTimeZone(zone: string): boolean {
   }
 }
 
-/** Resolve the zone used for agent-visible timestamps. NEVER throws: this is
- *  evaluated at module scope, so a typo'd AGENT_TIMEZONE would kill the stdio
- *  child during import — before the MCPL handshake — and a dead MCPL
- *  subprocess is never respawned by reconnect. Instead, warn loudly on stderr
- *  and fall back to the same default used when the variable is unset
- *  (system zone → UTC). */
+/** NEVER throws: this is evaluated at module scope, so a throw would kill the
+ *  stdio child during import, before the MCPL handshake. */
 export function resolveAgentTimeZone(configured = process.env.AGENT_TIMEZONE): string {
   const fallback = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   const zone = configured?.trim();
@@ -41,11 +37,8 @@ export type TimestampStyle = 'full' | 'compact' | 'time' | 'none';
 
 const TIMESTAMP_STYLES: ReadonlySet<string> = new Set(['full', 'compact', 'time', 'none']);
 
-/** Resolve the style for agent-visible timestamps (AGENT_TIMESTAMP_STYLE).
- *  Same never-throw contract as resolveAgentTimeZone, for the same reason:
- *  this is evaluated at module scope in a stdio child, and an exception here
- *  kills the subprocess before the MCPL handshake. Unknown values warn on
- *  stderr and fall back to 'full'. */
+/** NEVER throws: this is evaluated at module scope in a stdio child, and a
+ *  throw kills the subprocess before the MCPL handshake. */
 export function resolveTimestampStyle(configured = process.env.AGENT_TIMESTAMP_STYLE): TimestampStyle {
   const style = configured?.trim().toLowerCase();
   if (!style) return 'full';

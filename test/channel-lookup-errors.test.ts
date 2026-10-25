@@ -1,22 +1,12 @@
 /**
- * What a call says when its channel lookup gives it no channel it can use.
  * discord.js returns null for a channel Discord answered for but that it
  * can't build (an id Discord doesn't know throws Unknown Channel instead):
  * a kind it has no class for, or a server channel whose server it hasn't
- * cached yet. The error names both causes, what didn't happen, and what can
- * change each; the DM notice, whose channel is a DM with no server, names
- * the first alone. A channel that holds no messages of its own (a category,
- * a forum, a media or a directory channel), given by id, is named for what
- * it is, with what didn't happen and where its messages are, or that nothing
- * here can use it. A #name reaches only text, announcement, voice and
- * stage channels: one that none of those has is refused with what a #name
- * reaches, and how a channel of any other kind is given instead.
- *
- * Run: node --import tsx --test test/channel-lookup-errors.test.ts
+ * cached yet.
  */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
-import type { Client } from 'discord.js';
+import { ChannelType, type Client } from 'discord.js';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
 
@@ -162,11 +152,11 @@ describe('a #name that no text, announcement, voice or stage channel has', () =>
   const TEXT = '420000000000000001';
   const HIDDEN = '420000000000000005';
   const channels: Array<[string, string, number]> = [
-    [TEXT, 'general', 0],
-    ['420000000000000002', 'general', 4], // a category that shares the text channel's name
-    ['420000000000000003', 'plans', 4],
-    ['420000000000000004', 'ideas', 15],
-    [HIDDEN, 'hidden', 0], // left out of the channel filters
+    [TEXT, 'general', ChannelType.GuildText],
+    ['420000000000000002', 'general', ChannelType.GuildCategory],
+    ['420000000000000003', 'plans', ChannelType.GuildCategory],
+    ['420000000000000004', 'ideas', ChannelType.GuildForum],
+    [HIDDEN, 'hidden', ChannelType.GuildText], // left out of the channel filters
   ];
 
   /** The real adapter over one cached server, with the filters leaving HIDDEN out. */

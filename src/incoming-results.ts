@@ -1,17 +1,8 @@
 /**
- * Reading the host's answer to a forwarded Discord message.
- *
  * `channels/incoming` answers per message (`results[]`, each with `accepted`
  * and, from hosts that say why, a `reason`); `push/event` answers once
  * (`{accepted, reason?}`) or, on most hosts, refuses with a JSON-RPC error
- * (`code`, `message`). A refused message never reaches the agent, so the
- * refusal has to be read and reported here: sending is not delivering.
- *
- * discord-mcpl serves more than one kind of host, so what it does with an
- * answer rests only on what the MCPL spec defines (answerClass): the
- * refusal codes of SPEC Appendix A and RFC-006 §13, `accepted`, and the
- * retry contract of RFC-006 §3.1. A host's `reason` is free text, kept for
- * the operator's log and never matched.
+ * (`code`, `message`).
  */
 
 import type { ContentBlock } from '@animalabs/mcpl-core';

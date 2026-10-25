@@ -1,24 +1,18 @@
 /**
- * The 💤 awareness marks, as the admin slash commands present them.
- *
  * An /undo's marks are the framework's: an agent framework with the `marks`
- * host command (anima-research/agent-framework#250) places them only when
- * the operator chooses a scope (`addressed` or `all`), keeps them in its
- * awareness ledger, and returns a `markers` receipt describing what it
- * scheduled. A /hide's marks are this server's own: the host places none
- * for a hide and refuses a choice there, so this server adds 💤 to the
- * hidden messages itself when the operator chooses `all`, outside the
- * ledger. This module turns the host's answers into the operator's replies
- * and reads the operator's choice from an interaction.
+ * host command (anima-research/agent-framework#250) places them only when the
+ * operator chooses a scope, keeps them in its awareness ledger, and returns a
+ * `markers` receipt. For a hide the host places none and refuses a choice, so
+ * this server adds 💤 to the hidden messages itself.
  */
-import type { ChatInputCommandInteraction } from 'discord.js';
+import { ApplicationCommandOptionType, type ChatInputCommandInteraction } from 'discord.js';
 
 /** The operator's choice of which removed messages get a 💤 mark. */
 export type MarksChoice = 'none' | 'addressed' | 'all';
 
 /** The `marks` option /undo takes. Omitted means none. */
 export const MARKS_OPTION = {
-  type: 3, // STRING
+  type: ApplicationCommandOptionType.String,
   name: 'marks',
   description: 'Mark removed messages with 💤: none (default), addressed (ones that addressed the agent), or all',
   required: false,
@@ -29,11 +23,10 @@ export const MARKS_OPTION = {
   ],
 } as const;
 
-/** The `marks` option /hide takes. Omitted means none. A hide's marks are
- *  this server's own, and the host's answer names the hidden messages
- *  without saying which addressed the agent, so `addressed` isn't offered. */
+/** The host's answer to a hide names the hidden messages without saying
+ *  which addressed the agent, so `addressed` isn't offered. */
 export const HIDE_MARKS_OPTION = {
-  type: 3, // STRING
+  type: ApplicationCommandOptionType.String,
   name: 'marks',
   description: 'Mark hidden messages with 💤: none (default) or all',
   required: false,
@@ -135,8 +128,7 @@ export function summarizeMarkers(markers: unknown): string {
  * queued (a request owed, not yet sent), sending (on the wire), present or
  * absent (nothing owed, and Discord's last answer), unknown (nothing owed,
  * and the last request went unanswered), failed (it ended unconfirmed) and
- * untouched (never asked). Shown as the host names them, so a state a later
- * host adds still reads.
+ * untouched (never asked).
  */
 type Reactions = Record<string, number>;
 
@@ -261,11 +253,7 @@ export function describeHideMarks(confirmed: number, total: number, firstError?:
 /** A chosen /hide whose answer didn't arrive or couldn't be read. */
 export const HIDE_MARKS_NOT_ADDED = "Marks: no 💤 was added, since this server adds them only once it has read the host's answer.";
 
-/**
- * Cut text to `max` UTF-16 units (its `length`), marking the cut. The cut
- * falls between code points, so it never leaves half of a surrogate pair,
- * such as one of 💤's two units.
- */
+/** The cut falls between code points, so it never leaves half of a surrogate pair. */
 export function clip(text: string, max: number): string {
   if (text.length <= max) return text;
   let end = Math.max(0, max - 1);
@@ -347,9 +335,7 @@ const entryTime = (v: AwarenessView): number => (v.kind === 'batch' ? v.createdA
  */
 export function paginate(views: AwarenessView[], budget = REPLY_LIMIT): string[][] {
   const ordered = [...views].sort((a, b) => entryTime(b) - entryTime(a));
-  // Room for the heading ("Awareness ledger — page 999 of 999, …"), its
-  // newline, and the footer pointing at target:.
-  const room = budget - HEADING_RESERVE;
+  const room = budget - HEADING_AND_FOOTER_RESERVE;
   const pages: string[][] = [];
   let page: string[] = [];
   let used = 0;
@@ -368,7 +354,7 @@ export function paginate(views: AwarenessView[], budget = REPLY_LIMIT): string[]
   return pages;
 }
 
-const HEADING_RESERVE = 220;
+const HEADING_AND_FOOTER_RESERVE = 220;
 
 /** One page of `/marks action:list`, heading and footer included, within one reply. */
 export function renderListPage(views: AwarenessView[], pageNumber: number, budget = REPLY_LIMIT): string {
@@ -418,11 +404,7 @@ export function isView(v: unknown): v is AwarenessView {
     opt(v.unmarked, isNum) && opt(v.notRemoved, isNum) && opt(v.legacyAdded, isNum);
 }
 
-/**
- * A markers receipt as agent-framework#250 defines it, with every field its
- * description reads: a status this server doesn't know is not one it can
- * describe.
- */
+/** A markers receipt as agent-framework#250 defines it. */
 export function isMarkersReceipt(m: unknown): m is MarkersReceipt {
   if (!isObj(m) || !isMarksChoice(m.scope) || !isNum(m.unmarked) || !isNum(m.notRemoved)) return false;
   switch (m.status) {
@@ -554,9 +536,8 @@ export function controlOutcomeUnknown(action: string, target: string | undefined
     controlCheck(action, target);
 }
 
-/** Before retrying a control that may have been applied: a cancel shows on
- *  its target's entry; a retract the host queued is an entry of its own,
- *  with an id the operator doesn't have yet, found in the list by its target. */
+/** A cancel shows on its target's entry; a retract the host queued is an
+ *  entry of its own, with an id the operator doesn't have yet. */
 const controlCheck = (action: string, target: string | undefined): string =>
   action === 'retract' && target
     ? `Check \`/marks action:list\` for a retract of ${target === 'all' ? 'all' : `\`${clip(target, ID_MAX)}\``} before trying again; ` +
@@ -565,12 +546,7 @@ const controlCheck = (action: string, target: string | undefined): string =>
       ? `Check \`/marks action:list target:${clip(target, ID_MAX)}\` before trying again.`
       : 'Check `/marks action:list` before trying again.';
 
-/**
- * After a probe whose request failed: what can make running the command
- * again work. agent-framework refuses every host command from a server its
- * config doesn't allow (`allowHostCommands`, deny by default), and the
- * reason shown names it then; a timeout or a restarting host can clear.
- */
+/** agent-framework refuses every host command from a server its config doesn't allow (`allowHostCommands`, deny by default). */
 export const PROBE_AGAIN = 'Running it again can work after a timeout, or once the host is back if it was restarting. ' +
   'If the host refuses host commands, whoever runs it has to allow them for this server (`allowHostCommands`).';
 

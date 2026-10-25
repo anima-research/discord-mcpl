@@ -285,8 +285,7 @@ describe('DMs are named wherever they are known, not only from inbound DM state'
     const cache = client.channels.cache as unknown as Map<string, unknown>;
     cache.set(DM, { type: ChannelType.DM, recipient: { username: 'ra', displayName: 'Ra' } });
     assert.equal(adapter.getCachedDmRecipientName(DM), 'ra', "the username, as the registry's DM descriptor names it");
-    // discord.js's DMChannel.recipient reads client.user.id, which throws
-    // before login; the label is then left out rather than failing the read.
+    // discord.js's DMChannel.recipient reads client.user.id, which throws before login.
     cache.set(DM, {
       type: ChannelType.DM,
       get recipient(): never { throw new TypeError("Cannot read properties of null (reading 'id')"); },

@@ -197,8 +197,7 @@ describe('DM notice state', () => {
   });
 
   it("keeps a dropped sender's old message unnotified when the clock steps back after the prune", async (t) => {
-    // The floor recomputed from now covers a clock that only moves forward;
-    // the persisted floor is what holds after an NTP step or a VM restore.
+    // The persisted floor is what holds after an NTP step or a VM restore moves the clock back.
     const f = fixture(t);
     const state = f.make();
     await f.openOn(state);

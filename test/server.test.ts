@@ -352,10 +352,7 @@ async function mcplHandshake(client: McplConnection, hostExtras: Record<string, 
 
   const result = (await client.sendRequest('initialize', params)) as McplInitializeResult;
   client.sendNotification('notifications/initialized');
-  // 0.5 host behavior: settle the §5.3 initial policy right after
-  // initialize. This is also what releases the server's policy-gated channel
-  // registration + reconnect sweep (see serve()) — without it every test
-  // sits out the 20s pre-0.5 grace before channels/register arrives.
+  // As a 0.5 host does, settle the §5.3 initial policy right after initialize.
   const receipt = (await client.sendRequest('featureSets/update', {
     enabled: ['discord.messaging', 'discord.channels', 'discord.history', 'discord.subscriptions'],
   })) as { accepted: boolean };
@@ -793,7 +790,7 @@ describe('DiscordMcplServer', () => {
       for (let i = 0; i < 100 && !lines().some((l) => /sweep failed/.test(l)); i++) {
         await new Promise((r) => setTimeout(r, 20));
       }
-      // A turn more, for a rejection nothing handled to be reported.
+      // A turn more, for Node to report a rejection nothing handled.
       await new Promise((r) => setTimeout(r, 50));
     } finally {
       client.close();
@@ -836,7 +833,7 @@ describe('DiscordMcplServer', () => {
           pushed = (missed.request.params as PushEventParams).eventId;
           client.sendResponse(missed.request.id, {});
         }
-        // A turn more, for a rejection nothing handled to be reported.
+        // A turn more, for Node to report a rejection nothing handled.
         await new Promise((r) => setTimeout(r, 50));
       } finally {
         client.close();
@@ -1480,8 +1477,8 @@ describe('DiscordMcplServer', () => {
     // Nothing is open, so both are pushed; each is in a new channel, so each
     // carries the location.
     discord.simulateMessage(inThread('no-parent', { threadParentName: null }));
-    const first = await nextRequest('push/event');
-    client.sendResponse(first.id, { accepted: true });
+    const uncachedPush = await nextRequest('push/event');
+    client.sendResponse(uncachedPush.id, { accepted: true });
     // th2 is known only partly: the cache holds its partial, without its
     // name or its channel.
     discord.facts.th2 = { id: 'th2', guildId: 'g1', guildName: 'Test Server', type: 'thread', name: null, parentId: null, parentName: null };
@@ -1492,19 +1489,15 @@ describe('DiscordMcplServer', () => {
     assert.equal(registered.notification.method, 'channels/changed');
     const added = (registered.notification.params as { added?: Array<{ id: string }> }).added ?? [];
     assert.deepEqual(added.map((d) => d.id), ['discord:g1:th2']);
-    const second = await nextRequest('push/event');
-    client.sendResponse(second.id, { accepted: true });
+    const cachedPush = await nextRequest('push/event');
+    client.sendResponse(cachedPush.id, { accepted: true });
     const textOf = (r: { params?: unknown }) => ((r.params as PushEventParams).payload.content[0] as { text: string }).text;
-    // Both threads are closed. th2, which the cache holds, is registered by
-    // its delivery, so its push carries the note first. The first thread
-    // isn't in the cache here, so its delivery can't say what opening it
-    // brings, and its push carries none.
-    assert.ok(textOf(first).startsWith('[thread "design-chat" in Test Server] Bob:'), textOf(first));
-    assert.ok(textOf(second).startsWith(`${CLOSED_NOTE}[#general thread "th2" in Test Server] Bob:`), textOf(second));
-    const firstOrigin = (first.params as PushEventParams).origin as Record<string, unknown>;
-    const secondOrigin = (second.params as PushEventParams).origin as Record<string, unknown>;
-    assert.equal('threadParentName' in firstOrigin, false, 'an unknown parent is left out');
-    assert.equal('threadName' in secondOrigin, false, 'an unknown name is left out');
+    assert.ok(textOf(uncachedPush).startsWith('[thread "design-chat" in Test Server] Bob:'), textOf(uncachedPush));
+    assert.ok(textOf(cachedPush).startsWith(`${CLOSED_NOTE}[#general thread "th2" in Test Server] Bob:`), textOf(cachedPush));
+    const uncachedOrigin = (uncachedPush.params as PushEventParams).origin as Record<string, unknown>;
+    const cachedOrigin = (cachedPush.params as PushEventParams).origin as Record<string, unknown>;
+    assert.equal('threadParentName' in uncachedOrigin, false, 'an unknown parent is left out');
+    assert.equal('threadName' in cachedOrigin, false, 'an unknown name is left out');
   });
 
   it("carries a thread message's tag and thread fields on its edit and its delete", async (t) => {
@@ -1638,8 +1631,7 @@ describe('DiscordMcplServer', () => {
       discord.historyToReturn = [
         { id: '102', authorId: 'u2', authorName: 'Bob', isBot: false, content: '<@bot_123> ping', cleanContent: '@bot ping', attachments: [], mentionsBot: true, timestamp: new Date(), reactions: [] },
       ];
-      // The cache holds what it has meta for, and a fetch caches what it
-      // brings, as discord.js's does.
+      // A fetch caches what it brings, as discord.js's does.
       discord.cachedChannelMeta = meta ? { [channelId]: meta } : {};
       const cached = meta && factsFromMeta(channelId, meta);
       if (cached) discord.facts[channelId] = cached;
@@ -1693,8 +1685,7 @@ describe('DiscordMcplServer', () => {
   });
 
   it("the reconnect sweep's header quotes a name that holds a quote", async () => {
-    // A voice channel's name may hold quotes, and its text chat is swept like
-    // any channel; so may a thread's.
+    // A voice channel's name may hold quotes.
     const voice = await sweepOne('vc1', { name: 'Movie "night"', guildId: 'g1', guildName: 'Test Guild', isDM: false });
     const voiceText = blockOf(voice);
     assert.ok(voiceText.startsWith('<missed channel="#Movie \\"night\\"" channelId="vc1" guild="Test Guild"'), voiceText);
@@ -1725,11 +1716,10 @@ describe('DiscordMcplServer', () => {
     type Changed = { added?: Array<Record<string, any>>; updated?: Array<Record<string, any>>; removed?: string[] };
 
     /** A server serving one connection: boot registered c1 and c2. */
-    /** Ends a test's connection by ending its socket, so the server reads
-     *  the end whatever it was still sending (a test that fails midway can
-     *  leave it sending). Closing the client resets a socket with unread
-     *  data, and a reset reaches mcpl-core's readline unheard (mcpl-core-ts
-     *  #11): the server's connection would stay open, and the run hang. */
+    /** Ends a test's connection by ending its socket: closing the client resets
+     *  a socket with unread data, and a reset reaches mcpl-core's readline unheard
+     *  (mcpl-core-ts #11), so the server's connection would stay open and the run
+     *  hang. */
     function endWith(t: { after: (fn: () => Promise<void>) => void }, pair: { client: McplConnection; clientSocket: net.Socket }, serving: () => Promise<void>) {
       t.after(async () => {
         pair.clientSocket.end();
@@ -1938,13 +1928,11 @@ describe('DiscordMcplServer', () => {
       discord.facts.th1 = threadFacts('th1', 'design-chat', { archived: true, archivedAt: Date.now() - 60_000 });
       discord.simulateThreadUpdate(discord.facts.th1);
       assert.deepEqual((await expectChanged(client)).removed, ['discord:g1:th1']);
-      // A message posted in it unarchives it, whatever the cache has heard
-      // yet: registered again before the message is pushed.
+      // A message posted in an archived thread unarchives it.
       discord.simulateMessage(inThread('m2'));
       assert.deepEqual((await expectChanged(client)).added?.map((d) => d.id), ['discord:g1:th1']);
       await expectPush(client, 'discord:g1:th1');
-      // Archived again, then deleted (discord.js reports no deletion for an
-      // archived thread it has swept from its cache, and none is needed).
+      // discord.js reports no deletion for an archived thread it has swept from its cache.
       discord.simulateThreadUpdate(threadFacts('th1', 'design-chat', { archived: true }));
       assert.deepEqual((await expectChanged(client)).removed, ['discord:g1:th1']);
       discord.simulateThreadDelete('g1', 'th1');
@@ -2120,10 +2108,9 @@ describe('DiscordMcplServer', () => {
       discord.facts.c1 = { id: 'c1', guildId: 'g1', guildName: GUILD, type: 'text', name: 'general' };
       // A thread archived since: delivered, but not registered or named.
       discord.facts.thA = threadFacts('thA', 'old-plans', { archived: true });
-      // A forum, which holds no messages: never registered (the sweep's guard).
+      // A forum holds no messages.
       discord.facts.forum1 = { id: 'forum1', guildId: 'g1', guildName: GUILD, type: 'forum', name: 'ideas' };
-      // `cold` isn't cached until its lookup: the REST fetch caches it, as
-      // discord.js does, and it's registered from what that fetch brought.
+      // A REST fetch caches what it brings, as discord.js does.
       discord.cachedChannelMeta = {
         c1: { name: 'general', guildId: 'g1', guildName: GUILD, isDM: false },
         thA: { name: 'old-plans', guildId: 'g1', guildName: GUILD, isDM: false, threadId: 'thA', threadName: 'old-plans', threadParentName: 'general' },
@@ -2864,8 +2851,7 @@ describe("a closed channel's push", () => {
   /** A server and its host, closed after the test whether it passes or fails. */
   async function boot(t: TestContext, hostExtras: Record<string, unknown> = {}) {
     const { client, serverConn, discord } = await createTestPair();
-    // The cache holds #general, as discord.js's holds the channel of every
-    // message it delivers, so a delivery registers it.
+    // discord.js's cache holds the channel of every message it delivers, so a delivery registers it.
     discord.facts.c1 = { id: 'c1', guildId: 'g1', guildName: 'Test Server', type: 'text', name: 'general' };
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
     const serverPromise = server.serve(serverConn);
@@ -3237,8 +3223,7 @@ describe('RFC-006 coalescing', () => {
     const text = ((create.params as ChannelsIncomingParams).messages[0].content[0] as { text?: string }).text ?? '';
     h.client.sendResponse(create.id, { results: [{ messageId: 'm9', accepted: true }] });
     await h.finish(); // before asserting, so a failure can't leave the pair open
-    // A voice channel's chat can have a space in its name, and so the
-    // prefix's own words. (A fresh pair: the prefix comes with a channel change.)
+    // A voice channel's chat can have a space in its name, and so the prefix's own words.
     const v = await boot({ eventCoalescing: true });
     t.after(v.finish);
     await v.client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } });

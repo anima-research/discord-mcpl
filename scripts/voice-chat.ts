@@ -1,27 +1,4 @@
 /**
- * Live voice conversation harness: humans talk in a Discord voice channel,
- * Claude (Sonnet 4.5) answers in voice — under the physics rules — and the
- * whole exchange leaves a text trail in the voice channel's built-in chat.
- *
- * The transcript-ordering protocol (per Antra's design):
- *  - When a human starts speaking, the bot POSTS a message to the voice
- *    channel's text chat immediately ("🎙️ name: …") — so Discord's message
- *    ORDER reflects utterance START order — then EDITS it as the STT
- *    transcript grows/revises, finalizing when they stop. Revision-friendly,
- *    matching voice-kit's "revision is normal" transcript contract.
- *  - The bot's own speech gets the same treatment: message posted when it
- *    starts speaking, edited at the end to reflect what was ACTUALLY heard —
- *    an interrupted utterance shows the voiced prefix, the unvoiced tail
- *    struck through, and so does one the player couldn't play, with why.
- *    Other models read this channel and know exactly what was said, by whom,
- *    in what order.
- *
- * Conversation loop: utterance ends → (debounce for follow-ons) → history →
- * Claude streaming → deltas feed TTS (physics gates playback; barge-in
- * aborts both playback AND the model stream, and so does a reply the player
- * can't play) → interruption and failure reports edit the message and
- * annotate history so the model knows what the room heard.
- *
  * Usage (from discord-mcpl/):
  *   env $(grep -v '^#' .env.voice-test | xargs) ./node_modules/.bin/tsx \
  *     scripts/voice-chat.ts --guild <id> --vc <id> [--voice Opus4] [--model claude-sonnet-4-5]
@@ -87,7 +64,7 @@ client.once('ready', async () => {
   const out = new VoiceOutput({ textChannels: null }, tts, voice, sink);
   const stt = new ScribeSttProvider(ELEVEN);
 
-  // Voice channels ARE text channels — post the transcript trail right there.
+  // A Discord voice channel has its own text chat, so the transcript goes there.
   const chat = (await client.channels.fetch(VC)) as TextBasedChannel & { send: (m: string) => Promise<import('discord.js').Message> };
 
   // ── Rate-limited message editor ─────────────────────────────────────────

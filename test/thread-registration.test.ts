@@ -71,9 +71,7 @@ describe('labels', () => {
   });
 
   it('pasted into a send, a thread label fails loudly even where a voice room carries its name', (t) => {
-    // A voice channel's name may hold spaces and ›, so a voice room can be
-    // named `general › design-chat`. The adapter's resolver (parse,
-    // candidates, match) refuses the label rather than sending there.
+    // A voice channel's name may hold spaces and ›, so a voice room can be named `general › design-chat`.
     const { adapter, guilds } = adapterFixture(t);
     guilds.set('g1', {
       id: 'g1', name: 'Test Server', channels: { cache: new Map<string, unknown>([
@@ -129,8 +127,7 @@ describe("the channel cache reports a channel's facts", () => {
     const { adapter, channels, guilds, held } = adapterFixture(t);
     guilds.set('g1', held('g1', 'Test Server'));
     channels.set('c1', { id: 'c1', type: ChannelType.GuildText, name: 'general', guildId: 'g1', parentId: 'cat1' });
-    // A thread's parent is looked up by id: discord.js's `parent` getter
-    // throws for a thread whose guild it hasn't cached.
+    // discord.js's `parent` getter throws for a thread whose guild it hasn't cached.
     channels.set('th1', {
       id: 'th1', type: ChannelType.PublicThread, name: 'design-chat', guildId: 'g1', parentId: 'c1', archived: false,
       get parent(): never { throw new Error('no guild'); },
@@ -178,8 +175,7 @@ describe('the kinds registered by listing them', () => {
     guilds.set('g1', { id: 'g1', name: 'Test Server', channels: { cache } });
     // Another guild, which the guild filter leaves out.
     guilds.set('g2', { id: 'g2', name: 'Other', channels: { cache: new Map([['t2', { id: 't2', type: ChannelType.GuildText, name: 'x', guildId: 'g2', parentId: null }]]) } });
-    // A category, forum or media channel holds no messages of its own, and a
-    // thread is registered by its messages; news1 is outside the channel list.
+    // A category, forum or media channel holds no messages of its own.
     assert.deepEqual(adapter.getPostingChannels().map((c) => [c.id, c.type, c.guildName]), [
       ['text1', 'text', 'Test Server'], ['voice1', 'voice', 'Test Server'], ['stage1', 'stage', 'Test Server'],
     ]);

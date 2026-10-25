@@ -851,7 +851,7 @@ describe('adapter surfaces', () => {
     t.mock.method(client.channels, 'fetch', async () => answers.shift());
     const posts = t.mock.method(client.rest, 'post', async () => ({}));
     for (const [id, says] of [
-      // A DM has no server, so only its kind can keep discord.js from building it, and nothing retries a notice.
+      // A DM has no server, so only its kind can keep discord.js from building it.
       ['unbuilt', "Channel unbuilt exists, but it's a kind of channel this version of the adapter can't handle, so nothing was sent. Only an operator updating the adapter can change that."],
       ['forum', 'Channel forum is a forum, which holds no messages, so nothing was sent. '],
     ]) {

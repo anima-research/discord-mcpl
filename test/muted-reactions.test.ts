@@ -18,17 +18,12 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// The stores' files come from the environment: clear those variables for this
-// file, so a run in a shell that sets them can't overwrite someone's real
-// mutes or opt-ins, and put them back after.
-// The reaction filters come from the environment too, so a suppression list
-// set in the shell can't drop the test's reactions.
-const STORE_ENV = [
+const OPERATOR_ENV = [
   'DISCORD_SUBSCRIPTIONS_FILE', 'DISCORD_MUTED_CHANNELS_FILE', 'DISCORD_REACTION_CHANNELS_FILE', 'DISCORD_WATERMARK_FILE',
   'DISCORD_FILTERS_FILE', 'DISCORD_SUPPRESS_REACTION_EMOJIS', 'DISCORD_SUPPRESSED_REACTIONS_BASELINE',
 ];
 const savedEnv = new Map<string, string | undefined>();
-before(() => { for (const name of STORE_ENV) { savedEnv.set(name, process.env[name]); delete process.env[name]; } });
+before(() => { for (const name of OPERATOR_ENV) { savedEnv.set(name, process.env[name]); delete process.env[name]; } });
 after(() => {
   for (const [name, value] of savedEnv) {
     if (value === undefined) delete process.env[name];

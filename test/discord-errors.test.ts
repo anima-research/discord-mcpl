@@ -242,10 +242,8 @@ describe('the tool chokepoint', () => {
   const PARAGRAPH = 'a'.repeat(1800);
   const SECOND = `Section two: the rollout plan for next week, ${'b'.repeat(655)}`;
   const THIRD = `Section three: what we watch afterwards, ${'c'.repeat(659)}`;
-  const LONG = `${PARAGRAPH}\n${SECOND}${'b'.repeat(1100)}\n${THIRD}`; // three parts: 1800, 1800 and 700
-  // The text as sent: TWO is 2501 characters, its second part beginning after 1801;
-  // LONG is 4302, its parts beginning after 0, 1801 and 3602.
-  const TWO = `${PARAGRAPH}\n${SECOND}`;
+  const THREE_PARTS = `${PARAGRAPH}\n${SECOND}${'b'.repeat(1100)}\n${THIRD}`;
+  const TWO_PARTS = `${PARAGRAPH}\n${SECOND}`;
   const asSent = 'Quoted words are from the text as sent, where a mention reads <@id>, or <@&id> for a role.';
   const unknownNext = "Whether the next part posted is unknown, since Discord didn't answer it with a refusal";
   const checkThen = "send only the rest, once the channel's latest messages (fetch_history) show whether the next part posted.";
@@ -267,8 +265,7 @@ describe('the tool chokepoint', () => {
   };
   /** A server channel whose sends answer in turn: an id, or a thrown error.
    *  This bot holds Read Message History there, as discord.js's cached
-   *  permissions answer it for the bot's own member, so Discord would show
-   *  the channel's messages. */
+   *  permissions answer it for the bot's own member. */
   const channelAnswering = (...answers: Array<string | Error>) => {
     const sends: Array<{ content?: string; files?: unknown[] }> = [];
     const me = { id: '666666666666666666' };
@@ -334,7 +331,7 @@ describe('the tool chokepoint', () => {
     const { channel, sends } = channelAnswering('900000000000000001', discordError('Missing Permissions', 50013, 403));
     const r = await serverOver(await realAdapter(t, { channel })).handleToolCall('send_message', {
       channelId: CHANNEL,
-      content: TWO,
+      content: TWO_PARTS,
       files: [{ path: fileIn(t) }],
     });
     assert.deepEqual(sends.map((s) => [s.content?.length, s.files?.length ?? 0]), [[1800, 0], [700, 1]]);
@@ -354,7 +351,7 @@ describe('the tool chokepoint', () => {
     const before = channelAnswering('900000000000000001', discordError('Missing Permissions', 50013, 403));
     const early = await serverOver(await realAdapter(t, { channel: before.channel })).handleToolCall('send_message', {
       channelId: CHANNEL,
-      content: LONG,
+      content: THREE_PARTS,
       files: [{ path: fileIn(t) }],
     });
     assert.deepEqual(before.sends.map((s) => [s.content?.length, s.files?.length ?? 0]), [[1800, 0], [1800, 0]]);
@@ -418,7 +415,7 @@ describe('the tool chokepoint', () => {
     ];
     for (const [what, failure] of unknowns) {
       // The last part's outcome unknown: if it posted, nothing is left.
-      assert.equal(await noteOf(LONG, ['900000000000000001', '900000000000000002', failure()]),
+      assert.equal(await noteOf(THREE_PARTS, ['900000000000000001', '900000000000000002', failure()]),
         'The first 2 of the 3 parts this message was split into posted before this failure: 900000000000000001, ' +
         `900000000000000002. ${unknownNext}. If it didn't post, the rest begins with "Section three: what we ` +
         `watch"; if it did, the whole message posted. ${asSent} Calling again with the whole message could post those 2 ` +
@@ -426,25 +423,25 @@ describe('the tool chokepoint', () => {
         what);
     }
     // One posted of three: the rest begins at the part that failed, or after it.
-    assert.equal(await noteOf(LONG, ['900000000000000001', unavailable()]),
+    assert.equal(await noteOf(THREE_PARTS, ['900000000000000001', unavailable()]),
       'The first of the 3 parts this message was split into posted before this failure: 900000000000000001. ' +
       `${unknownNext}; nothing after it posted. If it didn't post, the rest begins with "Section two: the ` +
       `rollout plan for next"; if it did, the rest begins with "Section three: what we watch". ${asSent} Calling again ` +
       `with the whole message could post the first part a second time, so ${checkThen}`);
     // With files, both clauses say the rest holds them.
-    assert.equal(await noteOf(LONG, ['900000000000000001', unavailable()], [{ path: fileIn(t) }]),
+    assert.equal(await noteOf(THREE_PARTS, ['900000000000000001', unavailable()], [{ path: fileIn(t) }]),
       'The first of the 3 parts this message was split into posted before this failure: 900000000000000001. ' +
       `${unknownNext}; nothing after it posted. If it didn't post, the rest, files included, begins with ` +
       '"Section two: the rollout plan for next"; if it did, the rest, files included, begins with "Section three: what we ' +
       `watch". ${asSent} Calling again with the whole message could post the first part a second time, so ${checkThen}`);
     // The last part, which carries the files: the rest that may not have posted holds them.
-    assert.equal(await noteOf(TWO, ['900000000000000001', unavailable()], [{ path: fileIn(t) }]),
+    assert.equal(await noteOf(TWO_PARTS, ['900000000000000001', unavailable()], [{ path: fileIn(t) }]),
       'The first of the 2 parts this message was split into posted before this failure: 900000000000000001. ' +
       `${unknownNext}. If it didn't post, the rest, files included, begins with "Section two: the rollout plan ` +
       `for next"; if it did, the whole message posted. ${asSent} Calling again with the whole message could post the ` +
       `first part a second time, so ${checkThen}`);
     // The first part: it may have posted, and nothing after it did.
-    assert.equal(await noteOf(LONG, [unavailable()]),
+    assert.equal(await noteOf(THREE_PARTS, [unavailable()]),
       "Whether the first of the 3 parts this message was split into posted is unknown, since Discord didn't answer it " +
       `with a refusal; nothing after it posted. If it didn't post, nothing did; if it did, the rest begins ` +
       `with "Section two: the rollout plan for next". ${asSent} Calling again with the whole message could post the first ` +
@@ -468,19 +465,19 @@ describe('the tool chokepoint', () => {
     assert.equal(await noteOf('hi', [unavailable()]),
       "Whether this message posted is unknown, since Discord didn't answer it with a refusal. That can't be checked " +
       `from here: sending it again risks a second copy, and not sending it risks it missing; ${tell}`);
-    assert.equal(await noteOf(LONG, [unavailable()]),
+    assert.equal(await noteOf(THREE_PARTS, [unavailable()]),
       "Whether the first of the 3 parts this message was split into posted is unknown, since Discord didn't answer it " +
       `with a refusal; nothing after it posted. If it didn't post, nothing did; if it did, the rest begins ` +
       `with "Section two: the rollout plan for next". ${asSent} Whether the first part posted can't be checked from here: ` +
       `sending the whole message again could post it twice, and sending from the part after it could leave it out; ${tell}`);
     // The part that failed, the last or one with parts after it.
-    assert.equal(await noteOf(TWO, ['900000000000000001', unavailable()]),
+    assert.equal(await noteOf(TWO_PARTS, ['900000000000000001', unavailable()]),
       'The first of the 2 parts this message was split into posted before this failure: 900000000000000001. ' +
       `${unknownNext}. If it didn't post, the rest begins with "Section two: the rollout plan for next"; if it ` +
       `did, the whole message posted. ${asSent} Calling again with the whole message could post the first part a second ` +
       'time. Whether the next part posted can\'t be checked from here: sending it again could post it twice, ' +
       `and not sending it could leave it out; ${tell}`);
-    assert.equal(await noteOf(LONG, ['900000000000000001', unavailable()]),
+    assert.equal(await noteOf(THREE_PARTS, ['900000000000000001', unavailable()]),
       'The first of the 3 parts this message was split into posted before this failure: 900000000000000001. ' +
       `${unknownNext}; nothing after it posted. If it didn't post, the rest begins with "Section two: the ` +
       `rollout plan for next"; if it did, the rest begins with "Section three: what we watch". ${asSent} Calling again ` +
@@ -587,7 +584,7 @@ describe('the tool chokepoint', () => {
   it('reads a 500 as an unknown outcome, and a 400 or 404 as a refusal', async (t) => {
     for (const [status, says] of [[500, unknownNext], [400, 'Discord refused the next part'], [404, 'Discord refused the next part']] as const) {
       const { channel } = channelAnswering('900000000000000001', Object.assign(new Error(`status ${status}`), { status }));
-      const r = await serverOver(await realAdapter(t, { channel })).handleToolCall('send_message', { channelId: CHANNEL, content: TWO });
+      const r = await serverOver(await realAdapter(t, { channel })).handleToolCall('send_message', { channelId: CHANNEL, content: TWO_PARTS });
       assert.ok((r.content[0].text ?? '').split('\n\n')[2].includes(says), `${status}: ${r.content[0].text}`);
     }
   });
@@ -661,7 +658,7 @@ describe('the tool chokepoint', () => {
     const { channel, sends } = channelAnswering(discordError('Missing Permissions', 50013, 403));
     const r = await serverOver(await realAdapter(t, { channel })).handleToolCall('send_message', {
       channelId: CHANNEL,
-      content: TWO,
+      content: TWO_PARTS,
     });
     assert.equal(sends.length, 1);
     const [own, destination, note, why, ...more] = (r.content[0].text ?? '').split('\n\n');
@@ -672,7 +669,7 @@ describe('the tool chokepoint', () => {
       'Discord refused this request: this bot lacks a permission it needs in channel 444444444444444444: Send Messages ' +
       '(Send Messages in Threads, in a thread). Calling again will be refused the same way until someone who manages this server\'s permissions grants it.');
     assert.deepEqual(more, []);
-    // Sent in one part, refused: Discord's refusal means it made no message, and the error is that refusal.
+    // Sent in one part, refused: Discord's refusal means it made no message.
     const one = channelAnswering(discordError('Missing Permissions', 50013, 403));
     const single = await serverOver(await realAdapter(t, { channel: one.channel })).handleToolCall('send_message', {
       channelId: CHANNEL, content: 'hi',

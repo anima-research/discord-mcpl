@@ -102,12 +102,7 @@ const MAX_DISCORD_ATTACHMENTS = 10;
  *  marks. */
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
-/** Where to cut `text` hard at `limit` UTF-16 units: the last grapheme
- *  boundary at or before it, so this cut parts no character between two
- *  parts. splitForDiscord's line-break and space cuts don't look at
- *  graphemes. When a single grapheme runs past the limit from the start,
- *  there's no such boundary, so the cut falls inside it, moved back one unit
- *  if it would part a surrogate pair. */
+/** 0xD800–0xDBFF is a UTF-16 high surrogate, the first half of a pair. */
 function hardCut(text: string, limit: number): number {
   let cut = 0;
   for (const { index } of GRAPHEMES.segment(text)) {
@@ -139,12 +134,8 @@ export interface OutgoingFile {
 }
 
 /**
- * Turn `OutgoingFile[]` specs into discord.js `AttachmentBuilder`s, checking
- * every file before any part of the message is sent. discord.js reads each
- * path lazily, at send time, so a file it can't read would fail after the
- * parts before it posted. Tool arguments aren't checked against their
- * schema, so `files` may arrive as anything. Paths are read on the machine
- * running discord-mcpl, a relative one against its working directory.
+ * discord.js reads each path lazily, at send time, so a file it can't read
+ * would fail after the parts before it posted.
  */
 function buildAttachments(files?: unknown): AttachmentBuilder[] {
   // No files: left out, or a value that says none (null, "", false, 0), as before.
@@ -284,13 +275,9 @@ export interface DiscordAttachment {
   forwardedSnapshotIndex?: number;
 }
 
-/** Where a message sits when its channel is a thread. Discord threads are
- *  channels, so a message posted in one has the thread as its channel. These
- *  fields name that thread, never one a message started: that is discord.js
- *  `message.thread`, a different conversation. All are absent when the
- *  channel isn't a thread. The adapter reads them in one place
- *  (`threadPlace`), for creates, edits, deletes and reactions, and channel
- *  lookups. */
+/** Discord threads are channels, so a message posted in one has the thread
+ *  as its channel. discord.js `message.thread` is another conversation: the
+ *  thread a message started. */
 export interface ThreadPlace {
   /** The thread the message was posted in, which is its channel, so this
    *  equals the channel id. */
@@ -340,10 +327,7 @@ export interface DiscordMessageData extends ThreadPlace {
   /** Username of the replied-to author when Discord includes the referenced user. */
   replyToUserName?: string | null;
   mentions: string[];
-  /** True when the message mentions the bot's own managed role (@BotName the
-   *  ROLE — Discord renders it identically to a user ping and most humans
-   *  can't tell which they picked from autocomplete). Found live 2026-07-29:
-   *  a role-ping at a resident fell through as ambient and never woke her. */
+  /** Discord renders a mention of the bot's managed role identically to a user ping. */
   mentionsBotRole?: boolean;
   /** Files attached to the message (images, text files, etc.). Empty when none. */
   attachments: DiscordAttachment[];
@@ -416,8 +400,7 @@ export const LATEST_FROM_WINDOW = 100;
 /** How long latestFrom remembers a guild whose member-cache warm-up failed,
  *  refusing names there at once rather than waiting out another download. */
 const LATEST_FROM_WARMUP_RETRY_MS = 10 * 60_000;
-/** One page of List Thread Members, should Discord page a listing without
- *  with_member (see listChannelMembers). */
+/** One page of List Thread Members, should Discord page a listing without with_member. */
 const THREAD_MEMBER_PAGE = 100;
 
 export type LatestFromResult =
@@ -427,11 +410,9 @@ export type LatestFromResult =
 export interface DiscordChannelMembers {
   channelId: string;
   channelName: string | null;
-  /** How membership was resolved: everyone who can view a guild channel
-   *  (computed permissions over a fully warmed member cache), the JOINED
-   *  members of a thread (Discord's own thread-membership notion — a public
-   *  thread may be readable by non-joined users with parent access), or the
-   *  two parties of a DM. */
+  /** A thread's members are those who joined it, Discord's own notion of
+   *  thread membership: a public thread may be readable by others with access
+   *  to its channel. */
   scope: 'guild-channel' | 'thread-joined' | 'dm';
   /** Full member count before the cap was applied. */
   total: number;
@@ -464,8 +445,7 @@ export interface HistoryMessage {
   system?: true;
   /** Raw content (mentions encoded as `<@id>`). */
   content: string;
-  /** Content with mentions resolved (@username, #channel, @role). Falls back
-   *  to raw content for channel types where discord.js doesn't populate it. */
+  /** discord.js's cleanContent is null when the message's channel isn't in its cache, so raw content stands in. */
   cleanContent: string;
   /** Files attached to the message. Empty when none. */
   attachments: DiscordAttachment[];
@@ -540,8 +520,7 @@ export interface ReactionEvent extends ThreadPlace {
  *  so message text reads legibly for the model. Unicode emoji are untouched. */
 /** A guild thread the client knows only partly: built from an event that
  *  carried its type but not its channel, so discord.js keeps its parentId
- *  null until a thread event or a fetch fills it in. The channel allowlist
- *  can't place it until then, since a thread counts as its channel. */
+ *  null until a thread event or a fetch fills it in. */
 function threadChannelUnknown(channel: unknown): boolean {
   const c = channel as { isThread?: () => boolean; parentId?: string | null } | null | undefined;
   return !!c && typeof c.isThread === 'function' && c.isThread() && c.parentId == null;
@@ -576,12 +555,7 @@ interface ForwardSnapshot {
   embeds?: { length: number } | null;
 }
 
-/** Render a forwarded message's snapshots into visible text. Discord forwards
- *  carry their body in `messageSnapshots` (discord.js ≥14.16), not `content`,
- *  so without this a bare forward reaches the agent as an empty message.
- *  Attachment/embed-only snapshots get a bracketed note instead of silence.
- *  Snapshots have no `cleanContent`, so mention ids stay raw, but custom-emoji
- *  tokens are rendered down to ':name:' like everywhere else. */
+/** Discord forwards carry their body in `messageSnapshots` (discord.js ≥14.16), not `content`. */
 export function buildForwardedContent(
   baseContent: string,
   snapshots: Iterable<ForwardSnapshot>,
@@ -606,25 +580,13 @@ export function buildForwardedContent(
   return baseContent.trim().length > 0 ? `${baseContent}\n${forwarded}` : forwarded;
 }
 
-/** Resolve a message's visible body: `cleanContent` when populated (raw
- *  content otherwise — DMs and partial channels can leave it empty), with any
- *  forwarded snapshots rendered in, and Discord SYSTEM messages (member
- *  joins, boosts, pins…) synthesized from `message.type` the way the human
- *  client renders them — they carry no content, so forwarding them raw gave
- *  the agent literally empty messages ("Bob: "). Shared by the live
- *  convertMessage path and both history paths (fetchHistory / fetchAround),
- *  so neither forwards nor system messages can regress to empty on
- *  backscroll or the reconnect catch-up sweep — history replays missed
- *  messages through fetchHistory, not the live path. */
 /** Author/location context forwarded with an edit or delete event, the
  *  thread included when the message's channel is one (ThreadPlace). */
 export interface MessageEventInfo extends ThreadPlace {
   /** Guild id, or null for a DM. */
   guildId: string | null;
   authorId?: string;
-  /** For a DM delete: the conversation's other party, its author unless the
-   *  message is the bot's own, else the channel's recipient. A delete may
-   *  name no author, so the DM allowlist judges it by this. */
+  /** A deletion may name no author, so a DM delete carries the conversation's other party. */
   dmRecipientId?: string;
   /** For a DM delete whose other party couldn't be confirmed: why, for the
    *  operator log line that withholding it leaves. */
@@ -662,12 +624,8 @@ export type EditForwardDecision =
   | 'unchanged';
 
 /**
- * Decide whether a discord.js `messageUpdate` is a real content edit worth
- * forwarding. Discord emits MESSAGE_UPDATE for more than edits: link-preview /
- * embed refreshes re-send old messages with `edited_timestamp` still null, and
- * forwarding those surfaced weeks-old, never-edited messages to the agent as
- * fresh "[message edited]" events. The DM allowlist is applied where the
- * edit is forwarded, by the adapter's one rule for it (dmUserRefused).
+ * Discord emits MESSAGE_UPDATE for more than content edits: link-preview and
+ * embed refreshes re-send old messages with `edited_timestamp` still null.
  */
 export function editForwardDecision(
   oldMsg: { partial?: boolean; content?: string | null } | null | undefined,
@@ -680,7 +638,7 @@ export function editForwardDecision(
   opts: { selfId?: string | null },
 ): EditForwardDecision {
   if (!newMsg.content) return 'no-content';
-  // Our own edits (e.g. deferred slash-command replies arrive as edits).
+  // A deferred slash-command reply arrives as an edit of the bot's own message.
   if (opts.selfId && newMsg.author?.id === opts.selfId) return 'self';
   if (!newMsg.editedTimestamp) return 'not-an-edit';
   if (oldMsg && !oldMsg.partial && typeof oldMsg.content === 'string' && oldMsg.content === newMsg.content) {
@@ -689,6 +647,10 @@ export function editForwardDecision(
   return 'forward';
 }
 
+/** discord.js's cleanContent is null when the message's channel isn't in its
+ *  cache, so raw content stands in. Discord system messages (member joins,
+ *  boosts, pins…) carry no content, so their text is made from `message.type`,
+ *  as the human client renders them. */
 export function resolveVisibleContent(m: {
   content: string;
   cleanContent?: string | null;
@@ -733,17 +695,7 @@ export interface MentionCandidate {
   kind: 'user' | 'role';
 }
 
-/** Rewrite human-readable `@handle` tokens in `content` to Discord ping syntax
- *  — `<@id>` for users, `<@&id>` for roles — using the supplied candidates.
- *
- *  Pure (no Discord I/O) so it can be unit-tested. Rules:
- *    - `@everyone` / `@here` are left as-is (Discord handles them natively).
- *    - Users take priority on a name collision; a role is only used when no
- *      user matches that handle.
- *    - Only an unambiguous single match resolves; zero or multiple matches
- *      leave the original text untouched (fail to ping over mis-ping).
- *    - Single-token handles only ([A-Za-z0-9_.-]); multi-word names won't
- *      resolve, matching the original behaviour. */
+/** `@everyone` and `@here` are left as they are: Discord handles them itself. */
 export function applyMentionCandidates(
   content: string,
   candidates: MentionCandidate[],
@@ -846,23 +798,15 @@ export class DiscordAdapter {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildMessageReactions,
-        // Privileged. Must also be enabled in the Discord Developer Portal
-        // under Bot → Privileged Gateway Intents. Required for:
-        //  - guild.members.fetch() to receive member chunks (otherwise
-        //    the no-arg fetch promise hangs forever, since Discord never
-        //    sends GUILD_MEMBERS_CHUNK to a client that didn't subscribe)
-        //  - GUILD_MEMBER_ADD/UPDATE/REMOVE gateway events to keep the
-        //    cache fresh as people join, change nicknames, or leave.
-        // Without it, `@name` → `<@id>` resolution only works for members
-        // who've recently messaged (cached opportunistically via
-        // messageCreate); inactive members can't be pinged by name.
+        // Privileged. Without it Discord sends no GUILD_MEMBERS_CHUNK, so
+        // guild.members.fetch() rejects at discord.js's chunk timeout, and no
+        // member add, update or remove events keep the cache fresh.
         GatewayIntentBits.GuildMembers,
         // Non-privileged. Populates guild.emojis for list_emojis and keeps the
         // custom-emoji cache fresh (emojiCreate/Update/Delete).
         GatewayIntentBits.GuildEmojisAndStickers,
-        // Non-privileged. Required for voice output (src/voice.ts):
-        // joinVoiceChannel's handshake needs the voice-state cache. Harmless
-        // when voice is unconfigured.
+        // @discordjs/voice's handshake reads the gateway's VOICE_STATE_UPDATE,
+        // which Discord sends only with this intent.
         GatewayIntentBits.GuildVoiceStates,
       ],
       partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
@@ -875,8 +819,7 @@ export class DiscordAdapter {
   // ── Lifecycle ──
 
   async connect(): Promise<void> {
-    // Resolve only once the gateway READY has populated guilds.cache, so
-    // callers (e.g. registerDiscordChannels) don't enumerate an empty cache.
+    // The gateway's READY fills guilds.cache, so this resolves only after it.
     await new Promise<void>((resolve, reject) => {
       if (this.client.isReady()) { resolve(); return; }
       this.client.once('ready', () => resolve());
@@ -961,12 +904,7 @@ export class DiscordAdapter {
     this.slashCommandHandler = handler;
   }
 
-  /**
-   * Register guild application (slash) commands on every visible guild
-   * (respecting the guild filter). The defs are remembered so newly-joined
-   * guilds (guildCreate) get them too. Guild commands update instantly,
-   * unlike global commands.
-   */
+  /** Per guild: Discord applies guild commands at once, unlike global ones. */
   async registerGuildCommands(commands: ApplicationCommandDataResolvable[]): Promise<void> {
     this.guildCommandDefs = commands;
     for (const guild of this.client.guilds.cache.values()) {
@@ -1063,9 +1001,8 @@ export class DiscordAdapter {
     this.channelUpdateHandler = handler;
   }
 
-  /** Fired when a guild channel is deleted, with the threads the client's
-   *  cache held under it: Discord sends no threadDelete for those, and
-   *  discord.js drops them from its caches along with their channel. */
+  /** Discord sends no threadDelete for the threads under a deleted channel,
+   *  and discord.js drops along with it only those its threads cache holds. */
   onChannelDelete(handler: (guildId: string, channelId: string, threadIds: string[]) => void): void {
     this.channelDeleteHandler = handler;
   }
@@ -1075,27 +1012,20 @@ export class DiscordAdapter {
     this.threadUpdateHandler = handler;
   }
 
-  /** Fired when a thread is deleted (discord.js `threadDelete`; threads never
-   *  reach `channelDelete`). discord.js reports it only for a thread it has
-   *  cached: with the default caches, a live thread the bot can see is, and
-   *  an archived one is swept from the cache four hours after archiving. */
+  /** discord.js reports `threadDelete` only for a thread it has cached
+   *  (threads never reach `channelDelete`): with the default caches, a live
+   *  thread the bot can see is, and an archived one is swept from the cache by
+   *  the hourly sweeper once it has been archived for more than four hours. */
   onThreadDelete(handler: (guildId: string, threadId: string) => void): void {
     this.threadDeleteHandler = handler;
   }
 
-  /** Fired when Discord syncs a guild's threads (discord.js
-   *  `threadListSync`, sent when the bot gains access to a channel), with
-   *  the channels the sync covers (its `channel_ids`, or null for the whole
-   *  guild), the live threads it lists, and the live threads the client held
-   *  under those channels that it dropped from discord.js's caches, without
-   *  a threadDelete for each: discord.js drops those their channels' threads
-   *  caches hold, and the adapter the ones held outside them, such as a
-   *  thread first cached as a partial. A thread is placed by the channel the
-   *  client knew for it as the sync began; one whose channel wasn't known is
-   *  under no covered channel, so only a sync of the whole guild drops it.
-   *  An omitted thread may only have been archived, so a sync reports no
-   *  deletion. The listed threads' stale marks are cleared before the
-   *  handler runs, since the sync reports them as Discord has them. */
+  /** Discord syncs a guild's threads (discord.js `threadListSync`) when the
+   *  bot gains access to a channel, covering the channels in its
+   *  `channel_ids`, or the whole guild when it names none. discord.js drops
+   *  the live threads its covered channels' threads caches hold that the sync
+   *  doesn't list, without a threadDelete for each. An omitted thread may only
+   *  have been archived. */
   onThreadsSynced(handler: ThreadsSyncedHandler): void {
     this.threadsSyncedHandler = handler;
   }
@@ -1128,15 +1058,10 @@ export class DiscordAdapter {
     this.guildDeleteHandler = handler;
   }
 
-  /** Fired when a guild the filters admit is available again (discord.js
-   *  `guildAvailable`): after an outage, after a new gateway session (READY
-   *  marks every held guild unavailable first), and for each guild at login.
-   *  Discord doesn't replay what happened while it was away, so this hands
-   *  over what the guild has now: its channels of a listed kind the filters
-   *  admit, and the ids of every channel and live thread it holds
-   *  (`guild.channels.cache`, which discord.js refills from the guild's
-   *  payload). The channels and threads the payload no longer lists stay in
-   *  the client-wide cache, marked stale (markUnlisted). */
+  /** Discord doesn't replay what happened while a guild was away, so this
+   *  hands over what the guild has now. discord.js refills
+   *  `guild.channels.cache` from the guild's payload; channels and threads
+   *  the payload no longer lists stay in the client-wide cache. */
   onGuildAvailable(handler: (guildId: string, channels: ChannelFacts[], present: ReadonlySet<string>) => void): void {
     this.guildAvailableHandler = handler;
   }
@@ -1231,22 +1156,17 @@ export class DiscordAdapter {
     return this.guildAdmitted(guildId) && this.channelAllowed(guildId, channelId, parentId);
   }
 
-  /** Whether the bot is in a guild: the client's cache holds every guild
-   *  it's in, one that's unavailable in an outage included. A guild the bot
-   *  leaves takes the channels its own cache holds, with their threads, out
-   *  of the client's, but not a channel it had stopped listing, or that
-   *  channel's threads (markUnlisted). */
+  /** The client's cache holds every guild the bot is in, one that's
+   *  unavailable in an outage included. A guild the bot leaves takes the
+   *  channels its own cache holds, with their threads, out of the client's,
+   *  but not a channel it had stopped listing, or that channel's threads. */
   hasGuild(guildId: string): boolean {
     return this.client.guilds.cache.has(guildId);
   }
 
   // ── Operations ──
 
-  /** Split text into Discord-safe chunks (<=1900 UTF-16 units), preferring
-   *  newline then space boundaries; hard-splits over-long runs at a character
-   *  boundary, unless one character is itself longer than the limit
-   *  (hardCut). Discord rejects content over the per-message limit
-   *  (DiscordAPIError 50035). */
+  /** Discord refuses content over its per-message limit (DiscordAPIError 50035). */
   private splitForDiscord(text: string, limit = 1900): string[] {
     if (!text) return [];
     if (text.length <= limit) return [text];
@@ -1263,13 +1183,9 @@ export class DiscordAdapter {
     return chunks;
   }
 
-  /** Post the automatic delivery notice in a DM channel: plain text, no
-   *  mention resolution, and no mentions allowed to ping. `nonce` is
-   *  enforced, so the REST layer's own retries after a lost response can't
-   *  post a second copy (Discord returns the first instead). An error that
-   *  carries `notPosted: true` was raised before anything was sent: the
-   *  channel lookup failed, gave no channel, or gave one that holds no
-   *  messages. */
+  /** The nonce is enforced, so a retry of the REST client's within a few
+   *  minutes of a lost response gets the first message back instead of
+   *  posting a second. */
   async sendDmNotice(channelId: string, content: string, nonce: string): Promise<{ messageId: string }> {
     const channel = await this.channelById(channelId).catch((err: unknown) => {
       throw Object.assign(
@@ -1312,12 +1228,9 @@ export class DiscordAdapter {
       const isLast = i === chunks.length - 1;
       const sent = await (channel as TextChannel | DMChannel).send({
         content: chunks[i] || undefined,
-        // A reply to a message that's gone fails rather than posting
-        // unthreaded: discord.js sends fail_if_not_exists from the client's
-        // failIfNotExists option, true by default. requireReplyTarget states
-        // it for a reply whose target the server chose (a latestFrom
-        // selection), so that one keeps failing whatever the default for
-        // other replies becomes (#58 makes them post unthreaded instead).
+        // discord.js sends fail_if_not_exists from the client's failIfNotExists
+        // option, true by default, so a reply to a message that's gone fails
+        // rather than posting unthreaded.
         reply: i === 0 && options?.replyTo
           ? { messageReference: options.replyTo, ...(options.requireReplyTarget ? { failIfNotExists: true } : {}) }
           : undefined,
@@ -1368,10 +1281,7 @@ export class DiscordAdapter {
         }
       }
     }
-    // Also match the recipients of open DM channels. Someone who DMed the bot
-    // can share no guild with it, so the guild-member scan above can't see them —
-    // but we hold an open DM channel whose recipient we CAN resolve by name. This
-    // makes a name-based reply to a DM sender work without a shared server.
+    // Someone who DMed the bot may share no server with it, so open DM channels' recipients are matched too.
     for (const channel of this.client.channels.cache.values()) {
       const recipient = (channel as { recipient?: User }).recipient;
       if (!recipient || recipient.id === selfId || recipient.bot) continue;
@@ -1463,29 +1373,9 @@ export class DiscordAdapter {
     await msg.edit(resolved);
   }
 
-  /** Resolve human-readable @handle mentions in outgoing content to Discord's
-   *  ping syntax — `<@USER_ID>` for users, `<@&ROLE_ID>` for roles. Lena learns
-   *  the @handle form from incoming cleanContent and tends to imitate it, but
-   *  Discord only treats the bracket syntax as an actual ping.
-   *
-   *  User resolution checks (case-insensitive) the channel's guild members
-   *  against server nickname, global display name, and username. Role
-   *  resolution checks guild role names.
-   *
-   *  Priority: when a name matches both a user and a role, the USER wins
-   *  (people are pinged more often than roles, and a wrong role ping is
-   *  noisier). Roles are only used when no user matches that handle.
-   *
-   *  Skips `@everyone` / `@here` (Discord handles those natively, and so is the
-   *  default @everyone role) and the bot's own identity (don't self-ping when
-   *  Lena writes about herself in third person). Leaves the original text
-   *  untouched when there are zero matches or multiple ambiguous matches —
-   *  better to fail to ping than to ping the wrong person/role.
-   *
-   *  Note: emitting `<@&id>` only produces an actual ping if the role is
-   *  mentionable or the bot has the Mention Everyone permission; otherwise it
-   *  renders as a styled role link without notifying. That's a Discord-side
-   *  permission concern, not a parsing one. */
+  /** Discord pings only for the bracket syntax (`<@id>`, `<@&id>`), not for an
+   *  `@handle`. A `<@&id>` pings only when the role is mentionable or the bot
+   *  has Mention Everyone; otherwise it renders as a role link. */
   private async resolveOutgoingMentions(
     channel: unknown,
     content: string,
@@ -1511,9 +1401,7 @@ export class DiscordAdapter {
         ].filter((s): s is string => typeof s === 'string' && s.length > 0);
         candidates.push({ id: member.user.id, aliases, kind: 'user' });
       }
-      // Roles. The role cache is gateway-maintained (Guilds intent) like
-      // members. Skip the default @everyone role (its id equals the guild id) —
-      // Discord pings @everyone natively and that handle is short-circuited.
+      // The default @everyone role's id is the guild's, and Discord pings @everyone itself.
       for (const role of ch.guild.roles.cache.values() as IterableIterator<Role>) {
         if (role.id === ch.guild.id) continue;
         if (typeof role.name === 'string' && role.name.length > 0) {
@@ -1570,12 +1458,8 @@ export class DiscordAdapter {
     await reaction.users.remove(selfId);
   }
 
-  /** Turn a caller-supplied emoji into something discord.js `.react()` accepts.
-   *  Unicode chars and the full custom forms ('<:name:id>', 'name:id') pass
-   *  through untouched; a bare ':name:' or 'name' is resolved to a cached custom
-   *  emoji's 'name:id' identifier so custom reactions actually land (a bare name
-   *  is not resolvable by discord.js). Falls back to the input unchanged
-   *  (treated as unicode) when nothing matches. */
+  /** discord.js's react() can't resolve a bare custom-emoji name, so ':name:'
+   *  or 'name' becomes a cached emoji's 'name:id'. */
   private resolveReactionEmoji(emoji: string, guild: Guild | null): string {
     const trimmed = emoji.trim();
     if (/^<a?:\w+:\d+>$/.test(trimmed) || /^\w+:\d+$/.test(trimmed)) return trimmed;
@@ -1603,9 +1487,7 @@ export class DiscordAdapter {
       const full = reaction.partial ? await reaction.fetch() : reaction;
       const msg = full.message;
       const guildId = msg.guildId ?? null;
-      // A create still waiting for its thread's lookup goes first, so a
-      // reaction never arrives before the message it's on.
-      await this.threadLookups.get(msg.channelId);
+      await this.pendingCreatesIn(msg.channelId);
       if (guildId && !this.guildAdmitted(guildId)) return;
       if (guildId && (threadChannelUnknown(msg.channel) || this.isStale(msg.channelId))) {
         await this.lookUpChannel(guildId, msg.channelId);
@@ -1662,14 +1544,9 @@ export class DiscordAdapter {
     const channel = await this.channelById(channelId);
     if (!channel) throw channelUnusable(channelId, nothing);
     if (!('messages' in channel)) throw noMessagesHere(channel, channelId, nothing);
-    // Discord's REST endpoint caps a single fetch at 100 messages and
-    // discord.js does not auto-paginate. To support backscroll requests
-    // larger than 100 (we want up to 300), walk backwards page-by-page
-    // using `before: <oldest seen so far>` until we have enough or the
-    // channel runs out of history. `after` (the watermark) is checked
-    // per-message rather than passed to Discord — combining `before`
-    // and `after` in the same request narrows to a slice in time but
-    // doesn't paginate it, which would let us miss messages.
+    // Discord caps one fetch at 100 messages and discord.js doesn't paginate,
+    // so this walks back a page at a time with `before`. Discord takes only
+    // one of before, after and around, so the watermark is checked per message.
     const requested = options?.limit ?? 50;
     const after = options?.after;
     const collected: HistoryMessage[] = [];
@@ -1725,13 +1602,8 @@ export class DiscordAdapter {
     return collected;
   }
 
-  /** Fetch a window of messages centred on `messageId` — the "scroll to a
-   *  message" primitive. Uses Discord's `around` parameter, which returns the
-   *  target message plus roughly half the window on either side of it. This is
-   *  a SINGLE REST fetch (no pagination) and is therefore capped at 100 by the
-   *  Discord API; values above 100 are clamped. The target message itself is
-   *  included in the result. Messages are returned oldest → newest so the
-   *  window reads naturally as a transcript. */
+  /** Discord's `around` returns the target message and about half the window
+   *  on either side, in one fetch capped at 100. */
   async fetchAround(
     channelId: string,
     messageId: string,
@@ -1812,9 +1684,8 @@ export class DiscordAdapter {
       if (channel.type !== ChannelType.DM) return null;
       // discord.js holds a DM it has seen a message in as whole, whatever
       // recipients it recorded, and when the bot's own message was the first
-      // it saw there, it recorded only the bot. Its recipientId getter then
-      // gives the bot's id, so the other party is read as the DM list reads
-      // it.
+      // it saw there, it recorded only the bot, so its recipientId getter
+      // gives the bot's id.
       let recipientId = this.dmOtherParty(channel);
       if (!recipientId) {
         try {
@@ -1841,12 +1712,7 @@ export class DiscordAdapter {
     return { kind: 'guild', facts };
   }
 
-  /** Resolve display metadata for a channel by ID — used by the reconnect
-   *  catch-up sweep to label `<missed>` blocks. Rejects when the lookup
-   *  fails (the sweep catches it); for a channel found, fields it can't name
-   *  are null, and `isDM` is null when the channel's kind isn't known. A
-   *  thread the client knows only partly is fetched past the cache, which
-   *  would hand back that same partial. */
+  /** A thread the client knows only partly is fetched past the cache, which would hand back that same partial. */
   async getChannelMeta(channelId: string): Promise<ChannelMeta> {
     return this.extractChannelMeta(await this.channelById(channelId), channelId);
   }
@@ -1900,13 +1766,9 @@ export class DiscordAdapter {
     };
   }
 
-  /** The thread a message in this channel was posted in, when the channel is
-   *  a thread (ThreadPlace); nothing otherwise. The parent is looked up in
-   *  the client's channel cache by parentId, as channelAllowed does, rather
-   *  than through discord.js `ThreadChannel.parent`: that getter goes through
-   *  the thread's guild and throws when it has none, and a throw while
-   *  converting a message drops the whole message, where an unknown parent
-   *  should cost only its name. */
+  /** The parent is looked up by parentId rather than through discord.js
+   *  `ThreadChannel.parent`, which goes through the thread's guild and throws
+   *  when it has none. */
   private threadPlace(channel: unknown, channelId: string): ThreadPlace {
     const c = channel as { isThread?: () => boolean; name?: string | null; parentId?: string | null } | null | undefined;
     if (!c || typeof c.isThread !== 'function' || !c.isThread()) return {};
@@ -1945,12 +1807,8 @@ export class DiscordAdapter {
     return result;
   }
 
-  /** A guild channel's facts, read from the channel and the client's caches.
-   *  The guild and a thread's parent are looked up by id, as threadPlace
-   *  looks up a parent: discord.js's `ThreadChannel.parent` getter goes
-   *  through the thread's guild and throws when it has none. `names` is the
-   *  view nameResolves is read against; a batch of facts shares one, and
-   *  one channel's reads only the channels of its own name. */
+  /** discord.js's `ThreadChannel.parent` goes through the thread's guild and
+   *  throws when it has none, so a thread's parent is looked up by id. */
   private channelFacts(channel: unknown, names?: NameView): ChannelFacts | null {
     const c = channel as {
       id?: string; guildId?: string | null; type?: number; name?: string | null;
@@ -1985,8 +1843,7 @@ export class DiscordAdapter {
     return facts;
   }
 
-  /** Compare two Discord snowflake IDs numerically without BigInt parsing.
-   *  Snowflakes are 64-bit so we use locale numeric collation. */
+  /** Snowflakes are 64-bit, past a Number's exact range, so they're compared by numeric collation. */
   private snowflakeLte(a: string, b: string): boolean {
     return a.localeCompare(b, 'en-US-u-kn-true') <= 0;
   }
@@ -2122,18 +1979,8 @@ export class DiscordAdapter {
     }));
   }
 
-  /** A guild's channels as the gateway keeps them: GUILD_CREATE lists every
-   *  channel and updates follow, so the guild's own cache is whole while the
-   *  guild is available, and reading it writes nothing to the cache that a
-   *  REST reply could make older (refetchChannel). Threads aren't listed, as
-   *  the REST list never had them; categories and forums are. A guild in an
-   *  outage is refused rather than listed from what it held before, before
-   *  anything is fetched for it, and again after, since an outage can begin
-   *  meanwhile. A stale channel of the guild is fetched first (refreshStale),
-   *  through the freshness rule, as for a name, so it's listed as Discord
-   *  has it now; one still stale is left out, as the registration listings
-   *  leave it out (guildPostingChannels), since its category and name may be
-   *  older than Discord's. */
+  /** GUILD_CREATE lists every channel of a guild and updates follow, so the
+   *  guild's own cache is whole while the guild is available. */
   async listChannels(guildId: string): Promise<DiscordChannelInfo[]> {
     const guild = await this.client.guilds.fetch(guildId);
     if (!guild?.channels) {
@@ -2414,10 +2261,9 @@ export class DiscordAdapter {
       if (!this.channelAllowed(guildChannel.guild.id, channelId, parentId)) {
         throw filterDenied();
       }
-      // The members getter computes VIEW_CHANNEL against the member cache;
-      // warm it first (timeout-guarded) so the answer covers everyone, not
-      // just recent speakers. A failed warm-up must throw: a list computed
-      // over a partial cache would be silently incomplete.
+      // discord.js's members getter computes View Channel over the member cache
+      // (for a voice or stage channel, it lists who is connected), so a partial
+      // cache gives a partial list.
       const warmed = await warm(guildChannel.guild);
       if (!warmed) {
         throw new Error(
@@ -2676,9 +2522,7 @@ export class DiscordAdapter {
     const madeAs = created.name;
     // discord.js puts the POST's reply in the cache whenever it lands, over
     // anything the gateway reported of the new channel meanwhile, such as a
-    // rename, and its id isn't known to be overtaken until then. So the
-    // channel is fetched again through the freshness rule, and that fill is
-    // what the cache keeps.
+    // rename.
     const channel = ((await this.refetchChannel(created.id).catch((err: unknown) => {
       // Discord says the new channel is gone already: deleted since, which
       // refetchChannel reported (channelGone).
@@ -2752,36 +2596,24 @@ export class DiscordAdapter {
 
   // ── Private ──
 
-  /** Resolve sparse gateway events before applying guild/channel/DM policy.
-   *  A missing guild id is not evidence of a DM: uncached guild messages can
-   *  lack it too. Fetch the channel (never the deleted message) only when the
-   *  message and cache cannot establish its location or a parent needed by
-   *  the channel allowlist. With `dmParty`, also resolve a DM's other party
-   *  (dmRecipientId), fetching the channel if need be. Only a delete asks: an
-   *  edit is judged by its author. */
+  private pendingCreatesIn(channelId: string): Promise<void> | undefined {
+    return this.threadLookups.get(channelId);
+  }
+
+  /** A missing guild id is not evidence of a DM: uncached guild messages can lack it too. */
   private async messageEventInfo(
     message: Message | PartialMessage,
     opts: { dmParty?: boolean } = {},
   ): Promise<MessageEventInfo | null> {
-    // A create still waiting for its thread's lookup goes first, so an edit
-    // or delete never overtakes the message it changes, and is placed from
-    // what that lookup found (the promise never rejects).
-    const created = this.threadLookups.get(message.channelId);
-    if (created) await created;
+    const pendingCreates = this.pendingCreatesIn(message.channelId);
+    if (pendingCreates) await pendingCreates;
     const authorId = message.author?.id;
     const authorName = message.author?.username;
     let channel: Channel | null | undefined = message.channel ?? this.client.channels.cache.get(message.channelId);
     let guildId = message.guildId ?? (channel && 'guildId' in channel ? channel.guildId : null);
-    // A thread the client knows only partly, or a channel whose cached facts
-    // may be older than Discord's (isStale), is looked up whatever the
-    // channel filters say, as its creates are, so the edit or delete is
-    // placed and named as its create is. If the lookup fails, the channel
-    // stays as it was, and the filters decide on what's known, as they do
-    // for its creates. A guild the filters leave out needs no lookup.
-    // The channel is read from the cache again after the lookup: while it
-    // was pending, the cached entry can have been replaced (the guild
-    // removed and joined again builds a new thread object), and then only
-    // the cache holds what the lookup found.
+    // While a lookup is pending, the cached entry can be replaced (the guild
+    // removed and joined again builds a new thread object), so the channel is
+    // read from the cache again after it.
     if (guildId && !this.guildAdmitted(guildId)) return null;
     if (guildId && (threadChannelUnknown(channel) || this.isStale(message.channelId))) {
       await this.lookUpChannel(guildId, message.channelId);
@@ -2790,13 +2622,7 @@ export class DiscordAdapter {
     // A stale thread's channel is looked up too: its category can admit it.
     const staleParent = guildId ? this.staleParentOf(channel) : null;
     if (guildId && staleParent) await this.lookUpChannel(guildId, staleParent);
-    // Packet guild identity alone does not establish whether an uncached
-    // channel is a thread under an allowlisted parent. Fetch only when that
-    // missing parent could affect the decision; a directly allowed channel
-    // or a channel with known parent metadata needs no lookup, and a partly
-    // known thread (whose parentId key is there, null) has had its lookup
-    // above. The fetch is forced, since discord.js would otherwise hand back
-    // a cached partial.
+    // The fetch is forced, since discord.js would otherwise hand back a cached partial.
     const needsParent = guildId
       && !(channel && 'parentId' in channel)
       && !this.channelAllowed(guildId, message.channelId);
@@ -2811,18 +2637,11 @@ export class DiscordAdapter {
     if (guildId && this.guildIds?.length && !this.guildIds.includes(guildId)) return null;
     const parentId = channel && 'parentId' in channel ? channel.parentId : null;
     if (!this.channelAllowed(guildId, message.channelId, parentId)) return null;
-    // A DM's other party, for the allowlist (dmUserRefused): the author,
-    // unless the message is the bot's own, else the channel's recipient that
-    // isn't the bot (dmOtherParty). The cache can't always say: a deletion
-    // of an uncached message names no author, a channel known only by its id
-    // carries no recipient, and discord.js counts a cached DM channel as
-    // complete once it has seen a message there, whatever recipients it has
-    // recorded, which may be only the bot. So then this lookup asks Discord
-    // (force: true, past the cache), once, and only when a list needs it.
-    // (The location lookup above is separate.) When this lookup fails, or
-    // names no one, the party stays unknown and the delete is withheld
-    // (fail closed, as a create from an unknown user is), with the reason
-    // for the operator log.
+    // The cache can't always name a DM's other party: a deletion of an uncached
+    // message names no author, a channel known only by its id carries no
+    // recipient, and discord.js counts a cached DM channel as complete once it
+    // has seen a message there, whatever recipients it recorded, which may be
+    // only the bot. So then Discord is asked, past the cache.
     let dmRecipientId: string | undefined;
     let dmPartyUnknown: string | undefined;
     if (opts.dmParty && !guildId && channel?.isDMBased()) {
@@ -2893,8 +2712,7 @@ export class DiscordAdapter {
     }
     const content = newMsg.content!;
     const { channelId, id: messageId } = newMsg;
-    // RFC-006 occurrence identity and the create-equivalent rendering of a
-    // replacing edit need the edit time and the mention-resolved body.
+    // RFC-006: an edit's occurrence identity and its replacing rendering need the edit time and the mention-resolved body.
     const editedAt = newMsg.editedTimestamp ? new Date(newMsg.editedTimestamp).toISOString() : undefined;
     const cleanContent = newMsg.cleanContent ?? undefined;
     // Whom the message addresses as edited, from the update's own payload: an
@@ -2939,17 +2757,11 @@ export class DiscordAdapter {
     }, { dmParty: true });
   }
 
-  /** Keep the payload of the thread sync discord.js is applying, for the
-   *  threadListSync listener: the event carries the threads a sync lists,
-   *  but not the channels it covers (`channel_ids`). discord.js's
-   *  ThreadListSync action applies a sync and emits the event before it
-   *  returns, so the action is wrapped, once, as the client is made. The raw
-   *  packet can't stand in for it: a packet queued before the client is ready
-   *  is applied after newer ones, and two syncs can list the same threads,
-   *  none at all included. A nested application restores the outer one's
-   *  payload as it ends, a throw included. A discord.js without the action
-   *  fails construction, naming what's missing; the lockfile pins one that
-   *  has it. */
+  /** discord.js's threadListSync event carries the threads a sync lists, but
+   *  not the channels it covers (`channel_ids`). Its ThreadListSync action
+   *  applies a sync and emits the event before it returns, so the action is
+   *  wrapped. The raw packet can't stand in for it: a packet queued before the
+   *  client is ready is applied after newer ones. */
   private installThreadSyncScope(): void {
     const action = (this.client as unknown as {
       actions?: { ThreadListSync?: { handle(data: GatewayThreadListSyncDispatchData): unknown } };
@@ -2995,7 +2807,7 @@ export class DiscordAdapter {
       // facts may be older than Discord's (isStale), is fetched before the
       // filters decide, and this channel's later creates wait behind that
       // fetch, so they're delivered in order.
-      const waiting = this.threadLookups.get(message.channelId);
+      const waiting = this.pendingCreatesIn(message.channelId);
       const admittedGuild = message.guildId !== null && this.guildAdmitted(message.guildId);
       const lookUp = admittedGuild && (threadChannelUnknown(message.channel) || this.isStale(message.channelId));
       const parentLookUp = admittedGuild ? this.staleParentOf(message.channel) : null;
@@ -3052,12 +2864,7 @@ export class DiscordAdapter {
     });
 
     this.client.on('channelCreate', (channel) => {
-      // Only a listed kind (isListedKind): a category or forum holds no
-      // messages itself. Threads never reach channelCreate: they're
-      // registered by their messages. The guild filter applies too, as at
-      // boot: a channel in a guild it excludes would be listed to the host
-      // while every message from it is dropped. (The server labels it, by the
-      // one rule every registration uses: toDescriptor.)
+      // A category or forum holds no messages itself, and threads never reach channelCreate.
       if (!isListedKind(mapChannelType(channel.type))) return;
       const facts = this.channelFacts(channel);
       if (!facts) return;
@@ -3078,9 +2885,7 @@ export class DiscordAdapter {
     });
 
     this.client.on('threadUpdate', (_oldThread, newThread) => {
-      // Discord reported the thread as it is now, and discord.js patched the
-      // cache with it: what the cache holds is current. A fetch of it that's
-      // out now was overtaken as the report arrived (watchReports).
+      // Discord reported the thread as it is now, and discord.js patched the cache with it.
       this.stale.delete(newThread.id);
       const facts = this.channelFacts(newThread);
       if (facts) this.threadUpdateHandler?.(facts);
@@ -3096,22 +2901,16 @@ export class DiscordAdapter {
     this.client.on('threadListSync', (threads, guild) => {
       const applying = this.applyingThreadSync;
       const scope = applying?.data.guild_id === guild.id ? applying : undefined;
-      // Only discord.js's ThreadListSync action gives the sync's payload
-      // (installThreadSyncScope). A discord.js that emitted the event
-      // elsewhere would leave the channels it covers unknown, so it covers
-      // none here: the threads it lists are taken as reported, and nothing
-      // it omits is forgotten. That's logged rather than thrown: a throw
-      // would end the process from inside the gateway's packet handling.
+      // Only discord.js's ThreadListSync action gives the sync's payload. A throw
+      // here would end the process from inside the gateway's packet handling.
       if (!scope) {
         console.error(`[discord-mcpl] A sync of server ${guild.id}'s threads came outside discord.js's ThreadListSync action, so the channels it covers aren't known; nothing it omits is forgotten.`);
       }
       const covered = scope ? (scope.data.channel_ids ? new Set(scope.data.channel_ids) : null) : new Set<string>();
       const listed = new Set(threads.keys());
-      // The sync drops each live thread the client held under a covered
-      // channel that it doesn't list. discord.js dropped those its channels'
-      // threads caches held; one held outside its channel's, such as a
-      // partial a threadUpdate patched since, is the adapter's to drop.
-      // forgetCached also clears each one's stale mark, cached or not.
+      // discord.js drops only the threads its covered channels' threads caches
+      // held; one held outside them, such as a partial a threadUpdate patched
+      // since, stays in its cache.
       const dropped = new Set<string>();
       for (const [id, parentId] of scope?.held ?? []) {
         if (listed.has(id) || !(covered === null || (parentId !== null && covered.has(parentId)))) continue;
@@ -3141,12 +2940,7 @@ export class DiscordAdapter {
       }
     });
 
-    // Newly-joined guilds: warm their member cache too, and surface the
-    // guild's existing channels of a listed kind so the host can register
-    // them. Without this, channels in a server the bot is added to *after*
-    // startup never appear in the host's channel list (channelCreate only
-    // fires for channels created later, not the ones that already existed on
-    // join).
+    // channelCreate fires only for channels created after the join, so a new guild's existing channels are surfaced here.
     this.client.on('guildCreate', (guild) => {
       // A guild left and joined again can leave its old channels in the
       // client-wide cache, as a return does.
@@ -3281,18 +3075,8 @@ export class DiscordAdapter {
     });
   }
 
-  /** Per-guild channel whitelist check. A guild with no entry in
-   *  `guildChannels` is unrestricted. A listed id admits that channel or
-   *  thread. A listed channel also admits its threads, and a listed category
-   *  admits the channels under it and, through them, their threads (a
-   *  forum's posts included). So a thread is allowed whenever its channel
-   *  is, and also when it's listed itself.
-   *
-   *  `parentId` is the channel's own parent: a category for a channel, the
-   *  channel for a thread. A thread's channel may itself be admitted only
-   *  through its category, one level further up, so that level is read from
-   *  the client's channel cache (guild channels are always cached under the
-   *  GUILDS intent). An uncached parent stays excluded. */
+  /** Guild channels are always cached under the GUILDS intent, so a thread's
+   *  channel's category is read from the client's channel cache. */
   private channelAllowed(
     guildId: string | null | undefined,
     channelId: string,
@@ -3336,28 +3120,17 @@ export class DiscordAdapter {
     }
   }
 
-  /** Fetch a channel an event comes from past the cache, so the cache holds
-   *  what Discord has now: a thread known only partly (threadChannelUnknown),
-   *  whose parent channel the cache lacks, or a channel whose cached facts
-   *  may be older than Discord's (isStale). Forced, since discord.js would
-   *  otherwise return the cached object. The REST client's own timeout and
-   *  retries bound each attempt (15 s a try, three retries, by default),
-   *  though a rate limit's Retry-After waits can hold events waiting behind
-   *  it longer. A fetch Discord answers with Unknown Channel reports the
-   *  channel deleted. If the fetch fails otherwise, the channel stays as it
-   *  was, and the filters decide on what's known: where a guild's channel
-   *  list applies, a thread whose parent channel is unknown is admitted only
-   *  if it's listed itself, and a stale channel's events go unnamed unless
-   *  it's registered. That failure is logged. */
+  /** Forced, since discord.js would otherwise return the cached object. The
+   *  REST client's own timeout and retries bound each attempt (15 s a try,
+   *  three retries, by default), though a rate limit's Retry-After waits can
+   *  hold events waiting behind it longer. */
   private async lookUpChannel(guildId: string, channelId: string): Promise<void> {
     try {
       await this.refetchChannel(channelId);
     } catch (err) {
-      // Unknown Channel: the channel is gone, a thread perhaps deleted with
-      // the channel it hung off while its event waited, and nothing else will
-      // say so (a thread known only partly isn't in its channel's
-      // threads.cache). It's reported as deleted, so what waits on it
-      // registers and names nothing.
+      // A thread known only partly isn't in its channel's threads.cache, so
+      // when it goes with its channel, for which Discord sends no threadDelete,
+      // nothing else reports its deletion.
       if ((err as { code?: unknown } | null)?.code === UNKNOWN_CHANNEL) {
         dbg('gateway:channel-lookup-gone', { channelId });
         this.threadDeleteHandler?.(guildId, channelId);
@@ -3372,20 +3145,9 @@ export class DiscordAdapter {
     }
   }
 
-  /** Fetch a channel past the cache, as Discord has it now. This is the
-   *  freshness rule every fill of the cache from Discord that can later
-   *  supply registration facts follows. discord.js patches the cached
-   *  channel with the reply, so a reply that's older than something Discord
-   *  reported while the fetch was out (watchReports) can overwrite newer
-   *  facts. Such a reply marks the channel stale (isStale) as it lands, and
-   *  the channel is fetched again, up to FETCH_TRIES in all; a fetch nothing
-   *  overtook clears the mark. So the mark stays whenever no fresh fetch
-   *  follows an overtaken one, every try overtaken or a later try failing.
-   *  A fresh try that clears a mark tells the server (onChannelRefreshed),
-   *  so what it derived from the older facts is derived again. Unknown
-   *  Channel means the channel is gone: its mark goes, and so does what
-   *  discord.js still holds of it (forgetCached), so no later read finds it
-   *  live. */
+  /** discord.js patches the cached channel with the reply, so a reply older
+   *  than something Discord reported while the fetch was out can overwrite
+   *  newer facts. */
   private async refetchChannel(channelId: string, { force = true }: { force?: boolean } = {}): Promise<Channel | null> {
     for (let tries = 1; ; tries++) {
       const fetch = { overtaken: false };
@@ -3446,12 +3208,9 @@ export class DiscordAdapter {
     if (guildId) this.channelDeleteHandler?.(guildId, channelId, threadIds);
   }
 
-  /** Drop what discord.js holds of a channel Discord says doesn't exist: the
-   *  client's cache, its guild's, its channel's threads for a thread, and
-   *  its own threads, which went with it, as discord.js's own removal of a
-   *  deleted channel drops them. discord.js leaves all of it as it was when
-   *  a fetch fails. Read by ids, since a thread's parent getter throws when
-   *  it has no guild. */
+  /** discord.js's own removal of a deleted channel drops the threads its
+   *  threads cache holds too, and a failed fetch leaves all of it. Read by ids, since a thread's parent
+   *  getter throws when it has no guild. */
   private forgetCached(channelId: string): void {
     type Held = { guildId?: string | null; parentId?: string | null; threads?: { cache: Map<string, unknown> } };
     const held = this.client.channels.cache.get(channelId) as Held | undefined;
@@ -3466,18 +3225,10 @@ export class DiscordAdapter {
     parent?.threads?.cache.delete(channelId);
   }
 
-  /** Discord's reports on guild channels, as the gateway dispatches them,
-   *  before discord.js applies them: discord.js emits threadUpdate and
-   *  channelUpdate only for a channel it holds, and a fetch can be out for
-   *  one it doesn't. A report on a channel overtakes the fetches of it,
-   *  its creation included: Discord sends a thread's when the bot learns of
-   *  it, not only when it's made, and a channel's while a fetch of the new
-   *  channel can be out (createTextChannel). A
-   *  guild's payload, on a join or a return, and a sync of a guild's
-   *  threads report on every channel they cover, and a channel's deletion
-   *  takes its threads with it, without a report for each. A channel the
-   *  cache doesn't hold has no guild or parent known until its fetch
-   *  lands, so these overtake every fetch out. */
+  /** Read as the gateway dispatches them, before discord.js applies them:
+   *  discord.js emits threadUpdate and channelUpdate only for a channel it
+   *  holds. Discord sends a thread's create when the bot learns of the thread,
+   *  not only when it's made. */
   private watchReports(): void {
     for (const event of [
       GatewayDispatchEvents.ChannelCreate, GatewayDispatchEvents.ChannelUpdate,
@@ -3494,16 +3245,11 @@ export class DiscordAdapter {
     }
   }
 
-  /** Mark stale the channels and threads that a guild, back from an outage
-   *  or a gateway gap (onGuildAvailable) or joined again, no longer lists.
-   *  discord.js refills the guild's own cache from its payload
-   *  (Guild._patch), and keeps the rest in the client-wide cache with the
-   *  facts they had: a thread archived, or a channel deleted, meanwhile
-   *  reads as it did. A later threadUpdate only patches such a thread
-   *  (ChannelUpdateAction) and a fetch adds it with no guild
-   *  (ChannelManager.fetch), so neither puts it back in its guild's cache.
-   *  Marks from the guild's last payload go first, and what's still
-   *  unlisted is marked again. */
+  /** discord.js refills a guild's own cache from its payload (Guild._patch)
+   *  and keeps the rest in the client-wide cache with the facts they had. A
+   *  later threadUpdate only patches such a thread (ChannelUpdateAction) and a
+   *  fetch adds it with no guild (ChannelManager.fetch), so neither puts it
+   *  back in its guild's cache. */
   private markUnlisted(guild: Guild): void {
     for (const [id, mark] of this.stale) if (mark.guildId === guild.id) this.stale.delete(id);
     let marked = 0;
@@ -3550,13 +3296,9 @@ export class DiscordAdapter {
     );
   }
 
-  /** Whether Discord would show this bot a channel's messages: a DM's
-   *  always, and a server channel's, a thread's included, when discord.js's
-   *  cached permissions give this bot Read Message History there (a
-   *  thread's are its parent's). Without it Discord answers a read of the
-   *  channel's messages with none, not a refusal. A channel discord.js
-   *  returns nothing for, or a bot member the cache doesn't hold, counts as
-   *  not shown. */
+  /** Without Read Message History, Discord answers a read of a channel's
+   *  messages with none, not a refusal. A thread's permissions are its
+   *  parent's. */
   async readsMessageHistory(channelId: string): Promise<boolean> {
     const channel = await this.channelById(channelId);
     if (!channel) return false;
@@ -3648,9 +3390,7 @@ export class DiscordAdapter {
     // SYSTEM messages synthesize their client affordance from message.type —
     // all handled in resolveVisibleContent, shared with the history paths.
     const content = resolveVisibleContent(message);
-    // A forward's reference points at its ORIGIN message (reference.type =
-    // Forward); only a real reply (type Default = 0) should read as reply-to,
-    // else a forwarded bot message looks like a reply to the bot.
+    // A forward's reference points at its origin message, with reference type Forward.
     const refType = (message.reference as { type?: number } | null)?.type ?? 0;
     return {
       id: message.id,
@@ -3662,9 +3402,7 @@ export class DiscordAdapter {
       channelName,
       guildId: message.guildId ?? null,
       guildName,
-      // A message posted IN a thread names that thread, which is its channel.
-      // (`message.thread` is the thread a message STARTED, not where it was
-      // posted, so it never stands in for this.)
+      // `message.thread` is the thread a message started, not the one it was posted in.
       ...this.threadPlace(message.channel, message.channelId),
       replyToId: refType === 0 ? (message.reference?.messageId ?? undefined) : undefined,
       replyToUserName: message.mentions.repliedUser?.username ?? null,
@@ -3677,10 +3415,8 @@ export class DiscordAdapter {
   /** A message's address facts, as a create and each edit of it report them. */
   private addressFacts(message: Message): AddressFacts {
     return {
-      // mentions.repliedUser is the User the reply targets — distinct
-      // from mentions.users (which only includes them if the sender
-      // explicitly enabled the reply-ping). We capture it so reply-to-bot
-      // can be treated as direct address regardless of the ping toggle.
+      // mentions.repliedUser is the user the reply targets; mentions.users holds
+      // them only when the reply pings them or the body mentions them.
       replyToUserId: message.mentions.repliedUser?.id ?? null,
       mentions: message.mentions.users.map((u) => u.id),
       mentionsBotRole: message.mentions.roles.some(
@@ -3691,11 +3427,8 @@ export class DiscordAdapter {
   }
 }
 
-/** Render a content-less Discord system message the way the human client
- *  does — from its type. The author of a system message is its subject
- *  (e.g. the joining member authors the UserJoin message), so downstream
- *  "Author: <text>" rendering reads naturally. Unknown/new types degrade to
- *  a generic marker with the numeric type rather than an empty string. */
+/** The author of a Discord system message is its subject (the joining
+ *  member authors the UserJoin message). */
 function systemMessageText(type: MessageType): string {
   switch (type) {
     case MessageType.UserJoin:
@@ -3746,9 +3479,7 @@ function mapAttachments(message: { attachments?: { values?(): IterableIterator<u
   return out;
 }
 
-/** When a Discord CDN URL stops working: its signed `ex` parameter, Unix
- *  seconds in hex. Null for a URL without a readable one, so nothing is
- *  guessed. */
+/** A Discord CDN URL's signed `ex` parameter is its expiry, in Unix seconds as hex. */
 export function attachmentUrlExpiry(url: string): Date | null {
   let ex: string | null;
   try {
@@ -3807,16 +3538,7 @@ function withPostedParts(err: unknown, posted: string[], chunks: string[], files
   return err;
 }
 
-/** A message's own attachments plus any carried by forwarded snapshots.
- *  Snapshot attachments keep their original CDN URLs (signed like any other),
- *  so merging them here gives a forward's media the same handling as a native
- *  upload. On the live path, images are inlined as blocks, text files are
- *  inlined, and everything else is a name+URL note. The history paths inline
- *  nothing: the backscroll block before a live message and the catch-up list
- *  attachments by name, and fetch_history, fetch_around and channels/open
- *  history carry each one with its URL, and its expiresAt when the URL has
- *  one. The forwarded line's "[N attachments]" count note stays: it tells
- *  the agent which message the media rode in on. */
+/** Snapshot attachments keep their original CDN URLs, signed like any other. */
 export function mapAllAttachments(m: {
   attachments?: { values?(): IterableIterator<unknown> };
   messageSnapshots?: { size: number; values(): Iterable<ForwardSnapshot> } | null;
@@ -3878,22 +3600,12 @@ export function holdsPosts(type: ChannelType | undefined): boolean {
   return type === ChannelType.GuildForum || type === ChannelType.GuildMedia;
 }
 
-/** The errors a call gets when discord.js returns no channel for an id, with
- *  what didn't happen (`nothing`, from the call). Discord answered for the id
- *  (an id it doesn't know throws Unknown Channel, which explainDiscordError
- *  explains), but discord.js couldn't build a channel from the answer: a type
- *  it has no class for, which only an update of the adapter changes, or a
- *  server channel whose server isn't in its cache. In discord.js 14.26.5,
- *  READY puts every server the bot is in into that cache, unavailable ones
- *  included, and GUILD_CREATE adds one it joins later, so a server is
- *  missing only until the gateway delivers it, and the same call may work a
- *  moment later. Telling the two causes apart would take a second lookup,
- *  whose channel would need every check a normal lookup gets, for a rare
- *  case, so channelUnusable names both, with the retry hint on the second.
- *  A DM has no server, so only the first cause applies to one, but at a null
- *  the adapter can't tell a DM's id from a server channel's: every call gets
- *  both causes except sendDmNotice, which knows its channel is a DM and uses
- *  unhandledKind, naming the first alone. */
+/** discord.js returns no channel for an id Discord answered for when it has
+ *  no class for the channel's type, or when the channel's server isn't in
+ *  its cache. In discord.js 14.26.5, READY puts every server the bot is in
+ *  into that cache, unavailable ones included, and GUILD_CREATE adds one it
+ *  joins later, so a server is missing only until the gateway delivers it,
+ *  or once the bot has left it. */
 function channelUnusable(channelId: string, nothing: string): Error {
   return new Error(
     `Channel ${channelId} exists, but this adapter can't use it, so ${nothing}. Either it's a kind of channel ` +
@@ -3963,22 +3675,16 @@ function noMessagesHere(channel: { type: number; guildId?: string | null }, chan
  */
 export function mapChannelType(type: number | undefined): DiscordChannelInfo['type'] {
   switch (type) {
-    case 0: return 'text';
-    case 2: return 'voice';
-    case 4: return 'category';
-    // 5 = GuildAnnouncement ("news"). A normal message channel that can also
-    // crosspost — sendable, and commonly named #announcements / #updates.
-    case 5: return 'announcement';
-    case 10: // AnnouncementThread — a thread, whatever its parent is.
-    case 11:
-    case 12: return 'thread';
-    // 13 = GuildStageVoice. Its text chat takes messages, as a voice
-    // channel's does (discord.js's StageChannel can send).
-    case 13: return 'stage';
-    case 15: return 'forum';
-    // 16 (media) lands here on purpose: like a forum, it holds its posts as
-    // threads, never a message of its own, so no name resolves to it and no
-    // listing registers it; its posts are threads like any other.
+    case ChannelType.GuildText: return 'text';
+    case ChannelType.GuildVoice: return 'voice';
+    case ChannelType.GuildCategory: return 'category';
+    case ChannelType.GuildAnnouncement: return 'announcement';
+    case ChannelType.AnnouncementThread:
+    case ChannelType.PublicThread:
+    case ChannelType.PrivateThread: return 'thread';
+    case ChannelType.GuildStageVoice: return 'stage';
+    case ChannelType.GuildForum: return 'forum';
+    case ChannelType.GuildMedia:
     default: return 'unknown';
   }
 }

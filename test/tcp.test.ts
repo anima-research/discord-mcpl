@@ -22,9 +22,7 @@ async function until(done: () => boolean, what: string, ms = 2000): Promise<void
   }
 }
 
-/** A listening server on a free loopback port, and a way to connect clients
- *  to it. When the test ends, the clients are closed, and then the server,
- *  whose close waits for its connections to end. */
+/** A server's close waits for its connections to end, so the clients are closed first. */
 async function listening(t: TestContext) {
   const tcpServer = net.createServer();
   await new Promise<void>((resolve) => tcpServer.listen(0, '127.0.0.1', resolve));

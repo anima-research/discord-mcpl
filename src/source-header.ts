@@ -1,36 +1,9 @@
 /**
- * Values in a `[source: …]` header, rendered so they can't become structure.
- *
- * The grammar is shared with the agent framework, which stamps the same
- * header on inbound messages (room-203 #41210):
- *   [source: <canonical-channel-id> · <label>]   (this server's standalone form)
- * Labels come from Discord: guild, channel and thread names and members'
- * display names, any of which may hold `]`, `·`, quotes or controls. A label
- * like `x] [source: discord:g:other · #admin` must not read as a second
- * attribution. So, as the framework does (agent-framework
- * src/mcpl/inbound-source.ts, `headerValue` / `labelValue`):
- * - a value with any character the grammar uses (brackets, the `·` and ` / `
- *   separators, quotes, backslashes), any control or line-separator
- *   character, or anything invisible is rendered as a quoted, escaped string
- *   literal. Invisible means a format or default-ignorable character
- *   (zero-width characters, bidi overrides and isolates, the Hangul fillers,
- *   variation selectors outside an emoji) or a space other than U+0020: such
- *   characters can hide a header word, reorder the line for a human reader,
- *   or make a lookalike ` / `. So a value with one is quoted for that alone,
- *   whatever follows it, and any other space around a slash is quoted as
- *   such. The escape spells each one out, so nothing acts from inside the
- *   quotes;
- * - a label beginning with one of the header's own words (`thread`,
- *   `reply to`, `unscoped`) is quoted too, since it stands where a tail
- *   would. One that an invisible character hides is quoted already;
- * - every other value is rendered as is. A header is always one line.
- *
- * An emoji sequence led by a pictographic character keeps its zero-width
- * joiners, skin tones and variation selectors raw: channel and display names
- * carry emoji, and an escaped `❤\ufe0f-cats` is a name the reader can't type
- * back (agent-framework#269). A keycap (`1\ufe0f\u20e3`) or a tag-sequence
- * flag isn't led by one, so its invisible characters are escaped, as they
- * are in the framework's copy of this rule; the two renderings keep one rule.
+ * Labels come from Discord (guild, channel and thread names, members'
+ * display names), and any of them may hold `]`, `·`, quotes, controls or
+ * invisible characters: format and default-ignorable characters, and spaces
+ * other than U+0020, can hide a header word, reorder the line for a human
+ * reader, or make a lookalike ` / `.
  */
 
 /**
@@ -38,9 +11,7 @@
  * characters, bidi overrides and isolates) and every default-ignorable code
  * point, which adds fillers that are letters (U+3164, U+115F, U+1160, U+FFA0),
  * the combining grapheme joiner and the variation selectors. A visible
- * look-alike, such as U+2800 BRAILLE PATTERN BLANK, stays as it is. The
- * constants below are the framework's (inbound-source.ts), character for
- * character, so the two renderings keep one rule.
+ * look-alike, such as U+2800 BRAILLE PATTERN BLANK, stays as it is.
  */
 const INVISIBLE = '\\p{Cf}\\p{Default_Ignorable_Code_Point}';
 // eslint-disable-next-line no-control-regex
