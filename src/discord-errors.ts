@@ -1,27 +1,13 @@
 /**
- * What Discord's answer means for the id a tool was given.
- *
- * An id Discord doesn't know comes back as two words, "Unknown Channel",
- * which says nothing about what went wrong or what to do instead. A name has
- * the resolver's own answers (channel-names.ts); an id has no candidates to
- * list, so the explanation names what the answer means for the id that was
- * passed and how to get a real one. Ids get misremembered: one recalled
- * rather than copied is the commonest way to reach this.
- *
- * The explanation is appended after the error's own text, so the error's
- * words stay as they were. Two refusals the agent can't change itself,
- * Missing Permissions and a DM Discord won't deliver, are explained too:
- * what Discord refused, who can change it, what calling again will do
- * until then, and, for Missing Permissions on a message with files, what
- * may still go through. Errors with other codes pass through unchanged.
+ * Discord answers an id it doesn't know with two words, "Unknown Channel",
+ * which say nothing about what went wrong or what to do instead.
  */
 import { isSnowflake } from './channel-names.js';
 import { parseMcplChannelId } from './channels.js';
 import type { PostedParts } from './discord-adapter.js';
 import { quotedValue } from './source-header.js';
 
-/** Discord's JSON error codes for an id it can't resolve, or can't reach. A
- *  channel Discord answers with Unknown Channel no longer exists. */
+/** Discord's JSON error codes for an id it can't resolve, or can't reach. */
 export const UNKNOWN_CHANNEL = 10003;
 const UNKNOWN_GUILD = 10004;
 const UNKNOWN_MESSAGE = 10008;
@@ -35,10 +21,7 @@ const MISSING_PERMISSIONS = 50013;
 /** Cannot send messages to this user, when it shares no server with the bot. */
 const CANNOT_DM_NO_MUTUAL_GUILDS = 50278;
 
-/** What the tool chokepoint knows that the args no longer show. */
 export interface ExplainContext {
-  /** The channel the model named, when it was a name or a composite that
-   *  handleToolCall resolved to the id now in args.channelId. */
   channelGiven?: string;
 }
 
@@ -51,14 +34,12 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>,
   const channel = given('channelId');
   const guild = given('guildId');
   const user = given('userId');
-  // A name (not a composite, which carries its id) resolved to `channel`.
   const named = ctx.channelGiven && !parseMcplChannelId(ctx.channelGiven) ? ctx.channelGiven : undefined;
   const recalled = 'the id may be mistyped or remembered rather than copied';
   let why: string | undefined;
   switch (code) {
     case UNKNOWN_CHANNEL:
       if (named && channel) {
-        // The name already resolved: sending it again would reach the same id.
         why =
           `${named} resolved to channel ${channel}, which Discord doesn't know: it may have been deleted ` +
           "since this connection last saw it. list_channels shows a server's channels now, with their ids.";
@@ -67,10 +48,6 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>,
           `No category ${given('categoryId')} is visible to this connection: ${recalled}, or the category deleted. ` +
           "list_channels shows a server's channels, categories included, with their ids, within the configured filters.";
       } else {
-        // The name route covers text, announcement, voice and stage channels only
-        // (resolveChannelRef leaves out threads, forums, categories and DMs),
-        // so a thread or DM isn't sent back to a name that could match
-        // another channel.
         why =
           `${channel ? `No channel ${channel}` : 'No such channel'} is visible to this connection: ${recalled}, ` +
           'or the channel deleted. For a text, announcement, voice or stage channel, re-send with its name instead ' +
@@ -92,19 +69,16 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>,
         'message as it arrived, with the channel it arrived in.';
       break;
     case UNKNOWN_USER:
-      // Read as the adapter's resolver reads it: an id may come with one leading @.
       why = !user
         ? 'A user this call needed is gone from Discord.'
         : isSnowflake(user.replace(/^@/, ''))
           ? `No user ${user.replace(/^@/, '')} is known to Discord: ${recalled}. A message's author and list_channel_members ` +
             'show real ids, and a name works for someone who shares a server with this bot or has DMed it ' +
             '(@username or display name).'
-          // A name the adapter resolved: sending it again would reach the same account.
           : `${user} matched an account Discord no longer knows: it may have been deleted. A message's author ` +
             'and list_channel_members show the ids of accounts that exist.';
       break;
     case MISSING_ACCESS:
-      // Named by what the call was aimed at: a channel, else a server.
       why = channel
         ? `This bot can't reach channel ${channel}: the channel's permissions or its server leave this bot ` +
           "out, or it's a DM this bot isn't in. For a server channel, list_channels shows the channels this bot " +
@@ -115,14 +89,7 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>,
           : "This bot can't reach what this call needs: permissions leave it out.";
       break;
     case MISSING_PERMISSIONS: {
-      // Named by what the call was aimed at, as missing access is. It speaks
-      // of the request Discord refused. A send refused partway has its own
-      // note on what posted, so this says only what sending the rest will do.
       const lacks = `Discord refused this request: this bot lacks a permission it needs${channel ? ` in channel ${channel}` : guild ? ` in server ${guild}` : ''}`;
-      // postedParts is attached only where sendMessage or sendDM's post of a
-      // part throws, so a 50013 without it came from another request, whose
-      // permission isn't known here. (The DM notice's post, sendDmNotice,
-      // attaches none, and its errors don't come here.)
       const posted = (err as { postedParts?: PostedParts } | null)?.postedParts;
       if (posted === undefined) {
         why = `${lacks}. Calling again will be refused the same way until someone who manages this server's permissions ` +
@@ -153,8 +120,6 @@ export function explainDiscordError(err: unknown, args: Record<string, unknown>,
         : `${needs.slice(0, -1).join('; ')}; or ${needs[needs.length - 1]}`;
       // Discord doesn't say which of them is missing, or how many.
       const grants = `until someone who manages this server's permissions grants ${needs.length === 1 ? 'it' : "what's missing"}`;
-      // Refused with the files and no part before it, the part was the
-      // message's only one, so its text is all the message had.
       why = `${lacks}: ${named}. ` + (
         filesRefused && posted.failed !== ''
           ? `If Attach Files is all that's missing, the text alone may go through. Calling again with the files will be ` +

@@ -1,12 +1,6 @@
 /**
- * Edit/delete forwarding.
- *
- * Discord emits MESSAGE_UPDATE for more than content edits: link-preview /
+ * Discord emits MESSAGE_UPDATE for more than content edits: link-preview and
  * embed refreshes re-send old messages with `edited_timestamp` still null.
- * Those were forwarded as "[message edited] …" events — weeks-old,
- * never-edited messages reaching the agent as fresh edits — with no author and
- * no guild, so the host placed them at `discord:dm:<guildChannelId>` and the
- * agent attributed them to whoever it had last been talking to.
  */
 
 import { describe, it } from 'node:test';
@@ -72,8 +66,6 @@ describe('edit/delete push events', () => {
       onChannelRefreshed: noop,
       onChannelStale: noop,
       refreshStale: async () => {},
-      // The cache holds chan1, as it holds a channel an edit or delete comes
-      // from, and nothing else.
       getCachedChannelFacts: (id: string) =>
         id === 'chan1' ? { id, guildId: 'g1', guildName: 'Guild', type: 'text', name: 'general' } : null,
       getCachedChannelFactsFor: () => new Map(),
@@ -109,8 +101,7 @@ describe('edit/delete push events', () => {
     open(server);
     edit('chan1', 'm1', 'updated', false, { guildId: 'g1' });
     del('chan1', 'm1', false, { guildId: 'g1' });
-    // Occurrence ids are unique per edit/delete (RFC-006 §3.1): a fixed
-    // `discord_edit_<id>` collided with itself at the host's dedup.
+    // Occurrence ids are unique per edit or delete (RFC-006 §3.1).
     assert.deepEqual(sent.map(({ method, params }) => [method, params.eventId.replace(/_[^_]+_\d+$/, ''), params.origin.mcplChannelId]), [
       ['push/event', 'discord_edit_m1', 'discord:g1:chan1'],
       ['push/event', 'discord_delete_m1', 'discord:g1:chan1'],
@@ -237,7 +228,6 @@ describe('edit/delete push events', () => {
     const { edit, del, sent } = wire();
     del('dmchan', 'm5', true, { guildId: null });
     assert.equal(sent[0]!.params.origin.guildId, undefined);
-    // Its other party unknown, a DM not registered yet goes unnamed.
     assert.equal('mcplChannelId' in sent[0]!.params.origin, false);
     edit('dmchan', 'm6', 'zz hola', true, { guildId: null, authorId: 'u2', authorName: '_reim0n' });
     del('dmchan', 'm6', true, { guildId: null });
@@ -250,8 +240,6 @@ describe('edit/delete push events', () => {
     edit('chan1', 'm3', 'zz text', false);
     assert.equal(sent[0]!.params.payload.content[0].text, '[message edited] zz text');
     assert.equal(sent[0]!.params.origin.guildId, undefined);
-    // With no info there's no telling a guild channel from a DM, so no
-    // composite id is guessed.
     assert.equal('mcplChannelId' in sent[0]!.params.origin, false);
   });
 

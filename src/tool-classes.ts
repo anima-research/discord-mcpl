@@ -5,18 +5,9 @@
  * tools/list carries each tool's classes as `_meta["mcpl/class"]`. Hosts use
  * them to decide how a tool is handled, notably what tool-lifecycle observers
  * may see of its calls. A tool may name several classes; the host applies the
- * union of their restrictions, so adding a class can only make handling
- * stricter.
- *
- * The comms rule: a tool that sends people's messages, or reads them, is
- * `comms`, whichever direction the words travel. Classing such a tool as
- * anything else is the one dangerous mistake here, because comms arguments
- * are never shared with observers and other classes may be.
- *
- * An unclassed tool (no key) is treated as the most restrictive class, so
- * leaving a tool out is always safe. Deliberate omissions go in UNCLASSED;
- * test/tool-classes.test.ts fails until every tool the server lists or
- * dispatches is in one of the two.
+ * union of their restrictions. Comms arguments are never shared with
+ * observers, and other classes' may be. A host treats an unclassed tool (no
+ * key) as the most restrictive class.
  */
 
 import type { ToolDefinition } from './tools.js';
@@ -41,13 +32,10 @@ export type ToolClass = (typeof TOOL_CLASS_VOCABULARY)[number];
 export const TOOL_CLASS_META_KEY = 'mcpl/class';
 
 export const TOOL_CLASSES: Record<string, readonly ToolClass[]> = {
-  // Sending: these also upload `files[].path` from this host.
   send_message: ['comms', 'files'],
   reply_message: ['comms', 'files'],
   send_dm: ['comms', 'files'],
 
-  // Acting on, or reading, people's messages, and the directory of who and
-  // where they are.
   add_reaction: ['comms'],
   remove_reaction: ['comms'],
   edit_message: ['comms'],
@@ -59,11 +47,9 @@ export const TOOL_CLASSES: Record<string, readonly ToolClass[]> = {
   list_channels: ['comms'],
   list_emojis: ['comms'],
 
-  // Channel administration: changes the spaces people talk in.
   create_text_channel: ['comms', 'control'],
   delete_channel: ['comms', 'control'],
 
-  // Server settings and subscription state (ids and counts, no message content).
   filters_get: ['control'],
   filters_update: ['control'],
   refresh_channels: ['control'],
@@ -73,17 +59,13 @@ export const TOOL_CLASSES: Record<string, readonly ToolClass[]> = {
   list_subscriptions: ['control'],
   channel_missed: ['control'],
 
-  // Retired: still callable (they point at the host's channel tools) but not listed.
   subscribe_channel: ['control'],
   unsubscribe_channel: ['control'],
 };
 
-/** Tools deliberately left unclassed. Hosts treat them as most restrictive. */
+/** Tools left unclassed, which hosts treat as most restrictive. */
 export const UNCLASSED: ReadonlySet<string> = new Set<string>([]);
 
-/** The tool definition as tools/list should carry it: its RFC-008 classes
- *  merged into any `_meta` it already has. Unclassed tools are returned
- *  unchanged (no key). Never mutates the input. */
 export function withToolClasses(tool: ToolDefinition): ToolDefinition {
   if (!Object.hasOwn(TOOL_CLASSES, tool.name)) return tool;
   return {

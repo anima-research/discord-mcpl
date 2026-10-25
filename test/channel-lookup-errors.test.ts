@@ -1,32 +1,22 @@
 /**
- * What a call says when its channel lookup gives it no channel it can use.
  * discord.js returns null for a channel Discord answered for but that it
  * can't build (an id Discord doesn't know throws Unknown Channel instead):
  * a kind it has no class for, or a server channel whose server it hasn't
- * cached yet. The error names both causes, what didn't happen, and what can
- * change each; the DM notice, whose channel is a DM with no server, names
- * the first alone. A channel that holds no messages of its own (a category,
- * a forum, a media or a directory channel), given by id, is named for what
- * it is, with what didn't happen and where its messages are, or that nothing
- * here can use it. A #name reaches only text, announcement, voice and
- * stage channels: one that none of those has is refused with what a #name
- * reaches, and how a channel of any other kind is given instead.
- *
- * Run: node --import tsx --test test/channel-lookup-errors.test.ts
+ * cached yet.
  */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
-import type { Client } from 'discord.js';
+import { ChannelType, type Client } from 'discord.js';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
 
-const UNBUILT = '410000000000000001'; // a channel discord.js returns no object for
+const UNBUILT = '410000000000000001';
 const CATEGORY = '410000000000000002';
 const FORUM = '410000000000000003';
 const MEDIA = '410000000000000004';
 const DIRECTORY = '410000000000000005';
 const LATER_KIND = '410000000000000006';
-const DM = '410000000000000007'; // a DM discord.js returns no object for
+const DM = '410000000000000007';
 const GUILD = '400000000000000001';
 
 const unusable = (id: string, nothing: string) =>
@@ -44,8 +34,6 @@ const inCategory = (id: string) =>
   `shows with ${id} as their parent.`;
 const servers = ' It lists servers, and nothing here can read it or send to it.';
 
-/** The real adapter, its channel lookups answered as discord.js would answer
- *  them: a channel for the kinds without messages, null for the rest. */
 function adapterWith(t: TestContext) {
   const adapter = new DiscordAdapter({ token: 'unused' });
   const client = (adapter as unknown as { client: Client }).client;
@@ -93,7 +81,6 @@ describe('a channel discord.js returns nothing for', () => {
   it("gives latestFrom's own words when the history read's lookup gives nothing", async (t) => {
     const { adapter } = adapterWith(t);
     const client = (adapter as unknown as { client: Client }).client;
-    // The channel is there for latestFrom's own lookup, and gone by the history read's.
     let first = true;
     (client.channels as unknown as { fetch: unknown }).fetch = async (id: string) => {
       if (!first) return null;
@@ -123,7 +110,6 @@ describe('a channel that holds no messages', () => {
       ['removeReaction', (id) => adapter.removeReaction(id, '1', 'x'), 'no reaction was removed'],
       ['fetchHistory', (id) => adapter.fetchHistory(id), 'nothing was read'],
       ['fetchAround', (id) => adapter.fetchAround(id, '1'), 'nothing was read'],
-      // A reply's or a reaction's latestFrom did nothing, not just read nothing.
       ['resolveLatestFrom', (id) => adapter.resolveLatestFrom(id, 'someone'), 'nothing was done'],
     ];
     for (const [name, call, nothing] of paths) {
@@ -132,7 +118,6 @@ describe('a channel that holds no messages', () => {
         [FORUM, `Channel ${FORUM} is a forum, which holds no messages, so ${nothing}.${posts}`],
         [MEDIA, `Channel ${MEDIA} is a media channel, which holds no messages, so ${nothing}.${posts}`],
         [DIRECTORY, `Channel ${DIRECTORY} is a directory channel, which holds no messages, so ${nothing}.${servers}`],
-        // A kind the table doesn't name, such as one a later discord.js builds, is named by its number.
         [LATER_KIND, `Channel ${LATER_KIND} is a kind of channel (type 99) that this adapter can't read or send to, so ${nothing}. ` +
           'Only an operator updating the adapter can change that.'],
       ];
@@ -148,7 +133,6 @@ describe('a channel that holds no messages', () => {
     assert.equal(read.isError, true);
     assert.equal(read.content[0].text, `Channel ${FORUM} is a forum, which holds no messages, so nothing was read.${posts}`);
 
-    // A send names where it was aimed after the error's own words, and adds nothing else.
     const sent = await server.handleToolCall('send_message', { channelId: CATEGORY, content: 'hello' });
     assert.equal(sent.isError, true);
     const [own, destination, ...rest] = sent.content[0].text.split('\n\n');
@@ -162,14 +146,13 @@ describe('a #name that no text, announcement, voice or stage channel has', () =>
   const TEXT = '420000000000000001';
   const HIDDEN = '420000000000000005';
   const channels: Array<[string, string, number]> = [
-    [TEXT, 'general', 0],
-    ['420000000000000002', 'general', 4], // a category that shares the text channel's name
-    ['420000000000000003', 'plans', 4],
-    ['420000000000000004', 'ideas', 15],
-    [HIDDEN, 'hidden', 0], // left out of the channel filters
+    [TEXT, 'general', ChannelType.GuildText],
+    ['420000000000000002', 'general', ChannelType.GuildCategory],
+    ['420000000000000003', 'plans', ChannelType.GuildCategory],
+    ['420000000000000004', 'ideas', ChannelType.GuildForum],
+    [HIDDEN, 'hidden', ChannelType.GuildText],
   ];
 
-  /** The real adapter over one cached server, with the filters leaving HIDDEN out. */
   function adapterOverServer(t: TestContext) {
     const allowed = channels.map(([id]) => id).filter((id) => id !== HIDDEN);
     const adapter = new DiscordAdapter({ token: 'unused', guildChannels: { [GUILD]: allowed } });
@@ -192,7 +175,6 @@ describe('a #name that no text, announcement, voice or stage channel has', () =>
     for (const [tool, args, text] of [
       ['send_message', { channelId: '#plans', content: 'hi' }, notFound('#plans')],
       ['fetch_history', { channelId: '#ideas' }, notFound('#ideas')],
-      // A tool that acts on any channel isn't handed the category by its name.
       ['delete_channel', { channelId: '#plans' }, notFound('#plans')],
     ] as const) {
       const res = await server.handleToolCall(tool, args);

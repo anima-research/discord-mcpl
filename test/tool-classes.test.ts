@@ -1,9 +1,3 @@
-/**
- * MCPL RFC-008 tool classes. Every tool this server can list, and every tool
- * it dispatches without listing, must be in TOOL_CLASSES or UNCLASSED, so a
- * new tool fails here until someone decides its class.
- */
-
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -19,9 +13,6 @@ import {
 
 const listed = toolDefinitions.map((t) => t.name);
 
-/** Tool names the server dispatches: the `case '…':` labels in
- *  executeToolCall's switch, up to its default's "There's no Discord tool". This is what
- *  catches tools that are callable but not listed. */
 function dispatchedToolNames(): string[] {
   const src = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
   const start = src.indexOf('private async executeToolCall(');
@@ -43,8 +34,6 @@ describe('MCPL RFC-008 tool classes', () => {
 
   it('every dispatched tool, listed or not, is classed or deliberately unclassed', () => {
     const dispatched = dispatchedToolNames();
-    // The scan must see the whole switch: every listed tool is dispatched
-    // there, so a scan that misses one is reading the wrong span.
     const unseen = listed.filter((n) => !dispatched.includes(n));
     assert.deepEqual(unseen, [], 'dispatch scan missed listed tools; update dispatchedToolNames()');
     const missing = dispatched.filter((n) => !isAccountedFor(n));
@@ -101,7 +90,6 @@ describe('MCPL RFC-008 tool classes', () => {
       inputSchema: { type: 'object', properties: {} },
     };
     assert.equal(withToolClasses(tool), tool);
-    // Names inherited from Object.prototype are not classes either.
-    assert.equal(withToolClasses({ ...tool, name: 'constructor' })._meta, undefined);
+    assert.equal(withToolClasses({ ...tool, name: 'constructor' })._meta, undefined, 'a name inherited from Object.prototype is no class');
   });
 });

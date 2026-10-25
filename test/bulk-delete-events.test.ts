@@ -13,7 +13,6 @@ function fixture(t: TestContext) {
   });
   const client = adapter.rawClient;
   t.after(() => client.destroy());
-  // The bot is in the guild these deletions come from.
   (client.guilds as any)._add({ id: 'g1', name: 'Guild' });
   const server = new DiscordMcplServer(adapter);
   const s = server as any;
@@ -47,9 +46,8 @@ function fixture(t: TestContext) {
   return { client, server: s, sent, open, emit, message, bulk };
 }
 
-/** Occurrence ids are unique per edit/delete (RFC-006 §3.1, #48):
- *  `discord_delete_<id>_<timestamp>_<n>`. These tests check the message part. */
-const occurrence = (eventId: string): string => eventId.replace(/_[^_]+_\d+$/, '');
+/** Occurrence ids are unique per edit or delete (RFC-006 §3.1). */
+const withoutOccurrenceSuffix = (eventId: string): string => eventId.replace(/_[^_]+_\d+$/, '');
 
 describe('bulk deletion delivery', () => {
   it('forwards one correctly located tombstone per collection member to an open channel', async (t) => {
@@ -57,7 +55,7 @@ describe('bulk deletion delivery', () => {
     f.bulk([f.message('m1'), f.message('m2')]);
     await settle();
     assert.deepEqual(f.sent.map(({ method, params }) => ({
-      method, id: occurrence(params.eventId), channel: params.origin.mcplChannelId,
+      method, id: withoutOccurrenceSuffix(params.eventId), channel: params.origin.mcplChannelId,
       text: params.payload.content[0].text,
     })), [
       { method: 'push/event', id: 'discord_delete_m1', channel: 'discord:g1:chan1', text: '[message deleted] m1' },
@@ -88,7 +86,7 @@ describe('bulk deletion delivery', () => {
       f.message('m2', { channelId: 'thread1' }),
     ]);
     await settle();
-    assert.deepEqual(f.sent.map((e) => [occurrence(e.params.eventId), e.params.origin.mcplChannelId]), [
+    assert.deepEqual(f.sent.map((e) => [withoutOccurrenceSuffix(e.params.eventId), e.params.origin.mcplChannelId]), [
       ['discord_delete_m1', 'discord:g1:thread1'],
       ['discord_delete_m2', 'discord:g1:thread1'],
     ]);
@@ -104,11 +102,11 @@ describe('bulk deletion delivery', () => {
     }));
     f.bulk([f.message('m1'), f.message('m2')]);
     await settle();
-    assert.deepEqual(f.sent.map((e) => occurrence(e.params.eventId)), ['discord_delete_m2']);
+    assert.deepEqual(f.sent.map((e) => withoutOccurrenceSuffix(e.params.eventId)), ['discord_delete_m2']);
 
     resolveChannel({ guildId: 'g1', parentId: null });
     await settle();
-    assert.deepEqual(f.sent.map((e) => occurrence(e.params.eventId)), [
+    assert.deepEqual(f.sent.map((e) => withoutOccurrenceSuffix(e.params.eventId)), [
       'discord_delete_m2', 'discord_edit_m1', 'discord_delete_m1',
     ]);
   });
@@ -119,7 +117,7 @@ describe('bulk deletion delivery', () => {
     const errors = t.mock.method(console, 'error', () => {});
     f.bulk([f.message('m1', { guildId: null }), f.message('m2')]);
     await settle();
-    assert.deepEqual(f.sent.map((e) => occurrence(e.params.eventId)), ['discord_delete_m2']);
+    assert.deepEqual(f.sent.map((e) => withoutOccurrenceSuffix(e.params.eventId)), ['discord_delete_m2']);
     assert.equal(errors.mock.callCount(), 1);
     assert.match(errors.mock.calls[0].arguments.join(' '), /unavailable/);
   });

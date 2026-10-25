@@ -1,27 +1,4 @@
 /**
- * Live voice conversation harness: humans talk in a Discord voice channel,
- * Claude (Sonnet 4.5) answers in voice — under the physics rules — and the
- * whole exchange leaves a text trail in the voice channel's built-in chat.
- *
- * The transcript-ordering protocol (per Antra's design):
- *  - When a human starts speaking, the bot POSTS a message to the voice
- *    channel's text chat immediately ("🎙️ name: …") — so Discord's message
- *    ORDER reflects utterance START order — then EDITS it as the STT
- *    transcript grows/revises, finalizing when they stop. Revision-friendly,
- *    matching voice-kit's "revision is normal" transcript contract.
- *  - The bot's own speech gets the same treatment: message posted when it
- *    starts speaking, edited at the end to reflect what was ACTUALLY heard —
- *    an interrupted utterance shows the voiced prefix, the unvoiced tail
- *    struck through, and so does one the player couldn't play, with why.
- *    Other models read this channel and know exactly what was said, by whom,
- *    in what order.
- *
- * Conversation loop: utterance ends → (debounce for follow-ons) → history →
- * Claude streaming → deltas feed TTS (physics gates playback; barge-in
- * aborts both playback AND the model stream, and so does a reply the player
- * can't play) → interruption and failure reports edit the message and
- * annotate history so the model knows what the room heard.
- *
  * Usage (from discord-mcpl/):
  *   env $(grep -v '^#' .env.voice-test | xargs) ./node_modules/.bin/tsx \
  *     scripts/voice-chat.ts --guild <id> --vc <id> [--voice Opus4] [--model claude-sonnet-4-5]
@@ -50,11 +27,8 @@ if (!TOKEN || !ELEVEN || !REGISTRY || !GUILD || !VC) {
   console.error('missing env/args'); process.exit(1);
 }
 
-/** Silence gap that ends a spoken utterance (audio-flow based). */
 const UTTERANCE_END_MS = 900;
-/** Wait after an utterance ends before responding (follow-on grace). */
 const TURN_DEBOUNCE_MS = 1200;
-/** Min interval between Discord message edits (rate-limit hygiene). */
 const EDIT_INTERVAL_MS = 1500;
 
 const SYSTEM = `You are ${VOICE_NAME}, speaking OUT LOUD in a Discord voice channel via TTS, \
@@ -73,7 +47,7 @@ that playback of your last reply failed, or that it couldn't be played, means th
 heard your reply up to where the note's quote ends, or nothing.`;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
-const anthropic = new Anthropic(); // ANTHROPIC_API_KEY from env
+const anthropic = new Anthropic();
 
 client.once('ready', async () => {
   console.log(`[chat] logged in as ${client.user?.tag}, model ${MODEL}`);
@@ -87,10 +61,9 @@ client.once('ready', async () => {
   const out = new VoiceOutput({ textChannels: null }, tts, voice, sink);
   const stt = new ScribeSttProvider(ELEVEN);
 
-  // Voice channels ARE text channels — post the transcript trail right there.
+  // A Discord voice channel has its own text chat, so the transcript goes there.
   const chat = (await client.channels.fetch(VC)) as TextBasedChannel & { send: (m: string) => Promise<import('discord.js').Message> };
 
-  // ── Rate-limited message editor ─────────────────────────────────────────
   function makeEditor(msg: import('discord.js').Message) {
     let last = 0; let pending: string | null = null; let timer: ReturnType<typeof setTimeout> | null = null;
     const flush = () => {
@@ -111,30 +84,20 @@ client.once('ready', async () => {
     };
   }
 
-  // ── Conversation state ──────────────────────────────────────────────────
   const history: Anthropic.MessageParam[] = [];
   let pendingUserLines: string[] = [];
-  // Notes for the model's next turn that don't start one: a turn prompted by
-  // "your reply couldn't be played" would likely fail the same way, and the
-  // harness would loop on model calls.
   let pendingNotes: string[] = [];
   let turnTimer: ReturnType<typeof setTimeout> | null = null;
   let respNum = 0;
   let activeStream: { abort: () => void; id: string } | null = null;
-  // Bot utterance accounting: id → { editor, fullText }
   const botMsgs = new Map<string, { editor: ReturnType<typeof makeEditor>; fullText: string }>();
-  // History keeps what the room heard. A reply that ends short (interrupted,
-  // or couldn't be played) while the model is still generating it leaves
-  // the heard part here, for respond() to write instead of the whole reply;
-  // one that ends short after its turn is written rewrites that turn.
   const heardOnly = new Map<string, string>();
   const turns = new Map<string, Anthropic.MessageParam>();
 
-  // ── Listening leg: per-speaker Scribe sessions, transmission-bounded ────
   interface Listener {
     stt: SttSession;
     editor: ReturnType<typeof makeEditor> | null;
-    texts: Map<string, string>; // utteranceId → latest text
+    texts: Map<string, string>;
     lastAudio: number;
     closer: ReturnType<typeof setInterval>;
     speaker: SpeakerInfo;
@@ -153,7 +116,6 @@ client.once('ready', async () => {
       const text = utteranceText(l);
       if (!text) return;
       if (!l.editor) {
-        // Post-on-start: ordering anchor for the room.
         chat.send(`🎙️ **${speaker.username ?? speaker.userId}**: …`)
           .then((m) => { l.editor = makeEditor(m); l.editor.edit(`🎙️ **${speaker.username ?? speaker.userId}**: ${text}`); })
           .catch(() => {});
@@ -189,13 +151,12 @@ client.once('ready', async () => {
   }
 
   sink.onSpeakerAudio((speaker, pcm48kStereo) => {
-    if (speaker.bot) return; // v1: transcribe humans; bots post their own text
+    if (speaker.bot) return;
     const l = listeners.get(speaker.userId) ?? openListener(speaker);
     l.lastAudio = Date.now();
     l.stt.sendAudio(downmixStereoToMono(pcm48kStereo));
   });
 
-  // ── Speaking leg: Claude streaming → TTS under physics ─────────────────
   function scheduleTurn(): void {
     if (turnTimer) clearTimeout(turnTimer);
     turnTimer = setTimeout(() => { turnTimer = null; void respond(); }, TURN_DEBOUNCE_MS);
@@ -203,7 +164,7 @@ client.once('ready', async () => {
 
   async function respond(): Promise<void> {
     if (pendingUserLines.length === 0) return;
-    if (activeStream) return; // still talking; new speech will barge in and re-schedule
+    if (activeStream) return;
     const userText = [...pendingNotes, ...pendingUserLines].join('\n');
     pendingNotes = [];
     pendingUserLines = [];
@@ -237,13 +198,8 @@ client.once('ready', async () => {
       if (final.stop_reason === 'refusal') console.log('[chat] model refused');
       console.log(`[said→queue] ${full.slice(0, 100)}…`);
     } catch (err) {
-      // Aborted (barge-in, or a reply that couldn't be played) or API error.
       if (!(err as Error).message?.includes('abort')) console.error('[chat] stream error:', (err as Error).message);
     } finally {
-      // History gets what the room heard: the heard part if the utterance
-      // has already ended short, else the whole reply, which the utterance
-      // report below rewrites if it ends short later. A stream that failed
-      // before any text leaves no turn.
       const heard = heardOnly.get(id);
       heardOnly.delete(id);
       if (heard !== undefined) {
@@ -255,12 +211,10 @@ client.once('ready', async () => {
       }
       out.handleComplete(id);
       activeStream = null;
-      // Anything said while we were generating gets answered now.
       if (pendingUserLines.length) scheduleTurn();
     }
   }
 
-  // ── Utterance accounting → chat message + history truth ────────────────
   out.onReport((r) => {
     const entry = botMsgs.get(r.inferenceId);
     botMsgs.delete(r.inferenceId);
@@ -270,11 +224,7 @@ client.once('ready', async () => {
       if (entry) entry.editor.final(`🔊 **${VOICE_NAME}**: ${entry.fullText}`);
       return;
     }
-    // Interrupted, or the player couldn't play it ('expired' needs a
-    // maxHoldMs, which this harness doesn't set): the room heard only
-    // r.voicedText. Rewrite history so the model knows that.
     if (activeStream?.id === r.inferenceId) {
-      // Still generating: stop the model; respond() writes what was heard.
       heardOnly.set(r.inferenceId, r.voicedText);
       activeStream.abort();
     } else if (turn) {

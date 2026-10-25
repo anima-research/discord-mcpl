@@ -1,20 +1,3 @@
-/**
- * Tests for the Discord filters plane state + reaction suppression
- * (issue #21, folded per PR #13's architecture review).
- *
- * The invariant: a suppressed reaction leaves no glyph, name, or token in
- * any model-visible output — event text, event ids, history snapshots,
- * status, warnings, logs — while raw Discord state is untouched.
- *
- * Staleness is a property of the PLANE, not of any one key: guild/DM
- * whitelists and the suppression key go stale together when the desired
- * state on disk is unparseable or missing, and the plane status reports
- * desired-vs-effective for all of them. The deprecated
- * DISCORD_SUPPRESS_REACTION_EMOJIS env is process-static (snapshotted at
- * construction; changing a running process's environment from outside is
- * not a thing, so no hot-apply is claimed).
- */
-
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { writeFileSync, mkdtempSync, rmSync, readFileSync, statSync, existsSync } from 'node:fs';
@@ -35,7 +18,7 @@ import { toDmDescriptor } from '../src/channels.js';
 import type { DiscordAdapter, ReactionSummary } from '../src/discord-adapter.js';
 
 const SUPPRESSED_UNICODE = '🛑';
-const SUPPRESSED_VARIANT = '☣️'; // VS-16 form; bare '☣' must match too
+const SUPPRESSED_VARIANT = '☣️';
 const SUPPRESSED_BARE = '☣';
 const SUPPRESSED_CUSTOM_ID = '111222333444555666';
 const ENV_ONLY_GLYPH = '🧪';
@@ -55,7 +38,6 @@ function summary(emoji: string, emojiId: string | null = null): ReactionSummary 
   return { emoji, emojiId, token: emojiId ? `<:x:${emojiId}>` : emoji, count: 2, me: false };
 }
 
-/** Capture console.error lines for glyph-leak assertions. */
 function captureStderr(): { lines: string[]; restore: () => void } {
   const lines: string[] = [];
   const orig = console.error;
@@ -201,7 +183,7 @@ describe('DiscordFiltersState — suppression', () => {
       const warnings = cap.lines.filter((l) => l.includes('IGNORED'));
       assert.equal(warnings.length, 1, 'ignored-env warning fires once');
       assert.ok(!warnings[0].includes(ENV_ONLY_GLYPH), 'warning is glyph-free');
-      st.suppressionStatus(); // repeated status must not re-warn
+      st.suppressionStatus();
       assert.equal(cap.lines.filter((l) => l.includes('IGNORED')).length, 1);
     } finally {
       cap.restore();
@@ -210,7 +192,7 @@ describe('DiscordFiltersState — suppression', () => {
 
   it('legacy env source: emergency-filter matching, deprecated status', () => {
     const st = fileState({ legacyEnv: `${ENV_ONLY_GLYPH}, ${SUPPRESSED_CUSTOM_ID}` });
-    st.applyParsed({ guildIds: ['999888777666555444'] }); // file exists, no key
+    st.applyParsed({ guildIds: ['999888777666555444'] });
     assert.equal(st.isSuppressed({ emoji: ENV_ONLY_GLYPH }), true);
     assert.equal(st.isSuppressed({ emoji: ':x:', emojiId: SUPPRESSED_CUSTOM_ID }), true, 'numeric token matches by id');
     assert.equal(st.isSuppressed({ emoji: SUPPRESSED_CUSTOM_ID }), true, 'numeric token keeps its literal match');
@@ -226,9 +208,7 @@ describe('DiscordFiltersState — suppression', () => {
     const st = new DiscordFiltersState({ fileConfigured: true });
     st.applyParsed({});
     assert.equal(st.isSuppressed({ emoji: ENV_ONLY_GLYPH }), true);
-    // Mutating the process env after construction changes nothing — the
-    // source is a startup snapshot, exactly like a real external edit to
-    // the environment of a running process (which cannot happen at all).
+    // A running process's environment can't be changed from outside it, so the source is read once, at startup.
     process.env.DISCORD_SUPPRESS_REACTION_EMOJIS = HARMLESS;
     assert.equal(st.isSuppressed({ emoji: ENV_ONLY_GLYPH }), true, 'snapshot still enforced');
     assert.equal(st.isSuppressed({ emoji: HARMLESS }), false, 'new env value not picked up');
@@ -238,7 +218,7 @@ describe('DiscordFiltersState — suppression', () => {
     const st = fileState({ legacyEnv: ENV_ONLY_GLYPH });
     st.applyParsed(withKey());
     assert.equal(st.isSuppressed({ emoji: ENV_ONLY_GLYPH }), false);
-    st.applyParsed({ guildIds: ['999888777666555444'] }); // operator removed the key
+    st.applyParsed({ guildIds: ['999888777666555444'] });
     assert.equal(st.isSuppressed({ emoji: ENV_ONLY_GLYPH }), true, 'env resumes when the key is gone');
     assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'file entries no longer enforced');
     assert.equal(st.suppressionStatus().source, 'legacy-env');
@@ -347,7 +327,7 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
 
   it('absent key → baseline applies, source baseline-default, not deprecated', () => {
     const st = baselineState();
-    st.applyParsed({ guildIds: ['999888777666555444'] }); // file exists, no key
+    st.applyParsed({ guildIds: ['999888777666555444'] });
     assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), true);
     assert.equal(st.isSuppressed({ emoji: ':x:', emojiId: SUPPRESSED_CUSTOM_ID }), true);
     const rs = st.suppressionStatus();
@@ -368,7 +348,7 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
 
   it('explicit nonempty key → exact operator set, baseline entries not unioned in', () => {
     const st = baselineState();
-    st.applyParsed({ suppressedReactionEmojis: [HARMLESS] }); // operator set ≠ baseline
+    st.applyParsed({ suppressedReactionEmojis: [HARMLESS] });
     assert.equal(st.isSuppressed({ emoji: HARMLESS }), true, 'operator entries enforced exactly');
     assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'baseline entry must NOT ride along');
     assert.equal(st.suppressionStatus().source, 'file');
@@ -383,9 +363,6 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
   });
 
   it('legacy env PRESENCE beats the baseline even when its parsed list is empty', () => {
-    // The emergency filter treated an explicitly-empty env as OFF; the
-    // baseline must not reappear underneath an operator's off switch —
-    // presence is tested separately from token count (Sol's edge).
     for (const emptyish of ['', ' , ,, ']) {
       const st = baselineState({ legacyEnv: emptyish });
       st.applyParsed({});
@@ -396,15 +373,12 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
       assert.equal(rs.deprecated, true);
       assert.equal(rs.protectionActive, false);
     }
-    // Present-but-empty with no baseline to override: historically
-    // identical to unset, and reported that way.
     const stNoBaseline = new DiscordFiltersState({ fileConfigured: true, legacyEnv: '', baselineEnv: undefined });
     stNoBaseline.applyParsed({});
     assert.equal(stNoBaseline.suppressionStatus().status, 'not-configured');
   });
 
   it('lost configuration never silently degrades back to baseline', () => {
-    // A file that HAD a key and broke: stale LKG, not baseline.
     const st = baselineState();
     st.applyParsed({ suppressedReactionEmojis: [HARMLESS] });
     st.markBroken('missing');
@@ -412,8 +386,6 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
     assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'baseline does NOT resurrect');
     assert.equal(st.suppressionStatus().status, 'stale');
 
-    // A file whose operator explicitly chose none, then broke: fail
-    // closed — the baseline must not un-choose that either.
     const stEmpty = baselineState();
     stEmpty.applyParsed({ suppressedReactionEmojis: [] });
     stEmpty.markBroken('invalid');
@@ -422,7 +394,7 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
 
   it('baseline continues under a broken plane when it was already the source', () => {
     const st = baselineState();
-    st.applyParsed({ guildIds: ['999888777666555444'] }); // running on baseline
+    st.applyParsed({ guildIds: ['999888777666555444'] });
     st.markBroken('invalid');
     assert.equal(st.suppressAll(), false);
     assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), true, 'the process-static baseline is unaffected by file failures');
@@ -818,8 +790,6 @@ describe('suppression baseline drift diagnostics', () => {
 
 describe('server integration', () => {
   function makeServer(): DiscordMcplServer {
-    // The server's filters state reads DISCORD_FILTERS_FILE at
-    // construction to know a file plane is configured.
     process.env.DISCORD_FILTERS_FILE ??= join(dir, 'filters.json');
     return new DiscordMcplServer({} as DiscordAdapter);
   }
@@ -885,7 +855,6 @@ describe('server integration', () => {
     return { handler: reactionHandler!, sent };
   }
 
-  /** Register a channel with the server, as a message from it would. */
   function registerChannel(server: DiscordMcplServer, descriptor: unknown): void {
     (server as unknown as { channelManager: { register(d: unknown): void } }).channelManager.register(descriptor);
   }
@@ -975,7 +944,6 @@ describe('server integration', () => {
     s.discord = { getFilters: () => ({}) };
     const call = (s.executeToolCall as (name: string, args: Record<string, unknown>) => Promise<unknown>).bind(server);
 
-    // not-configured
     server.filtersState.applyParsed({});
     let res = (await call('filters_get', {})) as {
       plane: Record<string, unknown>;
@@ -986,12 +954,10 @@ describe('server integration', () => {
     assert.equal(res.reactionSuppression.writable, false);
     assert.ok(String(res.reactionSuppression.whyNotWritable).length > 0, 'observe-only says why and what changes it');
 
-    // configured-empty ≠ not-configured
     server.filtersState.applyParsed({ suppressedReactionEmojis: [] });
     res = (await call('filters_get', {})) as typeof res;
     assert.equal(res.reactionSuppression.status, 'configured-empty');
 
-    // active, redacted
     server.filtersState.applyParsed(withKey());
     res = (await call('filters_get', {})) as typeof res;
     assert.equal(res.reactionSuppression.status, 'active');
@@ -1000,7 +966,6 @@ describe('server integration', () => {
       assert.ok(!blob.includes(secret), 'filters_get never echoes a suppressed entry');
     }
 
-    // stale ≠ unavailable, and the plane carries the desired-state fact
     server.filtersState.markBroken('invalid');
     res = (await call('filters_get', {})) as typeof res;
     assert.equal(res.plane.status, 'stale');
@@ -1014,7 +979,6 @@ describe('server integration', () => {
       getFilters: () => ({}),
       updateFilters: () => ({ addedGuilds: [], removedGuilds: [] }),
       listGuilds: async () => [],
-      // A filters change re-derives the registered channels: none here.
       getCachedChannelFactsFor: () => new Map(),
     };
   }
@@ -1052,7 +1016,6 @@ describe('server integration', () => {
     const s = server as unknown as Record<string, unknown>;
     server.filtersState.applyParsed(loadFiltersFile(path)!);
 
-    // Operator adds an entry on disk; the 3s poller hasn't fired yet.
     const grown = [...FILE_TOKENS, ENV_ONLY_GLYPH];
     writeFileSync(path, JSON.stringify(withKey(grown)));
 
@@ -1077,7 +1040,6 @@ describe('server integration', () => {
     const s = server as unknown as Record<string, unknown>;
     server.filtersState.applyParsed(loadFiltersFile(path)!);
 
-    // The operator's file breaks (or a bad deploy corrupts it):
     writeFileSync(path, '{broken');
     stubAdapter(s);
     const call = (s.executeToolCall as (name: string, args: Record<string, unknown>) => Promise<unknown>).bind(server);
@@ -1107,10 +1069,6 @@ describe('server integration', () => {
     assert.equal(existsSync(path), false, 'no file was recreated from process memory');
   });
 
-  // Shared line-transcript renderer (issue #31): the missed sweep and the
-  // first-interaction backscroll render current NET state through the same
-  // projection as every other surface.
-
   function renderer(server: DiscordMcplServer): (r?: ReactionSummary[]) => string {
     const s = server as unknown as { renderReactionState(r?: ReactionSummary[]): string };
     return s.renderReactionState.bind(s);
@@ -1135,7 +1093,6 @@ describe('server integration', () => {
     const server = makeServer();
     server.filtersState.applyParsed(withKey());
     const render = renderer(server);
-    // Projection policy: the model must not learn these exist — indistinguishable from "no reactions".
     assert.equal(render([summary(SUPPRESSED_UNICODE)]), '');
     assert.equal(render([]), '');
   });
