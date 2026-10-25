@@ -8,8 +8,6 @@ export interface ChannelCandidate {
   name: string;
   guildId: string;
   guildName: string;
-  /** A stock Discord server ships a voice channel named "General" beside text
-   *  #general, and matching is case-insensitive. */
   type: 'text' | 'announcement' | 'voice' | 'stage' | 'forum' | 'unknown';
 }
 
@@ -17,14 +15,14 @@ export function formatChannelLabel(name: string, guildName: string): string {
   return `#${name} (${guildName})`;
 }
 
-/**
- * A voice or stage channel's name may hold spaces and `›`, so a voice room
- * named `general › design-chat` would match a thread label as a name.
- */
 export function formatThreadLabel(parentName: string | null | undefined, threadName: string, guildName: string): string {
   return `${parentName ? `#${parentName} ` : ''}› ${threadName} (${guildName})`;
 }
 
+/**
+ * A voice or stage channel's name may hold spaces and `›`, so a voice room
+ * named `general › design-chat` would match a thread label as a name.
+ */
 export function isThreadLabelShape(name: string): boolean {
   return /(?:^|\s)›\s/.test(name);
 }

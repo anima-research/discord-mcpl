@@ -454,7 +454,8 @@ const IMAGE_JPEG_QUALITY = 85;
  *  10 MB on its own API; base64 adds a third, so this raw cap stays under the
  *  smaller limit. */
 const IMAGE_OUTPUT_RAW_CAP = 3.5 * 1024 * 1024;
-/** sharp's own pixel limit guards the decoded bitmap against decompression bombs. */
+/** sharp's own pixel limit, not this cap, guards the decoded bitmap against
+ *  decompression bombs. */
 const IMAGE_FETCH_CEILING = 25 * 1024 * 1024;
 
 const MAX_TEXT_BYTES = 256 * 1024;

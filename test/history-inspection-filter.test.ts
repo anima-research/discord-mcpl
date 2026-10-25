@@ -1,7 +1,6 @@
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import type { Client } from 'discord.js';
-import { ERR_CHANNEL_OPEN_FAILED } from '@animalabs/mcpl-core';
 import { DiscordAdapter, mapAllAttachments, type DiscordAdapterConfig } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
 import { mcplChannelId, toDescriptor } from '../src/channels.js';
@@ -223,7 +222,7 @@ describe('channels/open backscroll', () => {
       await assert.rejects(
         server.handleChannelOpen({ channelId: mcplChannelId(G1, id), type: 'discord', history: { limit: 20 } }),
         (err: Error & { code?: unknown }) => {
-          assert.equal(err.code, ERR_CHANNEL_OPEN_FAILED, id);
+          assert.equal(err.code, -32024, id);
           assert.match(err.message, /is outside this residence's configured channel filters — filters bound inspection as well as delivery\. Nothing was read\. Nothing was opened\.$/, id);
           return true;
         },
@@ -251,7 +250,7 @@ describe('channels/open backscroll', () => {
     await assert.rejects(
       server.handleChannelOpen({ channelId: mcplChannelId(G1, ALLOWED), type: 'discord', history: { limit: 20 } }),
       (err: Error & { code?: unknown }) => {
-        assert.equal(err.code, ERR_CHANNEL_OPEN_FAILED);
+        assert.equal(err.code, -32024);
         assert.equal(
           err.message,
           `The channel filters stopped admitting ${mcplChannelId(G1, ALLOWED)} while its history was fetched, so none of it is returned. ` +
@@ -268,7 +267,7 @@ describe('channels/open backscroll', () => {
     await assert.rejects(
       server.handleChannelOpen({ channelId: mcplChannelId(G1, LOOKUP_FAILS), type: 'discord', history: { limit: 20 } }),
       (err: Error & { code?: unknown }) => {
-        assert.equal(err.code, ERR_CHANNEL_OPEN_FAILED);
+        assert.equal(err.code, -32024);
         assert.equal(err.message, `${mcplChannelId(G1, LOOKUP_FAILS)} couldn't be checked against the channel filters, so nothing was opened: Unknown Channel`);
         return true;
       },
