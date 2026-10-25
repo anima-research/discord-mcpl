@@ -7,15 +7,11 @@
 
 import type { ContentBlock } from '@animalabs/mcpl-core';
 
-/** A host refusal of one forwarded message. */
 export interface HostRejection {
-  /** The host's reason (result `reason`, or the error message). */
   reason: string;
-  /** The JSON-RPC error code, when the refusal came as an error. */
   code?: number;
 }
 
-/** Outcome of one forwarded message as the host answered it. */
 export type ForwardOutcome =
   | { kind: 'accepted' }
   /** The host answered without a per-message verdict (an older host, or a
@@ -23,12 +19,10 @@ export type ForwardOutcome =
   | { kind: 'no-result' }
   | ({ kind: 'rejected' } & HostRejection);
 
-/** The verdict for `messageId` in a `channels/incoming` response. */
 export function incomingOutcome(response: unknown, messageId: string): ForwardOutcome {
   const results = (response as { results?: unknown } | null | undefined)?.results;
   if (!Array.isArray(results)) return { kind: 'no-result' };
   const mine = results.find((r) => (r as { messageId?: unknown } | null)?.messageId === messageId)
-    // A single-message request whose answer lost its id still answers it.
     ?? (results.length === 1 ? results[0] : undefined);
   if (!mine || typeof mine !== 'object') return { kind: 'no-result' };
   const r = mine as { accepted?: unknown; reason?: unknown };
@@ -39,7 +33,6 @@ export function incomingOutcome(response: unknown, messageId: string): ForwardOu
   return { kind: 'no-result' };
 }
 
-/** The verdict in a `push/event` response. */
 export function pushOutcome(response: unknown): ForwardOutcome {
   const r = response as { accepted?: unknown; reason?: unknown } | null | undefined;
   if (r && r.accepted === true) return { kind: 'accepted' };
@@ -108,31 +101,8 @@ export function isContentRejection(rejection: HostRejection): boolean {
   return rejection.code === -32602 || rejection.reason === 'coalesce_invalid';
 }
 
-/**
- * What an answer to a forwarded occurrence leaves the sender to do, read
- * only from what the MCPL spec defines, never from one host's wording:
- *
- * - `done`: accepted, or answered without a per-message verdict.
- * - `final`: a refusal the spec gives a meaning that resending can't change:
- *   -32602 / `coalesce_invalid` (malformed, RFC-006 §13), every other code
- *   SPEC Appendix A defines but -32023, and JSON-RPC's -32600, -32601 and
- *   -32700. (A permission refusal before the connection's policy is settled
- *   is "not yet": isAuthorityRefusal, sendWithRetries.)
- * - `unknown-channel`: -32023, the host has no such channel registered: the
- *   sender can register it and send the same occurrence again.
- * - `refused`: a refusal the spec gives no meaning: `accepted: false` with a
- *   free-text reason or none, or an error code outside JSON-RPC's reserved
- *   range. The host didn't admit it, so the same occurrence sent again can't
- *   be a duplicate, and as its cause is unknown, it may pass.
- * - `uncertain`: no verdict: no answer (a timeout, a closed connection),
- *   -32603, or another code in JSON-RPC's reserved range that neither it
- *   nor the spec defines (an implementation-defined server error, say). It may have been
- *   admitted, so only the same occurrence may be sent again, which RFC-006
- *   §3.1's retry window makes safe on a coalescing host.
- */
 export type AnswerClass = 'done' | 'final' | 'unknown-channel' | 'refused' | 'uncertain';
 
-/** The refusal codes after which the same occurrence is never sent again. */
 const FINAL_CODES = new Set([
   // JSON-RPC's: invalid request, method not found, invalid params, parse error.
   -32600, -32601, -32602, -32700,
@@ -140,7 +110,6 @@ const FINAL_CODES = new Set([
   ...[...SPEC_SERVER_RANGE_CODES].filter((code) => code !== -32023),
 ]);
 
-/** Of those, the permission refusals (isAuthorityRefusal). */
 const AUTHORITY_CODES = new Set([-32001, -32002, -32017].filter((code) => SPEC_SERVER_RANGE_CODES.has(code)));
 
 /** The spec's permission refusals: feature set not enabled (-32001),
@@ -171,21 +140,15 @@ export function advertisedRetryWindowMs(advertised: unknown): number | undefined
   return typeof w === 'number' && Number.isFinite(w) && w > 0 ? w : undefined;
 }
 
-/** Inline media blocks: an image or audio block that carries its bytes. */
 function isInlineMedia(b: ContentBlock): boolean {
   const block = b as { type?: unknown; data?: unknown };
   return (block.type === 'image' || block.type === 'audio') && typeof block.data === 'string';
 }
 
-/** What a message carried as attachments, for the refusal log line. */
 export interface AttachmentSummary {
-  /** Inline image/audio blocks. */
   inline: number;
-  /** Media types of the inline blocks, e.g. ["image/png"]. */
   kinds: string[];
-  /** Total base64 characters across the inline blocks. */
   inlineBase64Bytes: number;
-  /** JSON size of the whole content array, what a byte budget would count. */
   contentJsonBytes: number;
 }
 
@@ -199,17 +162,10 @@ export function summarizeAttachments(content: ContentBlock[]): AttachmentSummary
   };
 }
 
-/** `n` bytes in KB/MB, as the attachment notes write sizes. */
 function fmtBytes(n: number): string {
   return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : n >= 1024 ? `${Math.round(n / 1024)}KB` : `${n}B`;
 }
 
-/**
- * The content with every inline image/audio block replaced by a text note,
- * so the message's text and the fact that media was attached still reach the
- * agent. The attachment line that follows each inline image (name and link)
- * is kept as it is. `replaced` is 0 when there was nothing to replace.
- */
 export function withoutInlineMedia(content: ContentBlock[]): { content: ContentBlock[]; replaced: number } {
   let replaced = 0;
   const out = content.map((b): ContentBlock => {
@@ -219,8 +175,6 @@ export function withoutInlineMedia(content: ContentBlock[]): { content: ContentB
     // base64 → bytes: 3 bytes per 4 characters.
     const approx = Math.floor((block.data.length * 3) / 4);
     const what = block.type === 'audio' ? 'audio' : 'image';
-    // The host's reason is the operator's (the refusal line on stderr); the
-    // agent is told what it is missing and where to find it.
     return {
       type: 'text',
       text: `[${what} omitted: the host refused this message with the ${what} inline `

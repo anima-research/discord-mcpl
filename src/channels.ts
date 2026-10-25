@@ -1,7 +1,3 @@
-/**
- * MCPL channel management — maps Discord channels to MCPL ChannelDescriptors.
- */
-
 import { ERR_UNKNOWN_CHANNEL, type ChannelDescriptor } from '@animalabs/mcpl-core';
 import type { ChannelFacts } from './discord-adapter.js';
 import { formatChannelLabel, formatThreadLabel, isNameAddressableKind, isThreadLabelShape } from './channel-names.js';
@@ -14,12 +10,10 @@ export type DiscordChannelDescriptor = ChannelDescriptor & {
   };
 };
 
-/** MCPL channel ID format: discord:<guildId>:<channelId> */
 export function mcplChannelId(guildId: string, channelId: string): string {
   return `discord:${guildId}:${channelId}`;
 }
 
-/** Parse an MCPL channel ID back to guildId + channelId. Returns null if not a discord channel. */
 export function parseMcplChannelId(id: string): { guildId: string; channelId: string } | null {
   const parts = id.split(':');
   if (parts.length !== 3 || parts[0] !== 'discord') return null;
@@ -50,9 +44,6 @@ export function channelLabelFor(c: ChannelFacts): string {
   return mcplChannelId(c.guildId, c.id);
 }
 
-/** A guild channel's MCPL descriptor, from what is known of it. Its metadata
- *  carries the names its label was made from, so a reader never has to parse
- *  them back out of a label. */
 export function toDescriptor(
   channel: ChannelFacts,
   initiallyOpen = false,
@@ -79,14 +70,6 @@ export function toDescriptor(
   };
 }
 
-/** Convert a DM channel to an MCPL ChannelDescriptor.
- *
- * DMs have no guild — the id uses the `dm` pseudo-guild segment
- * (`discord:dm:<channelId>`), matching the id handleDiscordMessage forwards
- * events under. Without this descriptor DMs were never registered at all
- * (registration only ran off guild events), so `channel_open` on a DM id
- * could never resolve and DM open/subscription state never stuck
- * (observed on Mythos, 2026-07-18). */
 export function toDmDescriptor(
   channelId: string,
   recipientName: string,
@@ -110,16 +93,11 @@ export function toDmDescriptor(
   };
 }
 
-/** How many candidates an ambiguity refusal lists before summarizing. */
 export const OPEN_CHOICES_SHOWN = 10;
 
 /** JSON-RPC's code for invalid params (MCPL's own codes are mcpl-core's ERR_*). */
 export const INVALID_PARAMS = -32602;
 
-/** A request refused with the JSON-RPC error code its answer carries, so a
- *  host can tell a stale selector (unknown channel) from bad params, an open
- *  that couldn't go ahead, or a fault. Not a fault itself: the server logs it
- *  as one line, without a stack. */
 export class RequestRefusal extends Error {
   constructor(readonly code: number, message: string) {
     super(message);
@@ -127,25 +105,17 @@ export class RequestRefusal extends Error {
   }
 }
 
-/** A caller's value in a refusal: quoted, and cut short past 100 characters,
- *  so an outsized value can't flood the error or the operator log. */
 export function echo(value: string): string {
   return JSON.stringify(value.length > 100 ? `${value.slice(0, 100)}…` : value);
 }
 
-/** A caller's type in a refusal: as is when it's a plain word, such as
- *  `discord`, else echoed. */
 export function typeName(type: string): string {
   return /^[a-z][\w.-]{0,39}$/i.test(type) ? type : echo(type);
 }
 
-/** What a channels/open request names, read against the registry. */
 export type OpenTarget =
   | { kind: 'registered'; channel: ChannelDescriptor }
-  /** An exact selector naming a well-formed id the registry doesn't hold:
-   *  the server looks it up in Discord (see DiscordMcplServer.openTarget). */
   | { kind: 'unregistered'; id: string; via: string }
-  /** Refused, with the JSON-RPC error code the answer carries. */
   | { kind: 'refused'; code: number; reason: string };
 
 /**
@@ -219,15 +189,9 @@ export function resolveOpenTarget(
   );
 }
 
-/**
- * Tracks which channels are registered (known to host) and which are open
- * (host has explicitly opened them for bidirectional message flow).
- */
 export class ChannelManager {
-  /** All registered channel descriptors, keyed by MCPL channel ID. */
   private registered = new Map<string, ChannelDescriptor>();
 
-  /** Set of open channel IDs (subset of registered). */
   private openChannels = new Set<string>();
 
   registerAll(descriptors: ChannelDescriptor[]): void {
@@ -253,7 +217,6 @@ export class ChannelManager {
     return desc;
   }
 
-  /** Open a channel by Discord guildId + channelId. Returns the descriptor if found. */
   openByDiscordId(guildId: string, channelId: string): ChannelDescriptor | undefined {
     const id = mcplChannelId(guildId, channelId);
     return this.open(id);
@@ -267,7 +230,6 @@ export class ChannelManager {
     return this.openChannels.has(id);
   }
 
-  /** Check if a Discord channel (by guildId:channelId) has an open MCPL channel. */
   isDiscordChannelOpen(guildId: string, channelId: string): boolean {
     return this.openChannels.has(mcplChannelId(guildId, channelId));
   }

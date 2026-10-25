@@ -1,57 +1,4 @@
 #!/usr/bin/env node
-/**
- * Discord MCPL server — CLI entry point.
- *
- * Usage:
- *   discord-mcpl --stdio           # MCP-compatible stdio transport
- *   discord-mcpl --tcp <port>      # TCP transport for MCPL hosts
- *
- * Environment:
- *   DISCORD_TOKEN     - Required: Discord bot token
- *   DISCORD_GUILD_ID  - Optional: Comma-separated guild ID filter. Each entry
- *                       is `guildId` (all channels) or `guildId:chanId+chanId`
- *                       (whitelist those channels + their threads only)
- *   DISCORD_DM_USERS  - Optional: Comma-separated user ID whitelist for DMs.
- *                       Nonempty = only listed users; empty/unset = anyone.
- *                       A refused DM is never forwarded. The agent can turn
- *                       on an automatic delivery notice to its sender (off
- *                       by default; filters_update setDmNotice), sent at
- *                       most once per 24 hours per sender and 10 an hour
- *                       across all senders.
- *   DISCORD_DM_NOTICES_FILE - Optional: where that notice's durable state
- *                       lives (per-sender limits and the on/off setting; no
- *                       message bodies). Default:
- *                       $XDG_STATE_HOME/discord-mcpl/<bot user id>/dm-notices.json
- *                       (~/.local/state when XDG_STATE_HOME is unset). If it
- *                       can't be read or written, notices are suspended.
- *   DISCORD_ADMIN_USERS - Optional: Comma-separated user IDs allowed to use
- *                       admin slash commands (/undo). Unset = nobody.
- *   DISCORD_FILTERS_FILE - Optional: path to a JSON file holding the guild/
- *                       channel + DM whitelists and the operator-maintained
- *                       suppressedReactionEmojis list (see filters.ts for
- *                       schema). When set, the file wins over
- *                       DISCORD_GUILD_ID / DISCORD_DM_USERS (and is seeded
- *                       from them if absent), and edits to it are
- *                       HOT-RELOADED within ~3s — no restart. Also enables
- *                       the filters_get/filters_update agent tools.
- *   DISCORD_SUPPRESS_REACTION_EMOJIS - Deprecated compat source for
- *                       reaction suppression (comma-separated). Seeds the
- *                       filters file's suppressedReactionEmojis key on
- *                       first materialization; ignored once a filters file
- *                       carries the key. Process-static: read once at
- *                       startup, changes require a restart (hot reload
- *                       belongs to the file plane). Retires per issue #16.
- *   DISCORD_SUPPRESSED_REACTIONS_BASELINE - Host-injected protective
- *                       baseline for reaction suppression (comma-
- *                       separated). Applies (and seeds the filters file on
- *                       first materialization) only when no operator
- *                       configuration exists: a file key — including an
- *                       explicit [] — or the legacy env above always wins,
- *                       never unioned. Intended to be set by host
- *                       composition from the Agent Framework's annotation
- *                       map; standalone deployments leave it unset.
- *                       Process-static, not deprecated.
- */
 
 import * as net from 'node:net';
 import { McplConnection } from '@animalabs/mcpl-core';
@@ -81,14 +28,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Event filters: env vars are the seed; DISCORD_FILTERS_FILE (when set)
-  // becomes the live source of truth and is hot-reloaded below. Seeding
-  // happens only when the file is genuinely absent — an existing file that
-  // fails to parse is left untouched (see resolveStartupFilters).
   const filtersFile = process.env.DISCORD_FILTERS_FILE;
   const { filters, fileBroken: filtersFileBroken } = resolveStartupFilters(filtersFile);
 
-  // Connect Discord first
   const discord = new DiscordAdapter({
     token,
     guildIds: filters.guildIds,
@@ -123,35 +65,14 @@ async function main(): Promise<void> {
   }
 
   const server = new DiscordMcplServer(discord, voice);
-  // Refused DMs are handled from here on, whether or not a host is connected
-  // (TCP mode waits for its first client): each gets its notice decision and
-  // operator log line. Discord connected earlier, so the adapter has held
-  // the refusals it heard since then, and hands them over here. A new notice
-  // state's floor is the moment the state is created, here once the bot
-  // user id is known, so a held refusal from before it gets no notice, only
-  // its log line.
   await server.setupDmRefusals();
 
-  // The filters plane state (whitelists + reaction suppression share one
-  // desired/effective/status lifecycle): hand it the startup filters, or
-  // the failure if the file was broken before anything good was ever
-  // loaded — which fails closed for reactions; see DiscordFiltersState.
   if (filtersFileBroken) {
     server.filtersState.markBroken('invalid');
   } else {
     server.filtersState.applyParsed(filters);
   }
 
-  // Hot-reload: poll the filters file and apply changes live. Covers edits
-  // from any source (human, ops tooling, the filters_update tool — which
-  // also applies its change directly, so the poller's re-apply finds
-  // nothing new). Parse failures keep the previous filters (fail-safe)
-  // and mark the whole plane's desired state invalid. A file missing for
-  // two consecutive polls (one poll of grace for non-atomic editors) marks
-  // the plane 'missing' — a deleted desired config must never keep
-  // reporting as healthy — and a reappearing file force-reloads even with
-  // a preserved mtime (restored backups can carry different bytes under
-  // identical timestamps).
   if (filtersFile) {
     const tracker = new FiltersFilePollTracker(filtersFileMtime(filtersFile));
     const poll = setInterval(() => {
@@ -195,10 +116,8 @@ async function main(): Promise<void> {
   if (useStdio) {
     // Log to stderr: stdout is the protocol channel.
     console.error('[discord-mcpl] Starting on stdio');
-    // Exits once the host closes stdin or the connection otherwise ends.
     await serveStdio(server, McplConnection.fromStreams(process.stdin, process.stdout));
   } else if (tcpPort) {
-    // TCP transport — single client
     console.error(`[discord-mcpl] Listening on TCP port ${tcpPort}`);
     const tcpServer = net.createServer();
     tcpServer.listen(tcpPort, '127.0.0.1');
@@ -206,7 +125,6 @@ async function main(): Promise<void> {
     // A failure to listen (the port taken) emits 'error' with no listener yet, which ends the process, as it should.
     await new Promise<void>((resolve) => tcpServer.once('listening', resolve));
 
-    // One client at a time, for as long as the process runs.
     serveTcp(tcpServer, (conn) => server.serve(conn));
   }
 }

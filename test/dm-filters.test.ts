@@ -1,7 +1,3 @@
-/**
- * Issue #26: empty env values must allow DMs, and contacts can change through
- * the existing filters file/tool without replacing the running adapter.
- */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -100,8 +96,6 @@ describe('DM contacts through the existing filters file and tool', () => {
     f.send('user-1');
 
     writeFileSync(path, JSON.stringify({ dmUsers: ['user-2'] }));
-    // Exercise the poller's load/apply components directly, rather than
-    // the index.ts interval timer. The adapter stays live throughout.
     const next = loadFiltersFile(path);
     assert.ok(next);
     f.adapter.updateFilters(next);

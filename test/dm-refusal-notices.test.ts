@@ -1,8 +1,3 @@
-/**
- * Refused DMs: the sender gets one automatic delivery notice, the agent gets
- * nothing, and the reconnect catch-up sweep applies the same ingress decision
- * as live delivery.
- */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
@@ -13,11 +8,6 @@ import { DM_REFUSALS_HELD, DiscordAdapter, type DmRefusal } from '../src/discord
 import { DiscordMcplServer } from '../src/server.js';
 import { DM_NOTICE_TEXT, snowflakeAt } from '../src/dm-notices.js';
 
-/** A message id Discord could assign right now (plus an increment), and
- *  never one this file handed out before: two calls in one millisecond would
- *  otherwise collide, and the second message would count as already handled.
- *  Call it after the harness exists: the notice state's floor is set when it
- *  opens. */
 let lastFreshId = 0n;
 const freshId = (n = 0) => {
   const id = BigInt(snowflakeAt(Date.now())) + BigInt(n);
@@ -34,12 +24,9 @@ const historyMessage = (id: string, authorId: string, text: string, mentionsBot 
   attachments: [], mentionsBot, timestamp: new Date(), reactions: [],
 });
 
-// Harnesses capture console.error; every one restores the real one, so two
-// harnesses alive in one test (a restart) can't leave a stale capture behind.
 const REAL_CONSOLE_ERROR = console.error;
 
 type ChannelMeta = { name: string | null; guildId: string | null; guildName: string | null; isDM: boolean };
-/** What the server hands back for one refusal (see handleDmRefusal). */
 type Refusal = { decided: Promise<unknown>; settled: Promise<void> };
 
 async function harness(t: TestContext, opts: {
@@ -51,21 +38,11 @@ async function harness(t: TestContext, opts: {
   history?: (channelId: string) => Promise<HistoryMessage[]>;
   meta?: (channelId: string) => ChannelMeta | null;
   noticesFile?: 'fresh' | 'unwritable';
-  /** Reuse a notice-state path, to model a restart. */
   noticesPath?: string;
-  /** 'on' (the default here) turns notices on at startup, as a resident
-   *  would; 'as-saved' leaves the state's own setting, which is off in a
-   *  new state. */
   notices?: 'on' | 'as-saved';
-  /** Use the adapter's real channel-metadata helpers instead of stubs. */
   realMeta?: boolean;
-  /** Send notices through the adapter's real sendDmNotice. */
   realSend?: boolean;
-  /** Start as index.ts does but connect no host, as in TCP mode before its
-   *  first client: no host connection and no message forwarding. */
   noHost?: boolean;
-  /** Runs once Discord's client exists and before the server handles
-   *  refusals, as when Discord reports refusals before index.ts gets there. */
   beforeRefusals?: (emit: (authorId: string, opts?: { id?: string; channelId?: string }) => void) => void;
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dm-refusal-'));
@@ -76,7 +53,6 @@ async function harness(t: TestContext, opts: {
   const noticesDir = join(dir, 'notices');
   process.env.DISCORD_DM_NOTICES_FILE = opts.noticesPath ?? join(noticesDir, 'dm-notices.json');
   if (opts.noticesFile === 'unwritable') {
-    // A directory where the file should be: it can be neither read nor written.
     rmSync(noticesDir, { recursive: true, force: true });
     writeFileSync(noticesDir, 'not a directory');
   }
@@ -92,7 +68,7 @@ async function harness(t: TestContext, opts: {
     client.destroy();
     if (env.wm === undefined) delete process.env.DISCORD_WATERMARK_FILE; else process.env.DISCORD_WATERMARK_FILE = env.wm;
     if (env.notices === undefined) delete process.env.DISCORD_DM_NOTICES_FILE; else process.env.DISCORD_DM_NOTICES_FILE = env.notices;
-    try { chmodSync(dir, 0o700); } catch { /* ignore */ }
+    try { chmodSync(dir, 0o700); } catch { }
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -137,7 +113,6 @@ async function harness(t: TestContext, opts: {
     handleDmRefusal(ev: DmRefusal): Refusal;
     forwardedWatermark: Map<string, string>;
   };
-  // Keep what each refusal hands back, so a test can wait for it.
   const refusals: Refusal[] = [];
   const handle = server.handleDmRefusal.bind(server);
   server.handleDmRefusal = (ev: DmRefusal) => {
@@ -152,8 +127,6 @@ async function harness(t: TestContext, opts: {
         pushes.push(params as (typeof pushes)[number]);
         return {};
       },
-      // A real connection has both. The server announces registrations
-      // (channels/changed) as notifications, which these tests don't inspect.
       sendNotification: () => {},
     };
     server.mcplEnabled = true;
@@ -161,15 +134,10 @@ async function harness(t: TestContext, opts: {
     server.setupDiscordForwarding();
   }
   opts.beforeRefusals?.(emit);
-  // As index.ts does at startup: refusals are handled from here on, and the
-  // notice state's floor predates the sweep.
   await server.setupDmRefusals();
-  // Notices are off in a new notice state; most tests here are about what
-  // happens once a resident has turned them on.
   if ((opts.notices ?? 'on') === 'on' && opts.noticesFile !== 'unwritable') {
     await server.filtersUpdate({ setDmNotice: true });
   }
-  // Record what the adapter hands the server, then let the server handle it.
   const toServer = (adapter as unknown as { messageHandler?: (m: { authorId: string; content: string }) => void }).messageHandler;
   (adapter as unknown as { messageHandler: (m: { authorId: string; content: string }) => void }).messageHandler = (m) => {
     delivered.push(`${m.authorId}:${m.content}`);
@@ -178,9 +146,7 @@ async function harness(t: TestContext, opts: {
   const tick = () => new Promise((resolve) => setImmediate(resolve));
   return {
     adapter, client, server, emit, delivered, pushes, notices, logs,
-    /** Wait until every refusal so far is decided: a notice due is reserved. */
     decided: async () => { await tick(); await Promise.all(refusals.map((r) => r.decided)); },
-    /** Wait until every refusal so far is handled, its log line written. */
     settle: async () => { await tick(); await Promise.all(refusals.map((r) => r.settled)); },
     failNoticesWith: (err: Error | null) => { noticeError = err; },
     noticesPath: process.env.DISCORD_DM_NOTICES_FILE!,
@@ -222,7 +188,7 @@ describe('live refusals', () => {
     t.after(() => rmSync(keep, { recursive: true, force: true }));
     const noticesPath = join(keep, 'dm-notices.json');
     const first = await harness(t, { dmUsers: ['friend'], noticesPath });
-    (first.adapter as unknown as Record<string, unknown>).sendDmNotice = () => new Promise(() => {}); // never settles
+    (first.adapter as unknown as Record<string, unknown>).sendDmNotice = () => new Promise(() => {});
     first.emit('stranger', { id: freshId(1) });
     await first.decided();
     assert.equal(JSON.parse(readFileSync(noticesPath, 'utf-8')).senders.stranger.lastNotice.outcome, 'pending');
@@ -242,7 +208,7 @@ describe('live refusals', () => {
     const id = freshId(7);
     h.emit('stranger', { id });
     await h.settle();
-    h.emit('stranger', { id }); // the same gateway event again
+    h.emit('stranger', { id });
     await h.settle();
     assert.deepEqual(h.delivered, ['friend:hi', 'anyone:in a guild']);
     assert.equal(h.notices.length, 1);
@@ -263,14 +229,14 @@ describe('live refusals', () => {
     t.after(() => rmSync(keep, { recursive: true, force: true }));
     const noticesPath = join(keep, 'dm-notices.json');
     const first = await harness(t, { dmUsers: ['friend'], noticesPath });
-    (first.adapter as unknown as Record<string, unknown>).sendDmNotice = () => new Promise(() => {}); // never settles
+    (first.adapter as unknown as Record<string, unknown>).sendDmNotice = () => new Promise(() => {});
     first.emit('stranger', { id: freshId(1) });
     await first.decided();
     const pendingFile = readFileSync(noticesPath, 'utf-8');
 
     writeFileSync(noticesPath, '{ broken');
-    const restarted = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' }); // opens broken: suspended
-    writeFileSync(noticesPath, pendingFile); // an operator repairs it
+    const restarted = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' });
+    writeFileSync(noticesPath, pendingFile);
     restarted.emit('someone-else', { id: freshId(2) });
     await restarted.settle();
     assert.ok(restarted.logs.some((l) => /DM notice to sender stranger .* was interrupted before its outcome was recorded/.test(l)),
@@ -334,7 +300,6 @@ describe('live refusals', () => {
     if (process.platform === 'win32' || process.getuid?.() === 0) return t.skip('needs POSIX permissions as non-root');
     const h = await harness(t, { dmUsers: ['friend'] });
     const stateDir = dirname(h.noticesPath);
-    // The state directory stops taking writes while the notice is in flight.
     (h.adapter as unknown as Record<string, unknown>).sendDmNotice = async () => {
       chmodSync(stateDir, 0o500);
       return { messageId: 'notice' };
@@ -362,7 +327,7 @@ describe('live refusals', () => {
     const keep = mkdtempSync(join(tmpdir(), 'dm-notice-early-'));
     t.after(() => rmSync(keep, { recursive: true, force: true }));
     const noticesPath = join(keep, 'dm-notices.json');
-    await harness(t, { dmUsers: ['friend'], noticesPath }); // a state with notices on, as a restart finds it
+    await harness(t, { dmUsers: ['friend'], noticesPath });
     const early = freshId(1);
     const h = await harness(t, {
       dmUsers: ['friend'], noticesPath, notices: 'as-saved', noHost: true,
@@ -401,8 +366,7 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
       history: async () => [historyMessage(refusedId, 'removed-user', 'sent during downtime')],
     });
     refusedId = freshId(1);
-    (h.adapter as unknown as Record<string, unknown>).sendDmNotice = () => new Promise(() => {}); // Discord never answers
-    // What the notice state's file held for the sender when the watermark moved past the message.
+    (h.adapter as unknown as Record<string, unknown>).sendDmNotice = () => new Promise(() => {});
     let heldWhenMoved: { lastHandledId?: string; lastNotice?: { outcome: string } } | undefined;
     const marks = h.server.forwardedWatermark;
     const set = marks.set.bind(marks);
@@ -412,7 +376,7 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
       }
       return set(channelId, id);
     };
-    await h.server.runReconnectSweep(); // finishes, though the notice never does
+    await h.server.runReconnectSweep();
     assert.equal(heldWhenMoved?.lastHandledId, refusedId, 'the refusal was recorded before the watermark moved');
     assert.equal(heldWhenMoved?.lastNotice?.outcome, 'pending', 'and its notice reserved');
   });
@@ -427,7 +391,6 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
         historyMessage(freshId(2), 'friend', 'allowed words'),
       ],
     });
-    // Hold the refused DM's decision at its directory flush.
     let reached!: () => void;
     let release!: () => void;
     const atFlush = new Promise<void>((resolve) => { reached = resolve; });
@@ -444,15 +407,13 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
     };
     const sweep = h.server.runReconnectSweep();
     await atFlush;
-    // Pushed under the filters read after the fetch, so a filter change made
-    // while a refusal is being decided can't reach this batch.
     assert.equal(h.pushes.length, 1, 'delivered while the refusal was still being decided');
     assert.ok(h.pushes[0].payload.content[0].text.includes('allowed words'));
     assert.equal(h.server.forwardedWatermark.get('dm-chan-3'), '100', 'the watermark waits for the decision');
     release();
     await sweep;
     assert.notEqual(h.server.forwardedWatermark.get('dm-chan-3'), '100');
-    await h.settle(); // the notice's outcome write finishes before teardown
+    await h.settle();
   });
 
   it('still delivers DMs from allowed senders in the same channel', async (t) => {
@@ -470,7 +431,7 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
     const text = h.pushes[0].payload.content[0].text;
     assert.ok(text.includes('welcome words'));
     assert.ok(!text.includes('withheld words'));
-    await h.settle(); // the refused DM's notice finishes before teardown
+    await h.settle();
   });
 
   it('withholds messages from a channel of a guild removed from the guild filter', async (t) => {
@@ -499,11 +460,11 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
     });
     const sweep = h.server.runReconnectSweep();
     await h.settle();
-    h.adapter.updateFilters({ dmUsers: ['friend'] }); // the contact is removed while the fetch is pending
+    h.adapter.updateFilters({ dmUsers: ['friend'] });
     release();
     await sweep;
     assert.deepEqual(h.pushes, []);
-    await h.settle(); // the refused DM's notice finishes before teardown
+    await h.settle();
   });
 
   it('with the real metadata helpers, an unresolvable channel is held back, not read as a DM, and says so', async (t) => {
@@ -534,7 +495,6 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
     assert.equal(h.server.forwardedWatermark.get('gone-chan'), '400');
     assert.ok(h.logs.some((l) => /Catch-up held back channel gone-chan: neither its guild nor DM identity could be resolved \(its lookup failed: Missing Access\), so its missed messages were not delivered/.test(l)),
       h.logs.join('\n'));
-    // Nothing went out, so no line says its messages may.
     assert.ok(!h.logs.some((l) => l.includes('may go out')), h.logs.join('\n'));
   });
 
@@ -579,8 +539,6 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
     assert.ok(h.logs.some((l) => /\(sweep\): sender stranger.*notice already-handled/.test(l)));
   });
 
-  /** Hold every flush of the server's notice state until released, the
-   *  first one signalling that it was reached. */
   function holdFlushes(h: Awaited<ReturnType<typeof harness>>) {
     let reached!: () => void;
     let release!: () => void;
@@ -605,8 +563,8 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
       history: async () => [historyMessage(freshId(1), 'stranger', 'refused words')],
     });
     (h.server as unknown as { sweepDecisionWaitMs: number }).sweepDecisionWaitMs = 50;
-    const disk = holdFlushes(h); // the notice state's disk stops answering
-    await h.server.runReconnectSweep(); // finishes, though the decision doesn't
+    const disk = holdFlushes(h);
+    await h.server.runReconnectSweep();
     assert.notEqual(h.server.forwardedWatermark.get('dm-chan-4'), '100', 'the watermark moved on');
     assert.ok(h.logs.some((l) => /Catch-up moved past channel dm-chan-4 with refused DMs still being decided after 0\.05s/.test(l)));
     disk.release();
@@ -635,7 +593,7 @@ describe('the reconnect catch-up sweep applies the live ingress decision', () =>
     });
     const disk = holdFlushes(h);
     const sweep = h.server.runReconnectSweep();
-    await disk.atFlush; // the sweep waits for the refusal's decision
+    await disk.atFlush;
     const newer = freshId(50);
     h.emit('friend', { id: newer, channelId: 'dm-chan-6', content: 'live words' });
     for (let i = 0; i < 100 && h.server.forwardedWatermark.get('dm-chan-6') !== newer; i++) {
@@ -713,8 +671,8 @@ describe('the notice setting', () => {
       if (prev === undefined) delete process.env.DISCORD_FILTERS_FILE; else process.env.DISCORD_FILTERS_FILE = prev;
       rmSync(dir, { recursive: true, force: true });
     });
-    const h = await harness(t, { dmUsers: ['friend'] }); // notices on
-    mkdirSync(`${h.noticesPath}.tmp`); // the notice state's next write can't make its temp file
+    const h = await harness(t, { dmUsers: ['friend'] });
+    mkdirSync(`${h.noticesPath}.tmp`);
     const res = await h.server.filtersUpdate({ setDmNotice: false, setDmUsers: ['friend', 'new-friend'] }) as unknown as {
       applied: { dmUsers: string[] | null; dmNotice: boolean | null }; notes: string[];
     };
@@ -795,8 +753,6 @@ describe('adapter surfaces', () => {
 
   it('sends the notice through discord.js with an enforced nonce and no mentions', async (t) => {
     const { adapter, client } = adapterFixture(t, { token: 'unused' });
-    // A real DMChannel in the cache, and the REST layer captured: this
-    // exercises discord.js's own MessagePayload, not a mocked send.
     (client.channels as unknown as { _add(data: unknown): unknown })._add({
       id: 'dm1', type: ChannelType.DM, last_message_id: null,
       recipients: [{ id: 'u1', username: 'u1', discriminator: '0' }],

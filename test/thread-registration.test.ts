@@ -1,14 +1,3 @@
-/**
- * Adapter side of registration: the one label rule (a thread's label is
- * display-only; a channel whose name wouldn't resolve back to it is labelled
- * by its id), what the channel cache reports of a channel, which kinds the
- * listings and channel events register, and the events that change or end a
- * registration (a channel's or thread's update, a thread's deletion, a
- * guild's rename). And the tool chokepoint refusing a pasted thread label.
- * Jerome-1896 and Esther-1897 found that no path registered threads (room-203
- * #58153), and that the sweep pushed DMs and threads unregistered (#58257,
- * #58302).
- */
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { ChannelType, type Client } from 'discord.js';
@@ -24,8 +13,6 @@ function adapterFixture(t: { after: (fn: () => void) => void }, config: { guildI
   const emit = client.emit.bind(client) as (event: string, ...args: unknown[]) => boolean;
   const channels = client.channels.cache as unknown as Map<string, unknown>;
   const guilds = client.guilds.cache as unknown as Map<string, unknown>;
-  /** A guild the cache holds, whose channels are the cached ones in it, as
-   *  the name resolver reads them. */
   const held = (id: string, name: string, more: Record<string, unknown> = {}) => ({
     id, name, ...more,
     channels: { cache: { values: () => [...channels.values()].filter((c) => (c as { guildId?: string }).guildId === id) } },
@@ -43,11 +30,7 @@ describe('labels', () => {
     assert.equal(formatThreadLabel(null, 'design-chat', 'Test Server'), '› design-chat (Test Server)');
     const d = toDescriptor(facts({ id: 'th1', type: 'thread', name: 'design-chat', parentId: 'c1', parentName: 'general' }));
     assert.equal(d.label, '#general › design-chat (Test Server)');
-    // Pasted back, it parses as the name `general › design-chat`, a shape the
-    // resolver refuses (next test), where `#design-chat (Test Server)` would
-    // quietly name a same-named channel.
     assert.deepEqual(parseChannelRef(d.label), { kind: 'name', name: 'general › design-chat', guild: 'Test Server' });
-    // A channel's descriptor keeps its address form.
     const c = toDescriptor(facts({ id: 'c1', type: 'text', name: 'general' }));
     assert.equal(c.label, '#general (Test Server)');
     assert.deepEqual(parseChannelRef(c.label), { kind: 'name', name: 'general', guild: 'Test Server' });
@@ -62,10 +45,8 @@ describe('labels', () => {
       [facts({ id: 'c1', type: 'voice', name: 'general › design' }), 'a voice room named like a thread label'],
     ] as const) {
       assert.equal(channelLabelFor(f), `discord:g1:${f.id}`, why);
-      // Which addresses exactly that channel.
       assert.deepEqual(parseChannelRef(channelLabelFor(f)), { kind: 'id', id: f.id }, why);
     }
-    // A voice or stage channel is named as a text channel is.
     assert.equal(channelLabelFor(facts({ id: 'v1', type: 'voice', name: 'Lounge' })), '#Lounge (Test Server)');
     assert.equal(channelLabelFor(facts({ id: 's1', type: 'stage', name: 'town-hall' })), '#town-hall (Test Server)');
   });
@@ -83,14 +64,11 @@ describe('labels', () => {
     for (const label of [
       formatThreadLabel('general', 'design-chat', 'Test Server'),
       formatThreadLabel(null, 'design-chat', 'Test Server'),
-      // The same shapes, typed without a server.
       '#general › design-chat',
       '› design-chat',
     ]) {
-      // Refused, quoting the label as it was given, where a voice room has its name.
       assert.deepEqual(adapter.resolveChannelRef(label), threadLabelRefusal(label), label);
     }
-    // The resolver does see this guild's channels: a channel label resolves.
     const general = adapter.resolveChannelRef('#general (Test Server)');
     assert.ok(general.ok, JSON.stringify(general));
     assert.equal(general.id, 'c1');
@@ -116,7 +94,6 @@ describe('labels', () => {
     assert.equal(r.isError, true);
     assert.match(r.content[0].text ?? '', /thread label's shape/);
     assert.deepEqual(sent, [], 'nothing may be sent to the voice room the label resembles');
-    // The same chokepoint sends a channel's label on.
     await server.handleToolCall('send_message', { channelId: '#general (Test Server)', content: 'hi' });
     assert.deepEqual(sent, ['c1']);
   });
@@ -141,19 +118,15 @@ describe("the channel cache reports a channel's facts", () => {
       id: 'th1', guildId: 'g1', guildName: 'Test Server', type: 'thread', name: 'design-chat',
       parentId: 'c1', parentName: 'general', archived: false,
     });
-    // An archived thread whose channel isn't cached.
     assert.deepEqual(adapter.getCachedChannelFacts('th2'), {
       id: 'th2', guildId: 'g1', guildName: 'Test Server', type: 'thread', name: 'old',
       parentId: 'gone', parentName: null, archived: true,
     });
-    // A channel's parent is its category, whose name no label uses. Its
-    // name resolves back to it.
     assert.deepEqual(adapter.getCachedChannelFacts('ann1'), {
       id: 'ann1', guildId: 'g1', guildName: 'Test Server', type: 'announcement', name: 'news',
       parentId: 'cat1', parentName: null, archived: false, nameResolves: true,
     });
     assert.equal(adapter.getCachedChannelFacts('st1')?.type, 'stage');
-    // A guild the cache doesn't hold: its name isn't known.
     assert.equal(adapter.getCachedChannelFacts('x1')?.guildName, null);
     assert.equal(adapter.getCachedChannelFacts('dm1'), null);
     assert.equal(adapter.getCachedChannelFacts('not-cached'), null);
@@ -173,7 +146,6 @@ describe('the kinds registered by listing them', () => {
     const { adapter, guilds } = adapterFixture(t, { guildIds: ['g1'], guildChannels: { g1: [...listed.filter((id) => id !== 'news1'), 'cat1', 'forum1', 'media1', 'thread1'] } });
     const cache = new Map<string, unknown>(kinds.map(([id, type]) => [id, { id, type, name: `chan-${id}`, guildId: 'g1', parentId: null }]));
     guilds.set('g1', { id: 'g1', name: 'Test Server', channels: { cache } });
-    // Another guild, which the guild filter leaves out.
     guilds.set('g2', { id: 'g2', name: 'Other', channels: { cache: new Map([['t2', { id: 't2', type: ChannelType.GuildText, name: 'x', guildId: 'g2', parentId: null }]]) } });
     // A category, forum or media channel holds no messages of its own.
     assert.deepEqual(adapter.getPostingChannels().map((c) => [c.id, c.type, c.guildName]), [
@@ -187,7 +159,6 @@ describe('the kinds registered by listing them', () => {
     const created: Array<[string, string | null]> = [];
     adapter.onChannelCreate((c) => created.push([c.id, c.guildName]));
     for (const [id, type] of kinds) emit('channelCreate', { id, type, name: `chan-${id}`, guildId: 'g1', parentId: null });
-    // A guild whose messages are all dropped: none of its channels is listed.
     emit('channelCreate', { id: 'in-g2', type: ChannelType.GuildText, name: 'x', guildId: 'g2', parentId: null });
     assert.deepEqual(created, listed.map((id) => [id, 'Test Server']));
   });
@@ -202,11 +173,8 @@ describe('the kinds registered by listing them', () => {
       id, type, name, guildId: 'g1', guild, parentId: null,
       permissionsFor: () => ({ has: () => canView }),
     });
-    // Renamed: reported, so the server can re-derive what it registered.
     emit('channelUpdate', channel('v1', ChannelType.GuildVoice, 'lounge'), channel('v1', ChannelType.GuildVoice, 'cafe'));
     emit('channelUpdate', channel('cat1', ChannelType.GuildCategory, 'a'), channel('cat1', ChannelType.GuildCategory, 'b'));
-    // Hidden from the bot: listing registers it all the same
-    // (getPostingChannels), so its rename is reported too.
     emit('channelUpdate', channel('c9', ChannelType.GuildText, 'x'), channel('c9', ChannelType.GuildText, 'y', false));
     assert.deepEqual(updated, ['v1:cafe', 'c9:y']);
   });

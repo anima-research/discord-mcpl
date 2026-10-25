@@ -1,19 +1,9 @@
-/**
- * The TCP transport (`serveTcp`): one client served at a time, until its
- * serving ends, a client that connects meanwhile refused, the server's
- * errors logged in every state, and a client whose serving fails, or who
- * leaves, ending only its own connection.
- *
- * Run: node --import tsx --test test/tcp.test.ts
- */
-
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import * as net from 'node:net';
 import { McplConnection } from '@animalabs/mcpl-core';
 import { serveTcp } from '../src/server.js';
 
-/** Poll until `done` holds, failing after `ms`. */
 async function until(done: () => boolean, what: string, ms = 2000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!done()) {
@@ -45,9 +35,6 @@ async function listening(t: TestContext) {
   return { tcpServer, port, client };
 }
 
-/** A serve function that answers each request with the number of the client
- *  it serves (0 for the first it was given), until that client leaves or the
- *  test stops it. */
 function server() {
   const stops: Array<() => void> = [];
   let count = 0;
@@ -70,13 +57,10 @@ function server() {
   return { serve, stops, served: () => count };
 }
 
-/** The number of the client a request on `conn` reaches. */
 async function servedAs(conn: McplConnection): Promise<number> {
   return ((await conn.sendRequest('ping', {}, 2000)) as { client: number }).client;
 }
 
-/** Wait for a socket to close, failing after `ms`, so a socket left open
- *  fails the test rather than hanging it. */
 const closed = (socket: net.Socket, ms = 2000) => new Promise<void>((resolve, reject) => {
   if (socket.destroyed) return resolve();
   const timer = setTimeout(() => reject(new Error('timed out waiting for the socket to close')), ms);
@@ -110,13 +94,11 @@ test('serves one client at a time: one that connects meanwhile is refused at onc
   assert.equal(await servedAs(first.conn), 0);
   assert.equal(lines(logged, '[discord-mcpl] Client connected').length, 1);
 
-  // Refused, not left open and unread.
   const second = await client();
   await closed(second.socket);
   assert.equal(lines(logged, '[discord-mcpl] Refused a client: one client is served at a time').length, 1);
   assert.equal(await servedAs(first.conn), 0, 'the first client is still served');
 
-  // Once the first is done, the next client is served.
   s.stops[0]!();
   await until(() => lines(logged, '[discord-mcpl] Client disconnected, waiting for next...').length === 1, 'the first client to be let go');
   await closed(first.socket);
@@ -130,8 +112,6 @@ test('two clients arriving in the same tick while none is served: one is served,
   const logged: unknown[][] = [];
   const s = server();
   serveTcp(tcpServer, s.serve, (...args) => logged.push(args));
-  // Two connections accepted elsewhere, handed to this server in one tick:
-  // nothing awaits between them, so only a flag set at once tells them apart.
   const relay = await listening(t);
   const arrived: net.Socket[] = [];
   relay.tcpServer.on('connection', (socket) => arrived.push(socket));
@@ -139,10 +119,9 @@ test('two clients arriving in the same tick while none is served: one is served,
   await until(() => arrived.length === 2, 'both connections');
   tcpServer.emit('connection', arrived[0]);
   tcpServer.emit('connection', arrived[1]);
-  await new Promise((resolve) => setImmediate(resolve)); // serving starts a tick later
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(s.served(), 1);
   assert.equal(lines(logged, '[discord-mcpl] Refused a client: one client is served at a time').length, 1);
-  // The refused one is closed, and the other answers.
   await Promise.race([closed(a.socket), closed(b.socket)]);
   const open = a.socket.destroyed ? b : a;
   assert.equal(await servedAs(open.conn), 0);
@@ -158,21 +137,20 @@ test("the server's errors are logged whenever they come, and serving goes on", a
   const failure = (n: number) => Object.assign(new Error(`accept EMFILE ${n}`), { code: 'EMFILE', syscall: 'accept' });
   const errorsLogged = () => lines(logged, '[discord-mcpl] TCP server error:').map((args) => args[1]);
 
-  tcpServer.emit('error', failure(1)); // while no client is served
+  tcpServer.emit('error', failure(1));
   const first = await client();
   assert.equal(await servedAs(first.conn), 0);
-  tcpServer.emit('error', failure(2)); // twice while one is
+  tcpServer.emit('error', failure(2));
   tcpServer.emit('error', failure(3));
   assert.equal(await servedAs(first.conn), 0, 'the client being served is still served');
 
   s.stops[0]!();
   await until(() => lines(logged, '[discord-mcpl] Client disconnected, waiting for next...').length === 1, 'the first client to be let go');
-  tcpServer.emit('error', failure(4)); // between clients
+  tcpServer.emit('error', failure(4));
   const next = await client();
   assert.equal(await servedAs(next.conn), 1);
 
   assert.deepEqual(errorsLogged(), ['accept EMFILE 1', 'accept EMFILE 2', 'accept EMFILE 3', 'accept EMFILE 4']);
-  // One listener of each for the server's life, however many clients came.
   assert.equal(tcpServer.listenerCount('error'), 1);
   assert.equal(tcpServer.listenerCount('connection'), 1);
 });
@@ -218,7 +196,7 @@ test('a served client that leaves on its own is let go, and the next client is s
 
   const first = await client();
   assert.equal(await servedAs(first.conn), 0);
-  first.socket.end(); // its FIN
+  first.socket.end();
   await until(() => lines(logged, '[discord-mcpl] Client disconnected, waiting for next...').length === 1, 'the first client to be let go');
 
   const next = await client();
@@ -234,8 +212,6 @@ test('a client counts as served until its serving ends, after its socket has clo
   let calls = 0;
   serveTcp(tcpServer, async (conn) => {
     if (calls++ > 0) return s.serve(conn);
-    // The first client's serving outlives its socket, as a request still
-    // being answered would.
     await conn.nextMessage().catch(() => {});
     await finishing;
   }, (...args) => logged.push(args));
@@ -259,7 +235,6 @@ test("a refused client's socket is heard, so what it reports can't end the proce
   const s = server();
   serveTcp(tcpServer, s.serve, (...args) => logged.push(args));
   const sockets: net.Socket[] = [];
-  // Runs after serveTcp's own listener: the socket is already handled.
   tcpServer.on('connection', (socket) => sockets.push(socket));
 
   const first = await client();

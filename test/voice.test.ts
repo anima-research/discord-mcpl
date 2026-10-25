@@ -1,8 +1,3 @@
-// VoiceOutput: chunk routing, lazy per-inference streams, channel filtering,
-// completion, the advisory-only discipline (this module never posts), and
-// the physics accounting: interruption → voiced/unvoiced split reports.
-// CarrierGate: carrier-sense hold-off behavior.
-// Provider + sink injected; no Discord, no network.
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Readable } from 'node:stream';
@@ -50,8 +45,6 @@ class FakeSink implements PcmSink {
   private fns: Array<(ev: SinkEvent) => void> = [];
   play(item: SinkItem): void { this.played.push(item); }
   cancel(id: string): boolean {
-    // Mirrors DiscordVoiceSink: only still-queued (never-cleared) items can
-    // be cancelled; a cleared/unknown id loses the race.
     if (this.clearedIds.has(id) || !this.played.some((p) => p.id === id)) return false;
     this.cancelled.push(id);
     return true;
@@ -61,7 +54,6 @@ class FakeSink implements PcmSink {
     if (ev.type === 'cleared') this.clearedIds.add(ev.id);
     for (const f of this.fns) f(ev);
   }
-  /** Carrier cleared this item — the billing gate. */
   clear(id: string): void { this.emit({ type: 'cleared', id }); }
 }
 
@@ -76,7 +68,6 @@ function setup(textChannels: string[] | null = null) {
   return { provider, sink, out, reports };
 }
 
-/** Alignment where char i plays [i*100, (i+1)*100) ms. */
 function evenAlignment(text: string, msPerChar = 100): TtsAlignment {
   const chars = [...text];
   return {
@@ -91,13 +82,13 @@ test('billing gate: socket pre-opens free, text banks until cleared, then stream
   out.handleChunk('inf1', 'discord:g:100', 'Hello ');
   out.handleChunk('inf1', 'discord:g:100', 'there.');
   assert.equal(provider.streams.length, 1);        // socket pre-opened (free)
-  assert.equal(sink.played.length, 1);             // queued for playback at open
+  assert.equal(sink.played.length, 1);
   assert.equal(sink.played[0]!.id, 'inf1');
   assert.deepEqual(provider.streams[0]!.sent, []); // zero characters billed while queued
   sink.clear('inf1');
-  assert.deepEqual(provider.streams[0]!.sent, ['Hello there.']); // one flush
+  assert.deepEqual(provider.streams[0]!.sent, ['Hello there.']);
   out.handleChunk('inf1', 'discord:g:100', ' More.');
-  assert.deepEqual(provider.streams[0]!.sent, ['Hello there.', ' More.']); // live now
+  assert.deepEqual(provider.streams[0]!.sent, ['Hello there.', ' More.']);
   assert.equal(provider.streams[0]!.ended, false);
   out.handleComplete('inf1');
   assert.equal(provider.streams[0]!.ended, true);
@@ -107,7 +98,7 @@ test('complete while queued: end is deferred to the flush', () => {
   const { provider, sink, out } = setup();
   out.handleChunk('inf1', 'discord:g:100', 'Whole thing.');
   out.handleComplete('inf1');
-  assert.equal(provider.streams[0]!.ended, false); // nothing sent yet — nothing to end
+  assert.equal(provider.streams[0]!.ended, false);
   sink.clear('inf1');
   assert.deepEqual(provider.streams[0]!.sent, ['Whole thing.']);
   assert.equal(provider.streams[0]!.ended, true);
@@ -154,13 +145,11 @@ test('unparseable channel ids are skipped, never throw', () => {
   assert.equal(provider.streams.length, 0);
 });
 
-// ── Physics accounting ──────────────────────────────────────────────────────
-
 test('interruption: alignment-exact voiced/unvoiced split, TTS aborted, later chunks dropped', () => {
   const { provider, sink, out, reports } = setup();
   const text = 'Hello there, friend.';
   out.handleChunk('inf1', 'discord:g:100', text);
-  provider.streams[0]!.emitAlignment(evenAlignment(text)); // char i midpoint = i*100+50
+  provider.streams[0]!.emitAlignment(evenAlignment(text));
 
   const by = { userId: 'u9', username: 'antra', bot: false };
   sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 550, by });
@@ -169,19 +158,18 @@ test('interruption: alignment-exact voiced/unvoiced split, TTS aborted, later ch
   const r = reports[0]!;
   assert.equal(r.status, 'interrupted');
   assert.equal(r.estimated, false);
-  assert.equal(r.voicedText, 'Hello '); // midpoints 50..550 → 6 chars heard
+  assert.equal(r.voicedText, 'Hello ');
   assert.equal(r.unvoicedText, 'there, friend.');
   assert.deepEqual(r.interruptedBy, by);
   assert.equal(provider.streams[0]!.aborted, true);
 
-  // The inference is dead: post-interruption chunks must not reopen TTS.
   out.handleChunk('inf1', 'discord:g:100', ' more prose');
   assert.equal(provider.streams.length, 1);
 });
 
 test('interruption without alignment: proportional estimate, flagged', () => {
   const { provider, sink, out, reports } = setup();
-  out.handleChunk('inf1', 'discord:g:100', '0123456789'); // 10 chars
+  out.handleChunk('inf1', 'discord:g:100', '0123456789');
   // 44100 samples = 1000 ms of source audio (PCM16 mono 44.1k = 2 bytes/sample)
   provider.streams[0]!.emitAudio(Buffer.alloc(88200));
   sink.emit({ type: 'interrupted', id: 'inf1', playedMs: 500, by: { userId: 'u1', bot: false } });
@@ -206,9 +194,8 @@ test('clean finish after complete snaps to fully voiced', () => {
   const text = 'Short and sweet.';
   out.handleChunk('inf1', 'discord:g:100', text);
   provider.streams[0]!.emitAlignment(evenAlignment(text));
-  provider.streams[0]!.emitAudio(Buffer.alloc(88200)); // 1000 ms
+  provider.streams[0]!.emitAudio(Buffer.alloc(88200));
   out.handleComplete('inf1');
-  // Played ≈ synthesized (within slack) → full text, no phantom tail.
   sink.emit({ type: 'finished', id: 'inf1', playedMs: 900 });
 
   const r = reports[0]!;
@@ -219,22 +206,19 @@ test('clean finish after complete snaps to fully voiced', () => {
 
 test('truncated finish (TTS died early) reports the unvoiced tail', () => {
   const { provider, sink, out, reports } = setup();
-  const text = 'This sentence will be cut off midway through.'; // 45 chars
+  const text = 'This sentence will be cut off midway through.';
   out.handleChunk('inf1', 'discord:g:100', text);
-  provider.streams[0]!.emitAlignment(evenAlignment(text)); // 45 chars → 4500 ms
-  provider.streams[0]!.emitAudio(Buffer.alloc(88200 * 5)); // pretend 5000 ms synthesized
+  provider.streams[0]!.emitAlignment(evenAlignment(text));
+  provider.streams[0]!.emitAudio(Buffer.alloc(88200 * 5));
   out.handleComplete('inf1');
-  // Sink finished but only 2000 ms actually played (stream errored/ended early).
   sink.emit({ type: 'finished', id: 'inf1', playedMs: 2000 });
 
   const r = reports[0]!;
   assert.equal(r.status, 'spoken');
-  assert.equal(r.voicedText, text.slice(0, 20)); // midpoints ≤2000ms → 20 chars
+  assert.equal(r.voicedText, text.slice(0, 20));
   assert.equal(r.unvoicedText, text.slice(20));
   assert.equal(r.estimated, false);
 });
-
-// ── Zero-cost-loser (convergence review, Sol 8/5) ───────────────────────────
 
 test('zero-cost-loser pin: stopped while queued → provider received zero characters', () => {
   const { provider, out } = setup();
@@ -267,7 +251,7 @@ test('socket pre-open is capped: deep-queue items open at clearance instead', ()
   const { provider, sink, out } = setup();
   for (let i = 0; i < 5; i++) out.handleChunk('inf' + i, 'discord:g:100', 'text ' + i);
   assert.equal(provider.streams.length, 3, 'PRE_OPEN_MAX sockets, not one per item');
-  sink.clear('inf4');                       // deep item clears → opens now
+  sink.clear('inf4');
   assert.equal(provider.streams.length, 4);
   assert.deepEqual(provider.streams[3]!.sent, ['text 4']);
 });
@@ -275,11 +259,11 @@ test('socket pre-open is capped: deep-queue items open at clearance instead', ()
 test('socket died while queued: flush reopens a fresh stream and resends the bank', () => {
   const { provider, sink, out } = setup();
   out.handleChunk('inf1', 'discord:g:100', 'resent ');
-  provider.streams[0]!.emitError(new Error('idle timeout')); // provider hung up pre-clearance
-  out.handleChunk('inf1', 'discord:g:100', 'text');          // keeps banking
+  provider.streams[0]!.emitError(new Error('idle timeout'));
+  out.handleChunk('inf1', 'discord:g:100', 'text');
   sink.clear('inf1');
   assert.equal(provider.streams.length, 2);
-  assert.deepEqual(provider.streams[0]!.sent, []);           // dead socket billed nothing
+  assert.deepEqual(provider.streams[0]!.sent, []);
   assert.deepEqual(provider.streams[1]!.sent, ['resent text']);
 });
 
@@ -311,11 +295,9 @@ test('maxHold expiry: dropped unspoken with an expired receipt, zero billed', (t
   assert.equal(r.queuedMs, 20);
   assert.deepEqual(provider.streams[0]!.sent, []);
   assert.equal(provider.streams[0]!.aborted, true);
-  // Nothing follows the expiry, however long the clock runs on.
   t.mock.timers.tick(100);
   assert.equal(reports.length, 1);
   assert.equal(provider.streams.length, 1);
-  // The inference is dead: post-expiry chunks must not reopen anything.
   out.handleChunk('inf1', 'discord:g:100', 'late delta');
   assert.equal(provider.streams.length, 1);
 });
@@ -329,7 +311,6 @@ test('an expiry the event loop runs late reports the time the utterance actually
   out.onReport((r) => reports.push(r));
   out.handleChunk('inf1', 'discord:g:100', 'too late');
   t.mock.timers.tick(19);
-  // The clock moves 15 ms with no timer run, as when the loop is busy past the deadline.
   t.mock.timers.setTime(Date.now() + 15);
   t.mock.timers.tick(1);
   assert.equal(reports.length, 1);
@@ -347,11 +328,9 @@ test('cleared beats expiry: a cleared utterance is never expired', async () => {
   sink.clear('inf1');
   await new Promise((r) => setTimeout(r, 50));
   assert.deepEqual(sink.cancelled, []);
-  assert.equal(reports.length, 0); // still active, awaiting playback outcome
+  assert.equal(reports.length, 0);
   assert.deepEqual(provider.streams[0]!.sent, ['quick']);
 });
-
-// ── CarrierGate ─────────────────────────────────────────────────────────────
 
 test('waitClear resolves only after silence + full hold-off', async () => {
   const gate = new CarrierGate();
@@ -361,10 +340,10 @@ test('waitClear resolves only after silence + full hold-off', async () => {
   const p = gate.waitClear(10, 11).then(() => { cleared = true; });
 
   await new Promise((r) => setTimeout(r, 25));
-  assert.equal(cleared, false); // still speaking → still held
+  assert.equal(cleared, false);
 
   gate.speakingEnd('u1');
-  await new Promise((r) => setTimeout(r, 25)); // > hold-off
+  await new Promise((r) => setTimeout(r, 25));
   await p;
   assert.equal(cleared, true);
 });
@@ -374,13 +353,13 @@ test('a speaker starting during hold-off restarts the wait', async () => {
   let cleared = false;
   void gate.waitClear(30, 31).then(() => { cleared = true; });
 
-  await new Promise((r) => setTimeout(r, 10)); // inside hold-off
-  gate.speakingStart({ userId: 'u2', bot: true }); // carrier reappears
+  await new Promise((r) => setTimeout(r, 10));
+  gate.speakingStart({ userId: 'u2', bot: true });
   await new Promise((r) => setTimeout(r, 40));
-  assert.equal(cleared, false); // held: speaker active
+  assert.equal(cleared, false);
 
   gate.speakingEnd('u2');
-  await new Promise((r) => setTimeout(r, 50)); // silence + fresh hold-off
+  await new Promise((r) => setTimeout(r, 50));
   assert.equal(cleared, true);
 });
 
@@ -404,14 +383,12 @@ test('sustained-speech debounce: blips never fire, real speech does', async () =
   const sustained: string[] = [];
   gate.onSpeakerSustained(30, (s) => sustained.push(s.userId));
 
-  // Blip: unmute pop — start then end well inside the debounce window.
   gate.speakingStart({ userId: 'blip', bot: false });
   await new Promise((r) => setTimeout(r, 10));
   gate.speakingEnd('blip');
   await new Promise((r) => setTimeout(r, 40));
-  assert.deepEqual(sustained, []); // pop ignored — utterance survives
+  assert.deepEqual(sustained, []);
 
-  // Real speech: still on the carrier when the debounce lands.
   gate.speakingStart({ userId: 'talker', bot: false });
   await new Promise((r) => setTimeout(r, 45));
   assert.deepEqual(sustained, ['talker']);
@@ -422,8 +399,6 @@ test('rapid VAD re-trigger counts as sustained speech', async () => {
   const sustained: string[] = [];
   gate.onSpeakerSustained(30, (s) => sustained.push(s.userId));
 
-  // Start, brief dropout, restart — speaker is present when the FIRST
-  // start's debounce timer lands, so it fires: choppy speech is speech.
   gate.speakingStart({ userId: 'u', bot: false });
   await new Promise((r) => setTimeout(r, 10));
   gate.speakingEnd('u');

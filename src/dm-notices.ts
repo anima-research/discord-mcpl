@@ -13,11 +13,8 @@ export const DM_NOTICE_TEXT =
 
 export const DM_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/** How long a sender is kept after their latest refusal or notice. Longer
- *  than the 24-hour window, which it must outlast. */
 export const DM_NOTICE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** At most this many notices in any hour, across all senders. */
 export const DM_NOTICE_HOURLY_CEILING = 10;
 export const DM_NOTICE_CEILING_WINDOW_MS = 60 * 60 * 1000;
 
@@ -37,10 +34,6 @@ function snowflakeTime(id: string): number {
 
 const laterSnowflake = (a: string, b: string): string => (BigInt(a) >= BigInt(b) ? a : b);
 
-/** Where the notice state lives: DISCORD_DM_NOTICES_FILE when set, else
- *  $XDG_STATE_HOME/discord-mcpl/<bot user id>/dm-notices.json, falling back
- *  to ~/.local/state. Keyed by bot id so several bots on one host don't
- *  share a rate limit. */
 export function resolveDmNoticesPath(botUserId: string, env: NodeJS.ProcessEnv = process.env): string {
   const override = env.DISCORD_DM_NOTICES_FILE?.trim();
   if (override) return override;
@@ -50,17 +43,14 @@ export function resolveDmNoticesPath(botUserId: string, env: NodeJS.ProcessEnv =
 
 export type DmNoticeOutcome = 'pending' | 'sent' | 'failed' | 'unknown';
 
-/** A reservation found still pending when the state was opened. */
 export interface DmNoticeInterruption {
   authorId: string;
   messageId: string;
-  /** When it was reserved (epoch ms). */
   at: number;
 }
 
 interface LastNotice {
   messageId: string;
-  /** When it was reserved (epoch ms); its 24-hour window starts here. */
   at: number;
   outcome: DmNoticeOutcome;
 }
@@ -75,13 +65,10 @@ const OUTCOMES = new Set<string>(['pending', 'sent', 'failed', 'unknown']);
 interface NoticeFile {
   version: 1;
   floorId: string;
-  /** The resident's setting: false (the default) = refused DMs get no notice. */
   enabled: boolean;
   senders: Record<string, SenderState>;
 }
 
-/** What happened to one refused DM's notice. `notify` means the reservation
- *  is persisted and the caller should send now. */
 export type DmNoticeDecision =
   | 'notify'
   | 'silenced'
@@ -94,9 +81,7 @@ export type DmNoticeDecision =
 export interface DmNoticeStatus {
   path: string | null;
   persisted: boolean;
-  /** The resident's setting, or null while the state can't be read. */
   enabled: boolean | null;
-  /** Why notices are suspended, when they are. */
   error?: string;
 }
 
@@ -134,21 +119,14 @@ const errorText = (err: unknown): string => (err instanceof Error ? err.message 
 class UnflushedReplace extends Error {}
 
 export class DmNoticeState {
-  /** The state as the file holds it (see commit), or null while it can't be read. */
   private file: NoticeFile | null = null;
   private path: string | null = null;
-  /** Why the state isn't persisted right now, or null when it is. */
   private error: string | null = 'not opened yet';
-  /** Settles when the last operation called so far has finished. */
   private tail: Promise<void> = Promise.resolve();
   private readonly now: () => number;
   private readonly sync: (handle: FileHandle, what: 'file' | 'directory') => Promise<void>;
   private readonly onInterrupted: (i: DmNoticeInterruption) => void;
 
-  /** `onInterrupted` hears about each reservation found still pending when
-   *  the state is opened, every time it is opened (startup, or a reopen once
-   *  a broken file is repaired). `now` and `sync` (which flushes the state
-   *  file, or its directory after the rename) are injectable for tests. */
   constructor(opts: {
     now?: () => number;
     sync?: (handle: FileHandle, what: 'file' | 'directory') => Promise<void>;
@@ -159,7 +137,6 @@ export class DmNoticeState {
     this.onInterrupted = opts.onInterrupted ?? (() => {});
   }
 
-  /** Run `op` once every operation called before it has finished. */
   private serially<T>(op: () => Promise<T>): Promise<T> {
     const run = this.tail.then(op);
     this.tail = run.then(
@@ -169,10 +146,6 @@ export class DmNoticeState {
     return run;
   }
 
-  /** Open the state at `path`, creating it (notices off) if there is none.
-   *  An unreadable or invalid file is left untouched and suspends notices
-   *  until an operator repairs or removes it; the next decision or setting
-   *  change tries it again. */
   open(path: string): Promise<void> {
     return this.serially(() => this.load(path));
   }
@@ -198,16 +171,11 @@ export class DmNoticeState {
     try {
       parsed = parseNoticeFile(JSON.parse(text));
     } catch {
-      // not JSON: invalid, as below
     }
     if (!parsed) {
       this.error = `${path} is not a valid DM notice state file`;
       return;
     }
-    // A reservation still pending was interrupted between reserving and
-    // recording its outcome: settle it as unknown (never retried), and report
-    // it once the file says so. Until then the state stays closed, so the
-    // next use tries again.
     const pending = Object.entries(parsed.senders).filter(([, v]) => v.lastNotice?.outcome === 'pending');
     if (!pending.length) {
       this.file = parsed;
@@ -234,11 +202,6 @@ export class DmNoticeState {
     };
   }
 
-  /** Settle a reserved notice's outcome. Resolves to null once that is
-   *  durable, else to why not. The state keeps the outcome either way, so
-   *  the next write that succeeds records it. Until one does, the file holds
-   *  the reservation pending, and if none does before the process ends, the
-   *  next open reports it as interrupted (unknown). */
   recordOutcome(
     authorId: string,
     messageId: string,
@@ -255,23 +218,15 @@ export class DmNoticeState {
         senders: { ...file.senders, [authorId]: { ...prev, lastNotice: { ...prev.lastNotice, outcome } } },
       };
       const error = await this.commit(next);
-      // Kept even when the file couldn't take it, so a later write carries
-      // the outcome rather than the reservation's pending.
       if (error) this.file = next;
       return error;
     });
   }
 
-  /** Save the resident's setting. Rejects when it didn't take effect, so the
-   *  caller can say so. Resolves to null once it is durable, or to why it
-   *  may not be: the file was replaced, so the setting is in effect, but its
-   *  directory couldn't be flushed. */
   setEnabled(enabled: boolean): Promise<string | null> {
     return this.serially(async () => {
       if (!this.file && this.path) await this.load(this.path);
       if (!this.file) throw new Error(`DM notice state is unavailable: ${this.error ?? 'no path'}`);
-      // Refusals while off weren't recorded, so turning notices on moves the
-      // floor to now: nothing refused before this moment ever notifies.
       const floorId = enabled && !this.file.enabled
         ? laterSnowflake(this.file.floorId, snowflakeAt(this.now()))
         : this.file.floorId;
@@ -282,20 +237,8 @@ export class DmNoticeState {
     });
   }
 
-  /**
-   * Decide one refused DM's notice and record it durably. While notices are
-   * on, a refusal advances its sender's lastHandledId, so a later catch-up of
-   * the same message can't notify; past the hourly ceiling, a sender the
-   * state doesn't hold yet is the exception, and nothing is written. While
-   * they are off, nothing is recorded (see setEnabled's floor). A `notify`
-   * result is returned only after the reservation is durable; while the
-   * file can't be written durably, notices are suspended (checked again on
-   * the next refusal), and a reservation that couldn't be made durable is
-   * withdrawn, since nothing is sent for it.
-   */
   decide(messageId: string, authorId: string): Promise<DmNoticeDecision> {
     return this.serially(async () => {
-      // A file that couldn't be opened may have been repaired or removed since.
       if (!this.file && this.path) await this.load(this.path);
       const file = this.file;
       if (!file) return 'suspended';
@@ -313,16 +256,11 @@ export class DmNoticeState {
         Object.values(file.senders).filter(
           (s) => s.lastNotice !== undefined && now - s.lastNotice.at < DM_NOTICE_CEILING_WINDOW_MS,
         ).length >= DM_NOTICE_HOURLY_CEILING;
-      // Past the ceiling, a sender the state doesn't hold yet isn't recorded,
-      // so a wave of new accounts adds no senders and costs no writes. Their
-      // message got no notice, so a later sight of it can still notify.
       if (atCeiling && !prev) return 'ceiling-reached';
       const reserve = !inWindow && !atCeiling;
       const lastNotice: LastNotice | undefined = reserve
         ? { messageId, at: now, outcome: 'pending' }
         : prev?.lastNotice;
-      // Senders quiet since the horizon are dropped; the floor that moved
-      // with it keeps their older messages from notifying.
       const senders: Record<string, SenderState> = {};
       for (const [id, s] of Object.entries(file.senders)) {
         if (Math.max(snowflakeTime(s.lastHandledId), s.lastNotice?.at ?? -Infinity) >= horizon) senders[id] = s;
@@ -331,12 +269,6 @@ export class DmNoticeState {
       const next: NoticeFile = { ...file, floorId, senders };
       if (await this.commit(next)) {
         if (reserve) {
-          // The reservation isn't durable, so nothing is sent for it. Withdraw
-          // it: the message is handled, and the sender keeps their earlier
-          // notice, if any. Once that's written, no open reports the
-          // never-sent notice as interrupted. The state holds the withdrawal
-          // even if this write fails too, so the next write that succeeds
-          // records it.
           const handled: SenderState = {
             lastHandledId: messageId,
             ...(prev?.lastNotice ? { lastNotice: prev.lastNotice } : {}),
@@ -352,15 +284,6 @@ export class DmNoticeState {
     });
   }
 
-  /** Write `next` and make it the state. The state matches what the file
-   *  holds: a write that failed before replacing the file changes nothing,
-   *  and one that replaced the file but couldn't flush its directory still
-   *  leaves `next` as the state (this is the file's only writer, so a reread
-   *  would return the same), with the error kept until a later write is
-   *  durable. Two callers keep a change the file couldn't take, for the next
-   *  write that succeeds to carry: a settled outcome (recordOutcome) and a
-   *  withdrawn reservation (decide). Resolves to null once `next` is
-   *  durable, else to the error. */
   private async commit(next: NoticeFile): Promise<string | null> {
     try {
       await this.write(next);

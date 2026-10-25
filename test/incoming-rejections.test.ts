@@ -36,8 +36,6 @@ type DeleteHandler = (c: string, m: string, isDM: boolean, info?: MessageEventIn
 /** ~1.2 MB of base64: over the 1 MiB budget of agent-framework's coalescing
  *  hosts before 0.22.2. */
 const BIG_IMAGE = 'A'.repeat(1_200_000);
-/** ~40 KB of base64: small enough that a create remembers the image's blocks
- *  for a replacing edit (64 KiB). */
 const SMALL_IMAGE = 'A'.repeat(40_000);
 
 /** The error mcpl-core rejects a request with when the host answers with one. */
@@ -68,7 +66,6 @@ function scriptedHost(answer: (method: string, params: any, n: number) => Answer
   return { conn, sent };
 }
 
-/** Wait until `done()` holds, a tick at a time, failing after 2 s. */
 async function until(done: () => boolean): Promise<void> {
   const deadline = Date.now() + 2000;
   while (!done()) {
@@ -112,13 +109,9 @@ function wire(respond: Responder, opts: { open?: boolean; host?: ReturnType<type
     },
     sendNotification: noop,
   };
-  // The connection's start-up has settled, as serve() marks it.
   s.readyConn = s.conn;
-  // Resends a few milliseconds apart, so the tests don't wait out the real ones.
   s.retryDelaysMs = [5, 5, 5, 5, 5];
   s.mcplEnabled = true;
-  // A coalescing host, as the fleet's are: every create carries `coalesce`.
-  // `coalescing: false` stands for a host that advertises none.
   s.hostCoalescing = opts.coalescing === false
     ? undefined
     : { pushEvents: true, channelsIncoming: true, channelScopedPush: false };
@@ -134,7 +127,6 @@ function wire(respond: Responder, opts: { open?: boolean; host?: ReturnType<type
   return { server, sent, edit: () => edit!, del: () => del! };
 }
 
-/** A message with one image attachment; the fetch + downsample is stubbed. */
 async function deliver(server: DiscordMcplServer, image: string | null, extra: ContentBlock[] = []): Promise<void> {
   const s = server as unknown as Record<string, unknown>;
   s.buildAttachmentBlocks = async (): Promise<ContentBlock[]> => image === null ? extra : [
@@ -185,13 +177,11 @@ describe('channels/incoming (open channel): the per-message result is read', () 
     assert.equal(sent.length, 2, 'exactly one resend');
     const [first, second] = sent;
     assert.equal(second.method, 'channels/incoming');
-    // The resend carries no inline media, keeps the text, and says an image was omitted.
     assert.equal(contentOf(second).some((b: any) => b.type === 'image'), false);
     const texts = contentOf(second).map((b: any) => b.text ?? '').join('\n');
     assert.match(texts, /someone: look at this/);
     assert.match(texts, /\[image omitted: the host refused this message with the image inline \(image\/png, ~\d+(\.\d)?(KB|MB)\)\. The attachment line below names it and links to it\.\]/);
     assert.match(texts, /\[image attachment: shot\.png — https:\/\/cdn\.example\/shot\.png\]/);
-    // A fresh occurrence id on the same subject, still the subject's first occurrence.
     assert.equal(eventIdOf(first), 'discord_msg_m1');
     assert.equal(eventIdOf(second), 'discord_msg_m1_media_omitted');
     assert.deepEqual(coalesceOf(second), { key: 'message:m1', initial: true });
@@ -257,7 +247,6 @@ describe('push/event (closed channel): the result or error is read', () => {
     assert.equal(eventIdOf(sent[1]), 'discord_msg_m1_media_omitted');
     assert.equal(coalesceOf(sent[1]).key, 'message:m1');
     assert.equal(coalesceOf(sent[1]).initial, true);
-    // The rest of the push is the same message.
     assert.deepEqual(sent[1].params.origin, sent[0].params.origin);
   });
 
@@ -498,8 +487,6 @@ describe('incoming-results helpers', () => {
     const { content: out, replaced } = withoutInlineMedia(content);
     assert.equal(replaced, 1);
     assert.equal((out[0] as any).text, 'hi');
-    // The agent is told what is missing and where to find it; the host's
-    // reason is the operator's, on stderr.
     assert.equal((out[1] as any).text,
       '[image omitted: the host refused this message with the image inline (image/png, ~3B). The attachment line below names it and links to it.]');
     assert.deepEqual(out[2], content[2]);
@@ -521,7 +508,6 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       assert.equal(sent.length, 2, 'one resend');
       assert.equal(eventIdOf(sent[1]), 'discord_msg_m1');
       assert.deepEqual(coalesceOf(sent[1]), coalesceOf(sent[0]));
-      // The same occurrence: the image is still inline.
       assert.deepEqual(contentOf(sent[1]), contentOf(sent[0]));
       assert.ok(errors.includes(`[discord-mcpl] message m1 in discord:g1:chan1: host didn't take it: ${reason}; sending the same occurrence again (same event id) in 5ms`), errors.join('\n'));
       assert.ok(errors.includes('[discord-mcpl] sent message m1 in discord:g1:chan1 again (same event id): accepted'), errors.join('\n'));
@@ -659,8 +645,6 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       (server as any).retryDelaysMs = [50, 300, 5, 5, 5];
       const started = Date.now();
       await deliver(server, SMALL_IMAGE);
-      // The deadline is 200 ms after the first send: the 50 ms wait fits, the
-      // 300 ms one doesn't, and nothing is sent in a burst before it.
       assert.equal(sent.length, 2);
       assert.ok(Date.now() - started < 1000);
       assert.ok(errors.some((e) => e.endsWith("not sent again: the host's retry window is closing")), errors.join('\n'));
@@ -736,7 +720,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const next: unknown[] = [];
       const conn2 = { sendRequest: () => { next.push(1); return Promise.reject(rpcError(-32603, 'Internal error')); }, sendNotification: () => {} };
       (server as any).conn = conn2;
-      (server as any).hostRetryWindowMs = 200; // this host's: a 100 ms deadline from the first send
+      (server as any).hostRetryWindowMs = 200;
       (server as any).markReady(conn2);
       await delivered;
       assert.equal(sent.length, 1);
@@ -752,7 +736,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const next: unknown[] = [];
       const conn2 = { sendRequest: () => { next.push(1); return Promise.resolve({}); }, sendNotification: () => {} };
       (server as any).conn = conn2;
-      (server as any).markReady(conn2); // the channel still counts as open: open state is the process's
+      (server as any).markReady(conn2);
       await delivered;
       assert.equal(sent.length, 1);
       assert.deepEqual(next, []);
@@ -817,7 +801,6 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       delays(server, 20);
       const delivered = deliver(server, SMALL_IMAGE);
       await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
-      // The host goes; another connects, and isn't ready yet.
       const next: Array<{ method: string; params: any }> = [];
       const conn2 = {
         sendRequest: (m: string, p: unknown) => { next.push({ method: m, params: p }); return Promise.resolve({ accepted: true }); },
@@ -857,7 +840,6 @@ describe('sending the same occurrence again, by what the spec defines', () => {
 
     it("no resend when no host connection is ready before the retry window's deadline", async () => {
       const { server, sent } = wire(() => ({ results: [{ messageId: 'm1', accepted: false }] }), { open: true });
-      // A 300 ms deadline: the 10 ms wait fits even on a slow machine.
       (server as any).hostRetryWindowMs = 600;
       delays(server, 10);
       const delivered = deliver(server, SMALL_IMAGE);
@@ -955,7 +937,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       edit()('chan1', 'm9', 'first', false, info);
       await until(() => sent.length === 1);
       await new Promise((r) => setTimeout(r, 10));
-      edit()('chan1', 'm9', 'second', false, info); // same connection: goes at once
+      edit()('chan1', 'm9', 'second', false, info);
       await until(() => sent.length === 2);
       (server as any).markReady((server as any).conn);
       await until(() => errors.some((e) => e.includes('not sent again: a later edit or delete')));
@@ -986,8 +968,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const { server, sent, edit } = wire((m) => m === 'channels/incoming' ? createAnswer : { accepted: true }, { open: true });
       const delivered = deliver(server, SMALL_IMAGE);
       await until(() => sent.length === 1);
-      edit()('chan1', 'm1', 'look at this one', false, info); // waits for the create
-      // The host goes, and another connects: not ready yet.
+      edit()('chan1', 'm1', 'look at this one', false, info);
       const next: Array<{ method: string; params: any }> = [];
       const conn2 = {
         sendRequest: (m: string, p: unknown) => { next.push({ method: m, params: p }); return Promise.resolve({ accepted: true }); },
@@ -1016,7 +997,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
         const delivered = deliver(server, SMALL_IMAGE);
         await until(() => sent.length === 1);
         edit()('chan1', 'm1', 'look at this one', false, info);
-        (server as any).conn = null; // the host goes, and none comes back
+        (server as any).conn = null;
         answerCreate({ results: [{ messageId: 'm1', accepted: true }] });
         await delivered;
         await new Promise((r) => setTimeout(r, 60));
@@ -1057,7 +1038,6 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       assert.equal(answerClass({ kind: 'rejected', reason: 'x', code }), 'final', String(code));
     }
     assert.equal(answerClass({ kind: 'rejected', reason: 'x', code: -32023 }), 'unknown-channel');
-    // Words decide nothing: the same sentence is `refused` as a reason.
     assert.equal(answerClass({ kind: 'rejected', reason: 'host could not persist the acceptance; retry' }), 'refused');
     assert.equal(answerClass({ kind: 'rejected', reason: 'unspecified' }), 'refused');
     assert.equal(answerClass({ kind: 'rejected', reason: 'x', code: 4001 }), 'refused');
@@ -1067,13 +1047,6 @@ describe('sending the same occurrence again, by what the spec defines', () => {
   });
 });
 
-/**
- * A message the host didn't take, after every resend, is owed: the watermark
- * has moved past it, so nothing else would bring it. It's delivered, as
- * Discord has it then, in a `<missed reason="undelivered">` block when a
- * connection becomes ready, or when the host takes a message in its channel
- * again. A refusal the spec gives a meaning isn't owed.
- */
 describe('owed messages', () => {
   let dir: string;
   let file: string;
@@ -1117,8 +1090,6 @@ describe('owed messages', () => {
     d.ingressFactsNotCurrent = () => null;
     return reads;
   };
-  /** A host connected since, answering as `respond`; the server is moved to
-   *  it, ready. */
   const reconnect = (server: DiscordMcplServer, sent: Array<{ method: string; params: any }>, respond: () => unknown) => {
     const conn = {
       sendRequest: (method: string, params: unknown) => {
@@ -1216,7 +1187,7 @@ describe('owed messages', () => {
     const conn = (server as any).conn;
     conn.sendRequest = (m: string, p: unknown) => {
       sent.push({ method: m, params: p });
-      (server as any).conn = null; // the host goes while the block is on its way
+      (server as any).conn = null;
       return Promise.reject(new ConnectionClosedError());
     };
     await (server as any).deliverOwed(conn);
@@ -1260,8 +1231,8 @@ describe('owed messages', () => {
     const first = (server as any).deliverOwed((server as any).conn);
     await until(() => owedPushes(sent).length === 1);
     const conn2 = reconnect(server, sent, () => ({ accepted: true }));
-    await (server as any).deliverOwedIn(conn2, 'chan1', 'ready'); // put off
-    (server as any).conn = null; // and conn2 goes too
+    await (server as any).deliverOwedIn(conn2, 'chan1', 'ready');
+    (server as any).conn = null;
     answer({ accepted: false, reason: 'busy' });
     await first;
     await new Promise((r) => setTimeout(r, 20));
@@ -1362,7 +1333,7 @@ describe('owed messages', () => {
       : { results: [{ messageId: 'm1', accepted: false, reason: 'busy' }] }, { open: true });
     await deliver(refused.server, BIG_IMAGE);
     assert.deepEqual((refused.server as any).owed.get('chan1'), [{ id: 'm1' }]);
-    rmSync(file, { force: true }); // a server of its own, with a file of its own
+    rmSync(file, { force: true });
     const host = scriptedHost((_m, _p, n) => n === 1 ? { error: { code: -32602, message: 'too big' } } : 'no answer');
     const silent = wire(() => undefined, { host });
     (silent.server as any).retryDelaysMs = [2];
@@ -1426,7 +1397,6 @@ describe('owed messages', () => {
     await (server as any).deliverOwed((server as any).conn);
     assert.equal(owedPushes(sent).length, 0);
     assert.deepEqual((server as any).owed.get('chan1'), [{ id: 'm1', tries: 1 }]);
-    // Current facts: the refusal stands, and the message is given up.
     (server as any).discord.ingressFactsNotCurrent = () => null;
     await (server as any).deliverOwed(reconnect(server, sent, () => ({ accepted: true })));
     assert.equal((server as any).owed.size, 0);
@@ -1513,7 +1483,7 @@ describe('owed messages', () => {
     (server as any).owe('chan1', 'm1', { uncertain: false });
     const delivering = (server as any).deliverOwed((server as any).conn);
     await until(() => owedPushes(sent).length === 1);
-    (server as any).owe('chan1', 'm1', { uncertain: true, edit: true }); // an edit of it not taken meanwhile
+    (server as any).owe('chan1', 'm1', { uncertain: true, edit: true });
     answer({ accepted: true });
     await delivering;
     assert.deepEqual((server as any).owed.get('chan1').map((o: { id: string }) => o.id), ['m1']);
@@ -1562,7 +1532,7 @@ describe('owed messages', () => {
     const first = (server as any).deliverOwed((server as any).conn);
     await until(() => owedPushes(sent).length === 1);
     const conn2 = reconnect(server, sent, () => ({ accepted: true }));
-    await (server as any).deliverOwedIn(conn2, 'chan1', 'ready'); // skipped for now
+    await (server as any).deliverOwedIn(conn2, 'chan1', 'ready');
     assert.equal(owedPushes(sent).length, 1);
     answer({ accepted: false, reason: 'busy' });
     await first;
@@ -1591,8 +1561,8 @@ describe('owed messages', () => {
     (server as any).owe('chan1', 'm1', { uncertain: false });
     const delivering = (server as any).deliverOwed((server as any).conn);
     await until(() => owedPushes(sent).length === 1);
-    (server as any).forgetOwed('chan1', ['m1']); // a later edit taken…
-    (server as any).owe('chan1', 'm1', { uncertain: true, edit: true }); // …then another not taken
+    (server as any).forgetOwed('chan1', ['m1']);
+    (server as any).owe('chan1', 'm1', { uncertain: true, edit: true });
     answer({ accepted: true });
     await delivering;
     assert.deepEqual((server as any).owed.get('chan1'), [{ id: 'm1', uncertain: true, edit: true }]);
@@ -1660,7 +1630,7 @@ describe('owed messages', () => {
     const delivering = (server as any).deliverOwed((server as any).conn);
     await until(() => owedPushes(sent).length === 1);
     (server as any).owe('chan1', 'm1', { uncertain: true, edit: true });
-    answer(Promise.reject(rpcError(-32017, 'Channel not permitted'))); // a final refusal
+    answer(Promise.reject(rpcError(-32017, 'Channel not permitted')));
     await delivering;
     assert.equal((server as any).owed.get('chan1')?.length, 1, 'the newer owing stays');
   });

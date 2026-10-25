@@ -29,7 +29,7 @@ test('invalid AGENT_TIMEZONE falls back loudly instead of throwing at import', (
   try {
     // Must not throw: a throw at import kills the stdio child before the MCPL handshake.
     const zone = resolveAgentTimeZone('Amrica/New_York');
-    assert.equal(zone, systemDefault); // same default as when unset
+    assert.equal(zone, systemDefault);
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /\[timezone\] Invalid AGENT_TIMEZONE "Amrica\/New_York"/);
     assert.match(warnings[0], /falling back to system time zone/);
@@ -51,7 +51,6 @@ test('timestamp styles: compact and time render terse zone-converted forms', () 
   );
   assert.equal(formatAgentDateTime(d, 'America/Los_Angeles', 'time'), '04:34');
   assert.equal(formatAgentDateTime(d, 'America/Los_Angeles', 'none'), '');
-  // full stays the default and unchanged
   assert.equal(
     formatAgentDateTime(d, 'America/Los_Angeles'),
     '2026-01-15T04:34:56-08:00 [America/Los_Angeles]',

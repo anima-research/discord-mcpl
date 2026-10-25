@@ -1,15 +1,3 @@
-/**
- * The per-guild channel whitelist (`guildChannels`) and threads. A thread
- * counts as its parent channel, so it is admitted whenever its channel is,
- * including when the channel is admitted only through a listed category, and
- * also when it's listed itself. Before, only one parent level was checked: a
- * thread's parent is its channel, so threads in a category-admitted channel
- * were dropped, and a category-admitted forum lost every post.
- *
- * A thread the client knows only partly (built from an event that carried
- * its type but not its channel, so its parentId is null) is fetched before
- * the filters decide, on creates, reactions, edits and deletes alike.
- */
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import type { Client } from 'discord.js';
@@ -33,7 +21,6 @@ const LISTED_THREAD = '530000000000000006';
 const PARTLY_KNOWN_THREAD = '540000000000000001';
 const PARTLY_KNOWN_UNLISTED = '540000000000000002';
 
-/** Each channel's own parent: a category for a channel, the channel for a thread. */
 const PARENT: Record<string, string | null> = {
   [CATEGORY]: null,
   [OTHER_CATEGORY]: null,
@@ -49,7 +36,6 @@ const PARENT: Record<string, string | null> = {
   [LISTED_THREAD]: UNLISTED,
 };
 
-/** The channel a partly known thread turns out to be in, once fetched. */
 const FETCHED_PARENT: Record<string, string> = {
   [PARTLY_KNOWN_THREAD]: IN_CATEGORY,
   [PARTLY_KNOWN_UNLISTED]: UNLISTED,
@@ -110,8 +96,6 @@ function fixture(t: { after: (fn: () => void) => void }, fetchFails = false) {
   adapter.onMessage((m) => delivered.push((m as unknown as { id: string }).id));
   internals.convertMessage = (m) => ({ id: (m as { id: string }).id });
   const emit = (m: unknown) => internals.client.emit('messageCreate', m as never);
-  /** Wait until every create waiting on a thread lookup, and every edit or
-   *  delete being placed, has been decided. */
   const settle = async () => {
     for (;;) {
       const pending = [...internals.threadLookups.values(), ...internals.messageEventDeliveries.values()];
@@ -242,8 +226,6 @@ describe('a thread the client knows only partly is fetched before the filters de
     f.adapter.onMessage((m) => order.push(`create ${(m as unknown as { id: string }).id}`));
     f.adapter.onMessageDelete((_channelId, messageId) => order.push(`delete ${messageId}`));
     f.adapter.onReaction((ev) => order.push(`reaction ${ev.messageId}`));
-    // Hold the create's lookup open until the delete and the reaction have
-    // done their own lookups and are only waiting to be delivered.
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const fetch = (f.internals.client.channels as unknown as { fetch: (id: string, o?: object) => Promise<unknown> }).fetch;

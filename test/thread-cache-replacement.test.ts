@@ -27,18 +27,12 @@ const messageData = {
   mentions: [], mention_roles: [], attachments: [], embeds: [], flags: 0,
 };
 
-/** Where the guild's channel list admits the thread from: no list, the
- *  thread's parent channel, or the thread's own id. */
 const admissions = [
   { name: 'no channel list', guildChannels: undefined },
   { name: 'admitted through its parent channel', guildChannels: { [guildId]: [parentId] } },
   { name: 'admitted by its own listing', guildChannels: { [guildId]: [threadId] } },
 ];
 
-/** An adapter on a client that hasn't logged in, with the guild and the
- *  thread's parent cached and the thread lookup's REST reply held until
- *  `release`. `replaceGuild` removes the guild and joins it again while the
- *  lookup waits, which leaves a new thread object in the cache. */
 function setUp(t: TestContext, guildChannels: Record<string, string[]> | undefined) {
   const adapter = new DiscordAdapter({ token: 'unused', ...(guildChannels ? { guildChannels } : {}) });
   const client = adapter.rawClient as any;
@@ -121,9 +115,6 @@ for (const { name, guildChannels } of admissions) {
       user_id: author.id, message_id: message.id, channel_id: threadId, guild_id: guildId,
       emoji: { name: '👍', id: null }, member: { user: author, roles: [] },
     });
-    // The handler's lookup starts once the reaction has resolved itself. The
-    // wait is bounded, so a lane that never looks the thread up fails here
-    // rather than keeping the run alive.
     for (const until = Date.now() + 2000; lookups.count === 0 && Date.now() < until;) {
       await new Promise((r) => setImmediate(r));
     }

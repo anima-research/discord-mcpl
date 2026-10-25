@@ -43,15 +43,11 @@ import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { dbg } from './debug-log.js';
 
-/** Paths that nothing saves over until they're read again, each with why:
- *  their file couldn't be read, copied aside or rewritten, so saving over it
- *  could destroy it. */
 const unsaveable = new Map<string, string>();
 /** EINVAL is chown's, for a group the user namespace doesn't map. */
 const WRITE_IN_PLACE_ON = new Set([
   'EACCES', 'EPERM', 'EBUSY', 'EXDEV', 'EROFS', 'ENAMETOOLONG', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EINVAL',
 ]);
-/** Paths whose writing in place, for one of those errors, has been logged. */
 const loggedInPlace = new Set<string>();
 
 const errorCode = (err: unknown): string | undefined => (err as NodeJS.ErrnoException).code;
@@ -65,7 +61,6 @@ function lstatIfThere(path: string): Stats | undefined {
   }
 }
 
-/** Write `value` as JSON at `path`. Throws on failure. */
 export function writeJsonFile(path: string, value: unknown): void {
   const refused = unsaveable.get(path);
   if (refused !== undefined) {
@@ -90,7 +85,6 @@ export function writeJsonFile(path: string, value: unknown): void {
     writeFileSync(path, text);
     return;
   }
-  // A file the server couldn't write in place isn't replaced either.
   if (old) accessSync(path, constants.W_OK);
   const mode = old ? old.mode & 0o7777 : undefined;
   const tmp = `${path}.tmp`;
@@ -117,7 +111,6 @@ export function writeJsonFile(path: string, value: unknown): void {
     try {
       rmSync(tmp, { force: true });
     } catch {
-      // The save's own error is the one to report.
     }
     const code = errorCode(err) ?? '';
     if (!WRITE_IN_PLACE_ON.has(code)) throw err;
@@ -133,18 +126,13 @@ export function writeJsonFile(path: string, value: unknown): void {
   }
 }
 
-/** What a store can use of a file's parsed content. */
 export interface Usable<T> {
-  /** The entries the store can use, or null when the content has none at all. */
   value: T | null;
-  /** What it can't use, or null when the content is exactly what the store writes. */
   unusable: string | null;
 }
 
-/** An id: a non-empty string. */
 export const isId = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 
-/** The ids in a list, and how many of its entries aren't ids. */
 export function usableIds(value: unknown): Usable<string[]> {
   if (!Array.isArray(value)) return { value: null, unusable: 'not a list' };
   const ids = value.filter(isId);
@@ -152,24 +140,18 @@ export function usableIds(value: unknown): Usable<string[]> {
   return { value: ids, unusable: others ? `${others} of its ${value.length} entries aren't ids` : null };
 }
 
-/** The store's content and whether its file holds it, as read: false when
- *  nothing is saved over the file until it's read again. */
 export interface Read<T> {
   value: T;
   held: boolean;
 }
 
-/** Read a store's file (see the module comment). console.error and the debug
- *  log say what was done with a file that couldn't be used. `what` names the
- *  store, `usable` says what it can use of the file's content, and `empty`
- *  is the store with nothing in it. */
 export function readJsonFile<T>(
   path: string,
   what: string,
   usable: (value: unknown) => Usable<T>,
   empty: T,
 ): Read<T> {
-  unsaveable.delete(path); // each read decides afresh
+  unsaveable.delete(path);
   let bytes: Buffer;
   let mode: number;
   try {
@@ -236,17 +218,10 @@ export function readJsonFile<T>(
   return { value, held: true };
 }
 
-/** Keep `bytes`, read from `path`, in a copy beside it, flushed to disk, at
- *  `mode`. Returns the copy's path. */
 function copyAside(path: string, bytes: Buffer, mode: number): string {
-  // Named by content, so the same content is kept once. A copy already under
-  // that name is checked byte for byte, since an operator may have edited it
-  // in place; then this content gets a name of its own, by time.
   const byContent = `${path}.unreadable-${createHash('sha256').update(bytes).digest('hex').slice(0, 12)}`;
   if (writeNewFile(byContent, bytes, mode)) return byContent;
   if (readFileSync(byContent).equals(bytes)) {
-    // An earlier read kept these very bytes, as when the rewrite keeps
-    // failing across restarts. One copy is enough, once it's on disk.
     const fd = openSync(byContent, 'r');
     try {
       fsyncSync(fd);
@@ -260,9 +235,6 @@ function copyAside(path: string, bytes: Buffer, mode: number): string {
   return byTime;
 }
 
-/** Create `to` holding `bytes` at `mode`, flushed to disk with its directory
- *  entry where the filesystem allows. False when `to` already exists. A file
- *  this call created and couldn't finish is removed. */
 function writeNewFile(to: string, bytes: Buffer, mode: number): boolean {
   let fd: number;
   try {
@@ -283,7 +255,6 @@ function writeNewFile(to: string, bytes: Buffer, mode: number): boolean {
     try {
       rmSync(to, { force: true });
     } catch {
-      // The copy's own error is the one to report.
     }
     throw err;
   }

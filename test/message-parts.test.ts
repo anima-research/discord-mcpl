@@ -1,22 +1,9 @@
-/**
- * A message longer than 1,900 UTF-16 units is sent in parts, cut at a line
- * break or a space late enough in the first 1,900 units, or else hard at
- * 1,900. A hard cut falls at the last character boundary at or before 1,900
- * (a grapheme's, as Intl.Segmenter finds them), so no part ends with part of
- * a character the next one finishes: half a surrogate pair, part of an
- * emoji's ZWJ sequence, one of a flag's two regional indicators, or a letter
- * without its combining mark. Only a single character longer than 1,900
- * units is cut inside, and then never between the halves of a pair.
- *
- * Run: node --import tsx --test test/message-parts.test.ts
- */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 
 const CHANNEL = '444444444444444444';
 
-/** The parts the real sendMessage sends for `text`, to a channel that takes them all. */
 async function partsOf(t: TestContext, text: string): Promise<string[]> {
   const adapter = new DiscordAdapter({ token: 'unused' });
   const client = (adapter as unknown as { client: { channels: { fetch: unknown }; destroy(): void } }).client;
@@ -40,15 +27,10 @@ const low = (unit: number) => unit >= 0xdc00 && unit <= 0xdfff;
 
 describe('a message sent in parts', () => {
   it('is never cut between the two halves of a surrogate pair', async (t) => {
-    // No line break or space, so the cut is hard: at 1,900 units, which here
-    // falls between the halves of the emoji at units 1,899 and 1,900.
     const inside = `${'a'.repeat(1899)}🙂${'b'.repeat(100)}`;
     assert.deepEqual(await partsOf(t, inside), ['a'.repeat(1899), `🙂${'b'.repeat(100)}`]);
-    // A pair that ends at the cut stays whole in the first part.
     const before = `${'a'.repeat(1898)}🙂${'b'.repeat(100)}`;
     assert.deepEqual(await partsOf(t, before), [`${'a'.repeat(1898)}🙂`, 'b'.repeat(100)]);
-    // Emoji throughout, after one letter: each pair starts at an odd unit, so
-    // a hard cut at 1,900 would fall inside one.
     const emoji = `a${'🙂'.repeat(2000)}`;
     const parts = await partsOf(t, emoji);
     assert.equal(parts.join(''), emoji);
@@ -59,18 +41,12 @@ describe('a message sent in parts', () => {
   });
 
   it('is never cut inside a character a reader sees as one: a ZWJ sequence, a flag, a letter and its mark', async (t) => {
-    // The family emoji is three emoji joined by two ZWJs, 8 units from 1,896:
-    // a cut at 1,900 falls inside it, and the surrogate guard alone would
-    // leave the man and a ZWJ at the end of the first part.
     const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
     assert.deepEqual(await partsOf(t, `${'a'.repeat(1896)}${family}${'b'.repeat(100)}`),
       ['a'.repeat(1896), `${family}${'b'.repeat(100)}`]);
-    // A flag is two regional indicators, 4 units from 1,898: a cut at 1,900
-    // falls between them, a code point boundary the surrogate guard keeps.
     const flag = '\u{1F1EF}\u{1F1F5}';
     assert.deepEqual(await partsOf(t, `${'a'.repeat(1898)}${flag}${'b'.repeat(100)}`),
       ['a'.repeat(1898), `${flag}${'b'.repeat(100)}`]);
-    // An e and its combining acute accent, at 1,899 and 1,900.
     assert.deepEqual(await partsOf(t, `${'a'.repeat(1899)}e\u0301${'b'.repeat(100)}`),
       ['a'.repeat(1899), `e\u0301${'b'.repeat(100)}`]);
   });

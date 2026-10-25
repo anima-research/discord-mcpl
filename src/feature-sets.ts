@@ -1,7 +1,3 @@
-/**
- * Feature set declarations for the Discord MCPL server.
- */
-
 import type { FeatureSetDeclaration } from '@animalabs/mcpl-core';
 
 /** This server advertises the legacy array form, which the §17 digest
@@ -54,8 +50,6 @@ export const featureSets: NamedFeatureSetDeclaration[] = [
           { tagsAny: ['chat:ambient', 'chat:from-bot'], behavior: { throttle: { perMs: 120000 } } },
         ],
       } as object),
-      // Discord-specific extensions (e.g. discord:everyone, discord:slash) may be
-      // emitted in future; consumers should tolerate undeclared tags.
       open: true,
     },
   },
@@ -85,11 +79,8 @@ export const featureSets: NamedFeatureSetDeclaration[] = [
   },
 ];
 
-/** Check if a feature set is in a given enabled list. */
 export function isEnabled(name: string, enabledSets: Set<string>): boolean {
-  // Check exact match
   if (enabledSets.has(name)) return true;
-  // Check wildcard (e.g., "discord.*")
   const parts = name.split('.');
   for (let i = parts.length - 1; i > 0; i--) {
     const prefix = parts.slice(0, i).join('.') + '.*';
@@ -98,7 +89,6 @@ export function isEnabled(name: string, enabledSets: Set<string>): boolean {
   return false;
 }
 
-/** Get the feature set that owns a given tool. Returns undefined for always-available tools. */
 export function featureSetForTool(toolName: string): string | undefined {
   switch (toolName) {
     case 'send_message':
@@ -130,7 +120,7 @@ export function featureSetForTool(toolName: string): string | undefined {
     case 'refresh_channels':
     case 'filters_get':
     case 'filters_update':
-      return undefined; // Always available
+      return undefined;
     default:
       return undefined;
   }

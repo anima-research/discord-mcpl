@@ -1,16 +1,3 @@
-/**
- * The muted channels, the reaction channels and the watermarks are each read
- * once and then rewritten whole after every change. A file that couldn't be
- * read used to leave its store empty, and the next save then overwrote it,
- * so one unreadable file lost every earlier mute, reaction opt-in or
- * watermark. Now a file that isn't exactly what its store writes is copied
- * aside, flushed to disk, and then rewritten with the entries its store can
- * use, and a file that can't be read, copied or rewritten is never saved
- * over. A save replaces a plain file the server owns atomically, keeping its
- * whole mode and its group, and writes anything else in place, as before.
- *
- * Run: node --import tsx --test test/persisted-stores.test.ts
- */
 import { describe, it, beforeEach, afterEach, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import fs, {
@@ -77,7 +64,6 @@ const errors = (t: TestContext) => t.mock.method(console, 'error', () => {});
 const logged = (mock: ReturnType<typeof errors>) => mock.mock.calls.map((c) => c.arguments.map(String).join(' '));
 const debugLog = () => readFileSync(join(dir, 'debug.log'), 'utf-8');
 
-/** Run `body` with the umask set, restoring it after. */
 async function withUmask(mask: number, body: () => unknown): Promise<void> {
   const before = process.umask(mask);
   try { await body(); } finally { process.umask(before); }
@@ -85,7 +71,6 @@ async function withUmask(mask: number, body: () => unknown): Promise<void> {
 
 type Mockable = 'renameSync' | 'fchmodSync' | 'fchownSync' | 'writeFileSync' | 'openSync' | 'fsyncSync';
 
-/** Run `body` with fs[name] wrapped by `wrap`, for the code under test too. */
 async function withFs<K extends Mockable>(
   t: TestContext,
   name: K,
@@ -100,21 +85,18 @@ async function withFs<K extends Mockable>(
 
 const refuse = (code: string, what: string) => Object.assign(new Error(`${code}: refused, ${what}`), { code });
 
-/** fs.renameSync failing with `code` where `fails` says. */
 const renameFailing = (t: TestContext, code: string, fails: (to: string) => boolean, body: () => unknown) =>
   withFs(t, 'renameSync', (real) => ((from: fs.PathLike, to: fs.PathLike) => {
     if (fails(String(to))) throw refuse(code, `rename to ${String(to)}`);
     return real(from, to);
   }) as typeof fs.renameSync, body);
 
-/** fs.openSync failing with `code` for the paths `fails` picks. */
 const openFailing = (t: TestContext, code: string, fails: (path: string) => boolean, body: () => unknown) =>
   withFs(t, 'openSync', (real) => ((path: fs.PathLike, ...rest: unknown[]) => {
     if (fails(String(path))) throw refuse(code, `open ${String(path)}`);
     return (real as (...a: unknown[]) => number)(path, ...rest);
   }) as typeof fs.openSync, body);
 
-/** A full disk for temp files: every save that would replace a file fails. */
 const tempsFail = (t: TestContext, body: () => unknown) => openFailing(t, 'ENOSPC', (p) => p.endsWith('.tmp'), body);
 
 const asides = (name: string) => readdirSync(dir).filter((f) => f.startsWith(`${name}.unreadable-`));
@@ -171,7 +153,6 @@ describe('a store whose file has content it can not use', () => {
 
   it('keeps the opt-ins of a reaction list that base wrote with a null, and copies an unparsable one aside', async (t) => {
     errors(t);
-    // Base's set_reaction_visibility saved a missing channelId as null.
     const written = JSON.stringify(['chan-r', null], null, 2) + '\n';
     writeFileSync(join(dir, 'reactions.json'), written);
     const s = server(t);
@@ -207,7 +188,6 @@ describe('a store whose file has content it can not use', () => {
       [JSON.stringify({ ...good, missed: { 'chan-b': tally, 'chan-x': { ...tally, talliedThrough: null } } }), good],
       [JSON.stringify({ ...good, missed: { 'chan-b': tally, 'chan-x': { ...tally, characters: '40' } } }), good],
       [JSON.stringify({ ...good, missed: { 'chan-b': tally, '': tally } }), good],
-      // What the store doesn't write goes to the copy, not to the next save.
       [JSON.stringify({ ...good, version: 2 }), good],
       [JSON.stringify({ ...good, missed: { 'chan-b': { ...tally, seen: true } } }), good],
     ];
@@ -233,7 +213,6 @@ describe('a store whose file has content it can not use', () => {
     const other = process.getgroups?.().find((gid) => gid !== statSync(join(dir, 'muted.json')).gid);
     if (other !== undefined) chownSync(join(dir, 'muted.json'), statSync(dir).uid, other);
     await withUmask(0o022, () => server(t).ensureMutedLoaded());
-    // A restart before any other save: the next store reads the emptied file.
     await withUmask(0o022, () => server(t).executeToolCall('mute_channel', { channelId: 'chan-new' }));
     assert.equal(statSync(join(dir, 'muted.json')).mode & 0o777, 0o660);
     if (other !== undefined) assert.equal(statSync(join(dir, 'muted.json')).gid, other);
@@ -326,7 +305,6 @@ describe('a store whose file is left in place', () => {
     process.env.DISCORD_MCPL_DEBUG_LOG = join(dir, 'debug.log');
     writeFileSync(join(dir, 'muted.json'), 'not json');
     const s = server(t);
-    // The disk is full while the store loads, and has room again after.
     await tempsFail(t, () => s.ensureMutedLoaded());
     const reply = String(await s.executeToolCall('mute_channel', { channelId: 'chan-new' }));
     assert.match(reply, /The muted channel list couldn't be saved \(.*couldn't be rewritten after its copy was kept.*\), so as it stands now it wouldn't survive a restart\.$/);
@@ -334,12 +312,8 @@ describe('a store whose file is left in place', () => {
     assert.equal(readFileSync(join(dir, asides('muted.json')[0]), 'utf-8'), 'not json', 'and a copy is kept');
     assert.ok(logged(log).some((line) => line.includes("couldn't rewrite the file")));
     assert.match(debugLog(), /persisted-json:rewrite-failed /);
-    // A restart while the rewrite still fails reads the same content again,
-    // and keeps the one copy it already has.
     await tempsFail(t, () => server(t).ensureMutedLoaded());
     assert.equal(asides('muted.json').length, 1, 'one copy of the same content');
-    // An operator edits that copy in place; the next read keeps the
-    // original's bytes under a name of their own.
     writeFileSync(join(dir, asides('muted.json')[0]), '["chan-fixed"]');
     await tempsFail(t, () => server(t).ensureMutedLoaded());
     const kept = asides('muted.json').map((f) => readFileSync(join(dir, f), 'utf-8')).sort();
@@ -356,7 +330,7 @@ describe('a store whose file is left in place', () => {
     process.env.DISCORD_MCPL_DEBUG_LOG = join(dir, 'debug.log');
     const replies = [
       await s.executeToolCall('mute_channel', { channelId: 'chan-new' }),
-      await s.executeToolCall('mute_channel', { channelId: 'chan-new' }), // a repeat says so too
+      await s.executeToolCall('mute_channel', { channelId: 'chan-new' }),
       await s.executeToolCall('unmute_channel', { channelId: 'chan-new' }),
       await s.executeToolCall('set_reaction_visibility', { channelId: 'chan-new', visible: true }),
       await s.executeToolCall('set_reaction_visibility', { channelId: 'chan-new', visible: true }),
@@ -385,7 +359,6 @@ describe('a store whose file is left in place', () => {
     process.env.DISCORD_MCPL_DEBUG_LOG = join(dir, 'debug.log');
     mkdirSync(join(dir, 'muted.json')); // on Linux its read fails with EISDIR, which root gets too
     const s = server(t);
-    // The first call changes nothing, but the file may not hold the list.
     const first = String(await s.executeToolCall('unmute_channel', { channelId: 'chan-z' }));
     assert.match(first, /^Channel chan-z was not muted\. The muted channel list couldn't be saved/);
     const reply = String(await s.executeToolCall('mute_channel', { channelId: 'chan-new' }));
@@ -453,7 +426,6 @@ describe('the watermark store and the tools', () => {
     await s.executeToolCall('set_reaction_visibility', { channelId: '\tchan-shown\n', visible: true });
     assert.deepEqual(json('muted.json'), ['chan-new', 'chan-old']);
     assert.deepEqual(json('reactions.json'), ['chan-shown']);
-    // Unmuting and reading the tally take it trimmed too.
     assert.match(String(await s.executeToolCall('unmute_channel', { channelId: ' chan-old\t' })), /^Unmuted channel chan-old\./);
     assert.deepEqual(json('muted.json'), ['chan-new']);
     s.subscribeRawChannel('chan-sub');
@@ -488,7 +460,7 @@ describe('the watermark store and the tools', () => {
     await tempsFail(t, async () => {
       assert.doesNotMatch(await call('chan-r'), /couldn't be saved/, 'a no-op makes no save');
     });
-    s.subscribeRawChannel('chan-open'); // an open opts in without saving
+    s.subscribeRawChannel('chan-open');
     assert.deepEqual(json('reactions.json'), ['chan-r']);
     await call('chan-open');
     assert.deepEqual(json('reactions.json'), ['chan-open', 'chan-r'], 'the next call saves the opt-in');
@@ -523,7 +495,7 @@ describe('the watermark store and the tools', () => {
     errors(t);
     const s = server(t);
     await s.executeToolCall('set_reaction_visibility', { channelId: 'chan-c', visible: true });
-    s.subscribeRawChannel('chan-open'); // an open opts in without saving
+    s.subscribeRawChannel('chan-open');
     s.unsubscribeRawChannel('chan-c');
     assert.deepEqual(json('reactions.json'), ['chan-open'], "the close's drop is saved at the close, with the list as it stands");
   });
@@ -602,7 +574,6 @@ describe('a store whose file is there and readable, or not there yet', () => {
       assert.deepEqual(s.missedTally.get('chan-b'), key === 'missed' ? undefined : tally, key);
     }
     fresh();
-    // Base's unsubscribe before any forward: an empty anchor and cursor.
     const unanchored = { anchorId: '', talliedThrough: '', messages: 2, characters: 9 };
     writeFileSync(join(dir, 'watermarks.json'), JSON.stringify({ watermarks: {}, dmChannels: [], missed: { 'chan-c': unanchored } }));
     const s = server(t);
@@ -771,7 +742,7 @@ describe('writeJsonFile', () => {
       for (const code of codes) {
         const path = join(dir, `store-${step}-${code}.json`);
         writeJsonFile(path, ['a']);
-        chmodSync(path, 0o640); // so the chmod runs
+        chmodSync(path, 0o640);
         const inode = statSync(path).ino;
         await withFs(t, step, () => (() => {
           throw refuse(code, step);

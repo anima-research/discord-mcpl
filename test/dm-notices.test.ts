@@ -1,12 +1,3 @@
-/**
- * Durable state behind DM refusal notices: off until the resident turns
- * them on, once per message, at most once a day per sender and a ceiling an
- * hour across senders, nothing for messages older than the state,
- * reservation before send, suspension when the state can't be persisted,
- * operations in the order they were called, and a state that matches its
- * file after a failed write, apart from a settled outcome or a withdrawn
- * reservation, which it keeps for the next write that succeeds.
- */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -35,7 +26,6 @@ function fixture(t: TestContext, start = T0) {
   let now = start;
   const clock = { set: (ms: number) => { now = ms; } };
   const interrupted: Array<{ authorId: string; messageId: string; at: number }> = [];
-  // Flushes of the targets named here fail, as a failing disk's would.
   const failing = new Set<FlushTarget>();
   const sync = async (handle: FileHandle, what: FlushTarget) => {
     if (failing.has(what)) throw new Error(`EIO: ${what} flush failed`);
@@ -43,8 +33,6 @@ function fixture(t: TestContext, start = T0) {
   };
   const make = () => new DmNoticeState({ now: () => now, sync, onInterrupted: (i) => interrupted.push(i) });
   const onDisk = () => JSON.parse(readFileSync(path, 'utf-8'));
-  /** Open the state and turn notices on, as a resident would: they're off
-   *  in a new state. */
   const openOn = async (state: DmNoticeState) => {
     await state.open(path);
     assert.equal(await state.setEnabled(true), null);
@@ -80,11 +68,10 @@ describe('DM notice state', () => {
   it('decides in the order it was asked, each decision seeing the one before', async (t) => {
     const f = fixture(t);
     const state = f.make();
-    void state.open(f.path); // not awaited: the setting and decisions below wait for it
+    void state.open(f.path);
     void state.setEnabled(true);
     const m1 = idAt(T0 + 1000);
     const m2 = idAt(T0 + 2000);
-    // All asked in one tick, as a gateway burst or a catch-up batch would.
     const decisions = await Promise.all([
       state.decide(m1, 'stranger'),
       state.decide(m1, 'stranger'),
@@ -112,7 +99,6 @@ describe('DM notice state', () => {
     const state = f.make();
     await f.openOn(state);
     assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'notify');
-    // The process dies here, after the reservation and before any outcome.
     f.clock.set(T0 + HOUR);
     const restarted = f.make();
     await restarted.open(f.path);
@@ -132,7 +118,6 @@ describe('DM notice state', () => {
     const m2 = idAt(T0 + 2000);
     assert.equal(await state.decide(m1, 'stranger'), 'notify');
     f.clock.set(T0 + 2 * DM_NOTICE_WINDOW_MS);
-    // A duplicate gateway event, or a catch-up re-scan after a restart.
     const reopened = f.make();
     await reopened.open(f.path);
     assert.equal(await reopened.decide(m1, 'stranger'), 'already-handled');
@@ -253,15 +238,12 @@ describe('DM notice state', () => {
     assert.equal(await state.decide(over, 'one-too-many'), 'ceiling-reached');
     assert.equal(readFileSync(f.path, 'utf-8'), before, 'a sender the state does not hold is not recorded: nothing is written');
 
-    // The ceiling is counted from the file, so a restart doesn't reset it.
     f.clock.set(T0 + DM_NOTICE_CEILING_WINDOW_MS - 1);
     const restarted = f.make();
     await restarted.open(f.path);
     assert.equal(await restarted.decide(idAt(T0 + 3000), 'another'), 'ceiling-reached');
     assert.equal(await restarted.decide(over, 'one-too-many'), 'ceiling-reached', 'still unrecorded while the ceiling holds');
 
-    // An hour after those notices, the ceiling has room again; each sender's
-    // own 24-hour limit still stands.
     f.clock.set(T0 + DM_NOTICE_CEILING_WINDOW_MS);
     assert.equal(await restarted.decide(over, 'one-too-many'), 'notify', 'a later sight of an unrecorded message can notify');
     assert.equal(await restarted.decide(idAt(T0 + HOUR, 2), 'knocker-0'), 'rate-limited', 'its own day, not the ceiling');
@@ -271,7 +253,6 @@ describe('DM notice state', () => {
     const f = fixture(t);
     const state = f.make();
     await f.openOn(state);
-    // A sender notified yesterday: held, and outside their own day by now.
     assert.equal(await state.decide(idAt(T0 + 1000), 'regular'), 'notify');
     f.clock.set(T0 + DM_NOTICE_WINDOW_MS + HOUR);
     const now = T0 + DM_NOTICE_WINDOW_MS + HOUR;
@@ -288,7 +269,7 @@ describe('DM notice state', () => {
   it('suspends notices while the state file is invalid, without touching it, and resumes once it is removed', async (t) => {
     const f = fixture(t);
     const state = f.make();
-    await state.open(f.path); // creates it
+    await state.open(f.path);
     writeFileSync(f.path, '{ not json');
     const broken = f.make();
     await broken.open(f.path);
@@ -386,7 +367,7 @@ describe('DM notice state', () => {
     const f = fixture(t);
     const state = f.make();
     await f.openOn(state);
-    f.failing.add('file'); // both the reservation's write and the withdrawal's fail before replacing the file
+    f.failing.add('file');
     assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'suspended');
     assert.equal(f.onDisk().senders.stranger, undefined, 'the file was not replaced');
     f.failing.clear();
@@ -399,12 +380,12 @@ describe('DM notice state', () => {
     const f = fixture(t);
     const state = f.make();
     await f.openOn(state);
-    assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'notify'); // left pending
+    assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'notify');
     const file = f.onDisk();
     file.senders.stranger.lastNotice.at = 8.64e15 + 1;
     writeFileSync(f.path, JSON.stringify(file));
     const reopened = f.make();
-    await reopened.open(f.path); // resolves, so startup goes on
+    await reopened.open(f.path);
     assert.match(reopened.status().error ?? '', /not a valid DM notice state file/);
     assert.equal(await reopened.decide(idAt(T0 + 2000), 'other'), 'suspended');
     assert.deepEqual(f.interrupted, []);
@@ -421,7 +402,7 @@ describe('DM notice state', () => {
       sync: async (handle) => { reached(); await gate; await handle.sync(); },
     });
     assert.deepEqual(state.status(), { path: null, persisted: false, enabled: null, error: 'not opened yet' });
-    const opened = state.open(f.path); // a new state: its first write waits at the flush
+    const opened = state.open(f.path);
     await atFlush;
     assert.equal(state.status().error, 'opening');
     release();
@@ -487,10 +468,9 @@ describe('DM notice state', () => {
     const f = fixture(t);
     const writer = f.make();
     await f.openOn(writer);
-    assert.equal(await writer.decide(idAt(T0 + 1000), 'stranger'), 'notify'); // left pending
+    assert.equal(await writer.decide(idAt(T0 + 1000), 'stranger'), 'notify');
     const pendingFile = readFileSync(f.path, 'utf-8');
 
-    // decide() reopening a repaired file
     writeFileSync(f.path, '{ broken');
     const viaDecide = f.make();
     await viaDecide.open(f.path);
@@ -499,7 +479,6 @@ describe('DM notice state', () => {
     await viaDecide.decide(idAt(T0 + 3000), 'other');
     assert.deepEqual(f.interrupted, [{ authorId: 'stranger', messageId: idAt(T0 + 1000), at: T0 }]);
 
-    // setEnabled() reopening a repaired file
     f.interrupted.length = 0;
     writeFileSync(f.path, '{ broken');
     const viaSetting = f.make();

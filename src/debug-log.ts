@@ -9,6 +9,5 @@ export function dbg(tag: string, info: Record<string, unknown> = {}): void {
       `${new Date().toISOString()} ${tag} ${JSON.stringify(info)}\n`,
     );
   } catch {
-    // Logging is best-effort; never break Discord delivery because of it.
   }
 }

@@ -16,14 +16,10 @@ export interface VoiceEnv {
   voiceName: string;
   textChannels: string[] | null;
   elevenKey: string;
-  /** Voiced threshold (dBFS) for the carrier VAD; default -45. */
   vadThresholdDb: number;
-  /** Max queue wait before an utterance is dropped unspoken with an
-   *  'expired' receipt (DISCORD_VOICE_MAX_HOLD_MS). Null = wait forever. */
   maxHoldMs: number | null;
 }
 
-/** Read voice config from env; null = voice not configured (the common case). */
 export function voiceEnv(): VoiceEnv | null {
   const voiceChannelId = process.env.DISCORD_VOICE_CHANNEL_ID;
   if (!voiceChannelId) return null;

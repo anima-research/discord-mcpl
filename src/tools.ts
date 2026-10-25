@@ -1,8 +1,3 @@
-/**
- * MCP tool definitions and input types for Discord operations.
- * These tools work in both MCP and MCPL mode.
- */
-
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -16,7 +11,6 @@ export interface ToolDefinition {
   _meta?: Record<string, unknown>;
 }
 
-/** Reusable schema for the optional `files` attachment parameter on send tools. */
 const FILES_PROP = {
   type: 'array',
   description: 'Optional attachments: up to 10 files, each supplied by its absolute filesystem path on this host. Discord upload-size limits apply.',
@@ -31,7 +25,6 @@ const FILES_PROP = {
   },
 };
 
-/** Keep everyday addressing instructions local; edge cases live in docs/tool-reference.md. */
 const CHANNEL_ID_DESC =
   'Destination channel. Copy its qualified name from a channel listing (e.g. "#kitchen-table (Separatrix)"), ' +
   'or use a numeric Discord channel ID. Threads, categories and forum roots require numeric IDs. ' +

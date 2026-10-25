@@ -66,8 +66,6 @@ describe('edit/delete push events', () => {
       onChannelRefreshed: noop,
       onChannelStale: noop,
       refreshStale: async () => {},
-      // The cache holds chan1, as it holds a channel an edit or delete comes
-      // from, and nothing else.
       getCachedChannelFacts: (id: string) =>
         id === 'chan1' ? { id, guildId: 'g1', guildName: 'Guild', type: 'text', name: 'general' } : null,
       getCachedChannelFactsFor: () => new Map(),
@@ -230,7 +228,6 @@ describe('edit/delete push events', () => {
     const { edit, del, sent } = wire();
     del('dmchan', 'm5', true, { guildId: null });
     assert.equal(sent[0]!.params.origin.guildId, undefined);
-    // Its other party unknown, a DM not registered yet goes unnamed.
     assert.equal('mcplChannelId' in sent[0]!.params.origin, false);
     edit('dmchan', 'm6', 'zz hola', true, { guildId: null, authorId: 'u2', authorName: '_reim0n' });
     del('dmchan', 'm6', true, { guildId: null });
@@ -243,8 +240,6 @@ describe('edit/delete push events', () => {
     edit('chan1', 'm3', 'zz text', false);
     assert.equal(sent[0]!.params.payload.content[0].text, '[message edited] zz text');
     assert.equal(sent[0]!.params.origin.guildId, undefined);
-    // With no info there's no telling a guild channel from a DM, so no
-    // composite id is guessed.
     assert.equal('mcplChannelId' in sent[0]!.params.origin, false);
   });
 

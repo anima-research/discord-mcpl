@@ -30,7 +30,6 @@ function fixture(t: TestContext, options: Partial<ConstructorParameters<typeof D
   const edits: MessageEventInfo[] = [];
   const deletes: MessageEventInfo[] = [];
   const reactions: ReactionEvent[] = [];
-  /** What reached the server, in the order it arrived. */
   const order: string[] = [];
   adapter.onMessage((message) => { delivered.push(message); order.push('create'); });
   adapter.onMessageEdit((_channelId, _messageId, _content, _isDM, info) => { if (info) edits.push(info); order.push('edit'); });
@@ -48,9 +47,6 @@ function fixture(t: TestContext, options: Partial<ConstructorParameters<typeof D
     };
   }
   const emit = (event: string, ...args: unknown[]) => (client.emit as (event: string, ...args: unknown[]) => boolean)(event, ...args);
-  /** Wait until every create waiting on a thread lookup, and every edit or
-   *  delete being placed, has been decided, failing within 10 s rather than
-   *  hanging the run when one never is. */
   async function settle(ms = 10_000) {
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<never>((_resolve, reject) => {
@@ -67,7 +63,6 @@ function fixture(t: TestContext, options: Partial<ConstructorParameters<typeof D
       clearTimeout(timer);
     }
   }
-  /** Wait, at most 10 s, until `count` reactions have reached the server. */
   async function reacted(count: number, ms = 10_000) {
     const deadline = Date.now() + ms;
     while (reactions.length < count) {
@@ -246,7 +241,6 @@ describe('thread fields', () => {
       Object.assign(partly, { name: 'late-thread', parentId: 'chan-1' });
       return partly;
     });
-    // A failed lookup is logged; keep the test's output quiet.
     t.mock.method(console, 'error', () => {});
     return { partly, forced };
   }
@@ -255,7 +249,6 @@ describe('thread fields', () => {
   const lateThread = { threadId: 'thread-2', threadName: 'late-thread', threadParentName: 'general' };
 
   it("come with an edit and a delete that wait for their create's lookup, named by what it found", async (t) => {
-    // Found in review by Daphne, whose probe this test is built from.
     const f = fixture(t);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -332,7 +325,6 @@ describe('thread fields', () => {
     assert.deepEqual(f.order, ['create', 'reaction']);
     assert.deepEqual(named(f.reactions[0]), lateThread);
     assert.equal(forced.length, 1, "it uses the create's lookup");
-    // With no create waiting, a reaction in a partly known thread looks it up itself.
     const g = fixture(t);
     const other = partlyKnownThread(g, t);
     g.emit('messageReactionAdd', { partial: false, emoji: { name: '👍', id: null }, message: g.message({ channelId: 'thread-2', channel: other.partly }) }, user);
@@ -342,7 +334,6 @@ describe('thread fields', () => {
   });
 
   it("come with an edit and a delete whose thread lookup fails, decided by the filters on what's known", async (t) => {
-    // No channel list: they're delivered, the thread unnamed.
     const open = fixture(t);
     const a = partlyKnownThread(open, t, undefined, true);
     const posted = open.message({ channelId: 'thread-2', channel: a.partly });
@@ -353,8 +344,6 @@ describe('thread fields', () => {
     for (const info of [open.edits[0], open.deletes[0]]) {
       assert.deepEqual(named(info), { threadId: 'thread-2', threadName: undefined, threadParentName: null });
     }
-    // A channel list that admits only the thread's channel can't place it, so
-    // they're withheld, as its creates are.
     const listed = fixture(t, { guildChannels: { g1: ['chan-1'] } });
     const b = partlyKnownThread(listed, t, undefined, true);
     const there = listed.message({ channelId: 'thread-2', channel: b.partly });

@@ -16,30 +16,23 @@
 const INVISIBLE = '\\p{Cf}\\p{Default_Ignorable_Code_Point}';
 // eslint-disable-next-line no-control-regex
 const STRUCTURAL = /[[\]\u00b7"\\\u0000-\u001f\u007f-\u009f\u2028\u2029]| \/ /u;
-/** An invisible character or a non-ASCII space; tested with emoji sequences taken out. */
 const UNSEEN_OUTSIDE_EMOJI = new RegExp(`[${INVISIBLE}]|(?! )\\p{Zs}`, 'u');
 const UNSEEN = new RegExp(`[\\u007f-\\u009f\\u2028\\u2029${INVISIBLE}]|(?! )\\p{Zs}`, 'gu');
-/** A well-formed emoji sequence: an emoji with an optional skin tone or presentation selector, joined to more by ZWJ. */
 const EMOJI_SEQUENCE = /\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|[\u{FE0E}\u{FE0F}])?(?:\u{200D}\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|[\u{FE0E}\u{FE0F}])?)*/gu;
-/** In a quoted value: an emoji sequence, kept as it is, or a character to escape. */
 const QUOTED_ESCAPES = new RegExp(`(${EMOJI_SEQUENCE.source})|${UNSEEN.source}`, 'gu');
 
-/** A header field: quoted when it could read as structure, else as is. */
 export function headerValue(value: string): string {
   return STRUCTURAL.test(value) || UNSEEN_OUTSIDE_EMOJI.test(value.replace(EMOJI_SEQUENCE, '')) ? quotedValue(value) : value;
 }
 
-/** The label: also quoted when it begins with one of the header's own words. */
 export function labelValue(label: string): string {
   return /^\s*(?:thread|reply\s+to|unscoped)(?:\s|$)/i.test(label) ? quotedValue(label) : headerValue(label);
 }
 
-/** The standalone header: `[source: <canonical id> · <label>]`, the label left out when unknown. */
 export function renderSourceHeader(channelId: string, label?: string | null): string {
   return `[source: ${headerValue(channelId)}${label ? ` · ${labelValue(label)}` : ''}]`;
 }
 
-/** A value as a quoted, escaped string literal that always stays on one line. */
 export function quotedValue(value: string): string {
   // JSON.stringify escapes the C0 controls, quotes and backslashes, but
   // leaves DEL, the C1 controls (U+0085 NEL breaks a line), U+2028 / U+2029,

@@ -16,7 +16,6 @@ const DM = '777777777777777777';
 const RECIPIENT = '333333333333333333';
 const BOT = '222222222222222222';
 const recipient = { id: RECIPIENT, username: 'ra', discriminator: '0' };
-/** Long enough to be sent in two parts. */
 const TWO_PARTS = `${'a'.repeat(1800)}\n${'b'.repeat(700)}`;
 
 type Body = { content?: string; nonce?: string; enforce_nonce?: boolean; files?: number };

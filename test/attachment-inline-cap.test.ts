@@ -10,7 +10,6 @@ import { toolDefinitions } from '../src/tools.js';
 
 const ENV_KEY = 'DISCORD_ATTACHMENT_INLINE_MAX_BYTES';
 
-/** A 1x1 transparent PNG: real bytes, so the sharp normalization path runs. */
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64',
@@ -44,7 +43,6 @@ async function buildBlocks(attachments: DiscordAttachment[]): Promise<Block[]> {
   return server.buildAttachmentBlocks(attachments);
 }
 
-/** All inlined text across blocks, for asserting body bytes did/didn't land. */
 function allText(blocks: Block[]): string {
   return blocks.map((b) => b.text ?? '').join('\n');
 }
@@ -148,7 +146,6 @@ describe('attachment inline cap (issue #30)', () => {
       makeAttachment({ id: 'a2', name: 'notes.txt', url: textUrl, size: 5 }),
     ]);
     assert.deepEqual(fetchCalls, [imageUrl, textUrl]);
-    // One note for the message, after all of its markers.
     assert.deepEqual(blocks.map((block) => block.type), ['image', 'text', 'text', 'text']);
     assert.equal(blocks[1].text, `[image attachment: pixel.png — ${imageUrl} ${EXPIRES}]`);
     assert.equal(blocks[2].text, `[attachment: notes.txt (5B) — ${textUrl} ${EXPIRES}]\nnote\n`);
@@ -208,7 +205,7 @@ describe('attachment inline cap (issue #30)', () => {
   });
 
   it('caps on actual bytes when the declared size lies small', async () => {
-    const body = 'y'.repeat(6000); // declared 100, actually 6000
+    const body = 'y'.repeat(6000);
     stubFetch(body);
     const blocks = await buildBlocks([makeAttachment({ size: 100 })]);
     assert.equal(fetchCalls.length, 1);
@@ -230,8 +227,8 @@ describe('attachment inline cap (issue #30)', () => {
   });
 
   it('honors a raised cap, clamped to the 256KiB absolute ceiling', async () => {
-    process.env[ENV_KEY] = String(10 * 1024 * 1024); // asks for 10MB
-    const body = 'z'.repeat(300 * 1024); // 300KB > 256KiB ceiling
+    process.env[ENV_KEY] = String(10 * 1024 * 1024);
+    const body = 'z'.repeat(300 * 1024);
     stubFetch(body);
     const blocks = await buildBlocks([makeAttachment({ size: 300 * 1024, name: 'big.log' })]);
     const text = allText(blocks);
@@ -250,8 +247,8 @@ describe('attachment inline cap (issue #30)', () => {
   });
 
   it('rejects a malformed env value and falls back to the 5KiB default', async () => {
-    process.env[ENV_KEY] = '5kb'; // parseInt would silently read 5 — must not
-    const body = 'w'.repeat(4000); // under the default cap, over a bogus 5-byte cap
+    process.env[ENV_KEY] = '5kb';
+    const body = 'w'.repeat(4000);
     stubFetch(body);
     const blocks = await buildBlocks([makeAttachment({ size: 4000 })]);
     assert.ok(allText(blocks).includes(body), 'falls back to default, inlines a 4KB file');
@@ -269,7 +266,7 @@ describe('attachment inline cap (issue #30)', () => {
     // A reader may deliver far more than the remaining allowance in a single chunk.
     let pulls = 0;
     let cancelled = false;
-    const giant = new Uint8Array(10 * 1024 * 1024).fill(0x79); // 10MB of 'y'
+    const giant = new Uint8Array(10 * 1024 * 1024).fill(0x79);
     const stream = new ReadableStream<Uint8Array>(
       {
         pull(controller) {
@@ -288,7 +285,7 @@ describe('attachment inline cap (issue #30)', () => {
       return new Response(stream);
     }) as typeof fetch;
 
-    const blocks = await buildBlocks([makeAttachment({ size: 100 })]); // declared small
+    const blocks = await buildBlocks([makeAttachment({ size: 100 })]);
     const text = allText(blocks);
     assert.ok(!text.includes('yyyy'), 'giant chunk must not become a text block');
     assert.ok(text.includes('inline cap'), text);
@@ -369,7 +366,6 @@ describe('attachment inline cap (issue #30)', () => {
       assert.ok(marker, `no marker for ${name} (${form}): ${markers.join(' | ')}`);
       assert.ok(marker.includes(`${at(name)} ${EXPIRES}]`), marker);
     }
-    // The refresh note comes once, last, after every marker.
     assert.deepEqual(blocks.filter((block) => block.text === LINKS_NOTE.text).length, 1);
     assert.deepEqual(blocks[blocks.length - 1], LINKS_NOTE);
   });

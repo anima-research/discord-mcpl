@@ -1,9 +1,3 @@
-/**
- * Refusals a tool gives before it does anything: each says what didn't
- * happen and what the agent can do about it.
- *
- * Run: node --import tsx --test test/tool-refusals.test.ts
- */
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -35,12 +29,10 @@ const tempDir = (t: TestContext) => {
   return dir;
 };
 
-/** The channelId refusal: what was wrong with the value, and how to give one. */
 const needsChannelId = (nothing: string, tool: string, wrong: string) =>
   `${nothing}: ${tool} needs channelId${wrong}. Give the channel's id in quotes, such as "123456789012345678", ` +
   "or, for a text, announcement, voice or stage channel, its #name. list_channels with guildId, a server's id " +
   'from list_guilds, lists the channels there that the configured filters allow, with their ids.';
-/** Values a required string argument can't take, and how each fell short. */
 const wrongChannelIds: Array<[unknown, string]> = [
   [undefined, ', and this call gave none'],
   [null, ', and this call gave none'],
@@ -70,7 +62,6 @@ describe('tool refusals say what did not happen', () => {
     ['set_reaction_visibility', 'Nothing was done'],
     ['mute_channel', 'Nothing was done'],
     ['unmute_channel', 'Nothing was done'],
-    // A read, as the history reads are.
     ['channel_missed', 'Nothing was read'],
   ]) {
     it(`${tool} without a usable channelId says ${nothing.toLowerCase()}, what was wrong with it, and how to give one`, async (t) => {
@@ -125,7 +116,6 @@ describe('tool refusals say what did not happen', () => {
       ['send_message', { channelId: '123456789012345678', content: '  ' }],
       ['reply_message', { channelId: '123456789012345678', messageId: '1' }],
       ['send_dm', { userId: '123456789012345678', files: [] }],
-      // null is content left out, as before, and so is false.
       ['send_message', { channelId: '123456789012345678', content: null }],
       ['send_message', { channelId: '123456789012345678', content: false }],
     ] as const) {
@@ -156,8 +146,6 @@ describe('tool refusals say what did not happen', () => {
       assert.equal(r.isError, true, tool);
       assert.equal(r.content[0].text, 'Nothing was sent: the message is empty. Give it "content", "files", or both.', tool);
     }
-    // A DM reply after the first has no hint of its own, so send_dm's
-    // description is what says where the reply's text goes.
     const dm = toolDefinitions.find((d) => d.name === 'send_dm')!.description;
     assert.match(dm, /To reply to a DM you received, pass the sender's name or id as `userId` and your reply as `content`\./);
   });
@@ -167,9 +155,7 @@ describe('tool refusals say what did not happen', () => {
     for (const [tool, args, gave] of [
       ['send_message', { channelId: '123456789012345678', content: 42 }, 'a number'],
       ['reply_message', { channelId: '123456789012345678', messageId: '1', content: { text: 'hi' } }, 'an object'],
-      // 0 may have been meant as "0", so the files don't go without it.
       ['send_dm', { userId: '123456789012345678', content: 0, files: [{ path: '/tmp/a.png' }] }, 'a number'],
-      // Falsy, with no files: still this refusal, not the empty message's.
       ['send_message', { channelId: '123456789012345678', content: 0 }, 'a number'],
       ['send_message', { channelId: '123456789012345678', content: true }, 'a boolean'],
     ] as const) {
@@ -182,7 +168,6 @@ describe('tool refusals say what did not happen', () => {
 
   it('send_dm without a usable userId says nothing was sent and how to name the recipient, looking nothing up', async (t) => {
     const s = server(t);
-    // Each lookup a send_dm makes, recorded: none runs for a refused userId.
     const adapter = (s as unknown as { discord: DiscordAdapter }).discord;
     const looked: string[] = [];
     t.mock.method(adapter as unknown as { resolveRecipientId: (r: string) => Promise<string> }, 'resolveRecipientId',
@@ -278,7 +263,6 @@ describe('a send refused for its files says nothing was sent, and what to send i
     const needsPath = (i: number) =>
       `Nothing was sent: files[${i}] needs "path", the path of a file on the machine running discord-mcpl, as a non-empty string`;
     for (const [files, end] of [
-      // An entry that isn't an object is named by its kind.
       [[null], ', and this call gave null.'],
       [[42], ', and this call gave a number.'],
       [[true], ', and this call gave a boolean.'],
@@ -287,9 +271,7 @@ describe('a send refused for its files says nothing was sent, and what to send i
       [[{ path: 42 }], '.'],
       [[{ path: ' ' }], '.'],
       [['/tmp/a.png'], ': give it as {"path": "/tmp/a.png"}.'],
-      // The form to copy holds the path trimmed.
       [[' /tmp/a.png\n'], ': give it as {"path": "/tmp/a.png"}.'],
-      // A blank string is no path to give in that form.
       [['  '], ', and this one is blank.'],
     ] as const) {
       await assert.rejects(send(adapter, files), { message: `${needsPath(0)}${end}` }, JSON.stringify(files));
@@ -351,7 +333,6 @@ describe('a send refused for its files says nothing was sent, and what to send i
     const through = join(plain, 'inner.png');
     await assert.rejects(send(adapter, [{ path: through }]), { message: `Nothing was sent: "${through}" doesn't exist ${end}` });
     await assert.rejects(send(adapter, [{ path: dir }]), { message: `Nothing was sent: "${dir}" isn't a file ${end}` });
-    // A relative path is read against the working directory, which the agent can't see.
     await assert.rejects(send(adapter, [{ path: 'no-such-file.png' }]), {
       message: `Nothing was sent: "no-such-file.png" (read as ${resolve('no-such-file.png')}) doesn't exist ${end}`,
     });

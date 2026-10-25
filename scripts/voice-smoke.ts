@@ -55,11 +55,8 @@ client.once('ready', async () => {
   const sink = new DiscordVoiceSink(Number.isFinite(vadDb) ? vadDb : undefined);
   await sink.connect(client, guildId, vcId);
 
-  // Narrate the physics as it happens.
   sink.gate.onSpeakerStart((s) =>
     console.log(`  [carrier] + ${s.bot ? 'BOT' : 'human'} SPEECH: ${s.username ?? s.userId}`));
-  // Live level meter: once per second per speaker, peak dBFS — calibrate
-  // DISCORD_VOICE_VAD_DB against what your room actually measures.
   const peaks = new Map<string, number>();
   sink.onLevel((userId, db) => {
     if (db > (peaks.get(userId) ?? -Infinity)) peaks.set(userId, db);
@@ -68,7 +65,6 @@ client.once('ready', async () => {
     for (const [u, db] of peaks) console.log(`  [level] ${u}: peak ${db === -Infinity ? '-inf' : db.toFixed(1)} dBFS`);
     peaks.clear();
   }, 1000).unref();
-  // Gate transitions: sample fast, print only busy↔clear edges with timing.
   let wasBusy = false; let since = Date.now();
   setInterval(() => {
     const b = sink.gate.busy();

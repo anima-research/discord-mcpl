@@ -23,18 +23,14 @@ import {
 
 type Sent = Record<string, unknown>;
 
-/** The probe: a `marks` request naming no action. */
 const isProbe = (p: Sent): boolean => p.command === 'marks' && p.action === undefined;
 
 /** How agent-framework#250 answers the probe. */
 const VERB_ANSWER = { ok: false, error: 'marks needs action list, cancel or retract' };
 const NO_VERB_ANSWER = { ok: false, error: 'Unknown host command: marks' };
-/** What a refusal after a failed probe ends with, at /undo and /marks. */
 const PROBE_AGAIN = 'Running it again can work after a timeout, or once the host is back if it was restarting. ' +
   'If the host refuses host commands, whoever runs it has to allow them for this server (`allowHostCommands`).';
 
-/** A host whose host/command answers are scripted; `marksVerb` decides how
- *  it answers the probe, `{ fails }` making the probe's request fail. */
 function host(opts: {
   marksVerb: 'yes' | 'no' | { fails: unknown };
   answer?: (params: Sent) => unknown;
@@ -54,10 +50,6 @@ function host(opts: {
   return { conn, sent, probes: () => sent.filter(isProbe), commands: () => sent.filter((p) => !isProbe(p)) };
 }
 
-/** A server over `conn`, recording the reactions it places itself, which only
- *  a /hide with marks chosen does. `refuse` names messages whose reaction
- *  Discord refuses, each with its error when given as a map; `hold` keeps every reaction waiting until its gate opens,
- *  calling `onCall` as each one starts. */
 function serverWith(conn: unknown, refuse: string[] | Record<string, string> = [], hold?: { gate: Promise<void>; onCall: () => void }) {
   const reactions: Array<{ channelId: string; messageId: string; emoji: string }> = [];
   const discord = {
@@ -227,7 +219,6 @@ describe('/undo and the marks choice', () => {
 });
 
 describe('the marks probe', () => {
-  /** A host whose probes wait until the test answers them, in order. */
   function gatedHost() {
     const sent: Sent[] = [];
     const probes: Array<{ resolve: (answer: unknown) => void; reject: (err: Error) => void }> = [];
@@ -242,7 +233,6 @@ describe('the marks probe', () => {
     };
     return { conn, sent, probes, undos: () => sent.filter((p) => p.command === 'undo').length };
   }
-  /** Let the commands in flight run until they wait on the host. */
   const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
   it('names no action, so the host reads nothing to answer it', async () => {
@@ -335,7 +325,6 @@ describe('replies stay within one message, and never misreport an applied surger
     const probed: Array<[string, Record<string, string>]> = [['marks', { action: 'list' }], ['undo', {}]];
     const failedProbe = { sendRequest: async () => { throw new Error(longError); } };
     const refusing = { sendRequest: async (_m: string, p: Sent) => (isProbe(p) ? VERB_ANSWER : { ok: false, error: longError }) };
-    // /hide asks no probe, so only the host's own refusal reaches it.
     const cases = [
       [failedProbe, /couldn't learn whether/i, probed],
       [refusing, /failed: e/, [...probed, ['hide', { message: '111111111111111111', marks: 'all' }]]],
@@ -349,7 +338,6 @@ describe('replies stay within one message, and never misreport an applied surger
         assert.ok(reply.length <= REPLY_LIMIT, `${name}: ${reply.length}`);
         assert.match(reply, refused, name);
         assert.match(reply, /cut to fit one message/, name);
-        // The host's refusal attaches its answer whole; a failed probe has no answer to attach.
         const [file] = i.out.files.at(-1)!;
         if (conn === refusing) assert.deepEqual(JSON.parse(file!.attachment.toString('utf8')), { ok: false, error: longError }, name);
         else assert.equal(file!.name, 'reply.txt', name);
@@ -430,12 +418,10 @@ describe('replies stay within one message, and never misreport an applied surger
     });
     const ledger = ', and `/marks action:list` for a 💤 batch it may have scheduled,';
     const notAdded = "Marks: no 💤 was added, since this server adds them only once it has read the host's answer.";
-    // [marksVerb, command, options, the ledger pointer, the line that no 💤 was added]
     const cases: Array<['yes' | 'no', string, Record<string, string>, boolean, boolean]> = [
       ['yes', 'undo', {}, false, false],
       ['yes', 'undo', { marks: 'none' }, false, false],
       ['yes', 'undo', { marks: 'addressed' }, true, false],
-      // A hide's marks are this server's own, added only after the host's answer, so no batch.
       ['yes', 'hide', { message: '111111111111111111', marks: 'all' }, false, true],
       ['no', 'hide', { message: '111111111111111111', marks: 'all' }, false, true],
       ['yes', 'hide', { message: '111111111111111111' }, false, false],
@@ -529,7 +515,6 @@ describe('an answer only `ok: false` makes a failure', () => {
         const shown = name === 'marks' ? `/marks action:${options.action}` : `/${name}`;
         const i = interaction(name, options);
         await asAdmin(() => server.handleSlashCommand(i.value));
-        // The check comes before the answer, so a cut takes only the answer.
         assert.equal(
           i.out.replies.at(-1),
           `⚠️ The host answered ${shown} in a shape this server can't read, so it may have been applied. ${check}\nHere it is as sent:\n\`\`\`json\n${JSON.stringify(odd)}\n\`\`\``,
@@ -604,7 +589,6 @@ describe('/hide and its 💤', () => {
       const i = interaction('hide', { message: '111111111111111111', marks: 'all' });
       await asAdmin(() => server.handleSlashCommand(i.value));
       assert.equal('marks' in h.commands()[0]!, false, marksVerb);
-      // The composite channel id is read as its channel.
       assert.deepEqual(reactions, [{ channelId: 'c1', messageId: 'm1', emoji: '💤' }, { channelId: 'c1', messageId: 'm2', emoji: '💤' }], marksVerb);
       assert.deepEqual(i.out.replies, [
         `${removed(2)}\nMarks: adding 💤 to 2 hidden messages…`,
@@ -639,7 +623,6 @@ describe('/hide and its 💤', () => {
     const { server, reactions } = serverWith(h.conn, [], { gate: Promise.resolve(), onCall: () => { if (i.out.replies.length === 0) early++; } });
     const done = asAdmin(() => server.handleSlashCommand(i.value));
     await i.firstEditStarted;
-    // A turn of the event loop, for any marking that didn't wait for the first reply.
     await new Promise((resolve) => setImmediate(resolve));
     open();
     await done;
@@ -699,7 +682,6 @@ describe('/hide and its 💤', () => {
     const three = [...hidden, { channelId: 'c1', messageId: 'm3' }];
     const long = 'L'.repeat(500);
     const h = hiding({ ok: true, hidden: 3, hiddenRefs: three });
-    // m1's refusal settles first, and m3's after it.
     const { server } = serverWith(h.conn, { m1: 'first refusal', m3: 'second refusal' });
     const i = interaction('hide', { message: '111111111111111111', marks: 'all' });
     await asAdmin(() => server.handleSlashCommand(i.value));
@@ -709,7 +691,6 @@ describe('/hide and its 💤', () => {
     const li = interaction('hide', { message: '111111111111111111', marks: 'all' });
     await asAdmin(() => ls.server.handleSlashCommand(li.value));
     assert.ok(li.out.replies.at(-1)!.includes(`(first error: ${'L'.repeat(399)}…)`));
-    // The adapter's account of an unusable channel, about 350 characters with its remedy last, is quoted whole.
     const short = hiding({ ok: true, hidden: 1, hiddenRefs: [hidden[1]!] });
     const ss = serverWith(short.conn, { m2: 'L'.repeat(397) + 'END' });
     const si = interaction('hide', { message: '111111111111111111', marks: 'all' });
@@ -963,7 +944,6 @@ describe('/marks', () => {
   });
 
   it('says so when a cancel found nothing still waiting to be sent, keeping its heading', async () => {
-    // Everything the batch asked for had already gone out.
     const receipt = { target: 'batch-2', kind: 'batch', cancelled: 0, confirmed: 3, mayStillLand: 0 };
     const h = host({ marksVerb: 'yes', answer: (p) => (p.action === 'cancel' ? { ok: true, awareness: receipt } : { ok: true }) });
     const { server } = serverWith(h.conn);
@@ -1099,8 +1079,6 @@ describe('/marks', () => {
   });
 
   it('shows a ledger with an entry it cannot read as sent, listed or opened', async () => {
-    // A cancel stamp with no time: rendering it would have shown "unknown
-    // time" for a field the host does send, so it's shown as sent instead.
     const partial = batch(2, { cancelled: {} });
     const h = host({ marksVerb: 'yes', answer: listing([batch(1), partial]) });
     const { server } = serverWith(h.conn);
@@ -1123,16 +1101,13 @@ describe('/marks', () => {
     const { server } = serverWith(conn);
     const r = interaction('marks', { action: 'retract', target: 'b-1' });
     await asAdmin(() => server.handleSlashCommand(r.value));
-    // A retract the host queued is an entry of its own, found in the list by its target: the batch's entry doesn't show it.
     assert.equal(r.out.replies.at(-1), '⚠️ /marks action:retract outcome unknown (connection lost): the host may already have queued the removals. Check `/marks action:list` for a retract of `b-1` before trying again; the ledger lists newest first.');
     const all = interaction('marks', { action: 'retract', target: 'all' });
     await asAdmin(() => server.handleSlashCommand(all.value));
     assert.equal(all.out.replies.at(-1), '⚠️ /marks action:retract outcome unknown (connection lost): the host may already have queued the removals. Check `/marks action:list` for a retract of all before trying again; the ledger lists newest first.');
-    // A cancel of all names no entry, so its check is the whole ledger, never a retract.
     const cancelAll = interaction('marks', { action: 'cancel', target: 'all' });
     await asAdmin(() => server.handleSlashCommand(cancelAll.value));
     assert.equal(cancelAll.out.replies.at(-1), '⚠️ /marks action:cancel outcome unknown (connection lost): the host may already have cancelled it. Check `/marks action:list` before trying again.');
-    // A target as long as Discord allows is clipped, so the check after it fits too, in each text it reaches.
     const longTarget = 't'.repeat(2500);
     for (const action of ['retract', 'cancel']) {
       const lt = interaction('marks', { action, target: longTarget });
@@ -1147,13 +1122,11 @@ describe('/marks', () => {
     const lu = interaction('marks', { action: 'retract', target: longTarget });
     await asAdmin(() => odd.server.handleSlashCommand(lu.value));
     assert.ok(lu.out.replies.at(-1)!.includes(`for a retract of \`${'t'.repeat(99)}…\` before trying again; the ledger lists newest first.`));
-    // And the short account of an accepted control whose receipt can't be read.
     const acc = host({ marksVerb: 'yes', answer: () => ({ ok: true, awareness: { requestId: 'r-9' } }) });
     const a = serverWith(acc.conn);
     const la = interaction('marks', { action: 'retract', target: longTarget }, { rejectEdits: 1 });
     await asAdmin(() => a.server.handleSlashCommand(la.value));
     assert.ok(la.out.replies.at(-1)!.startsWith(`✅ The host accepted /marks action:retract \`${'t'.repeat(99)}…\` (its receipt couldn't be read).`));
-    // A long transit error is clipped, so the check after it always fits.
     const long = { sendRequest: async (_m: string, p: Sent) => { if (!p.requesterId) return { ok: true, awareness: [] }; throw new Error('x'.repeat(3000)); } };
     const l = serverWith(long);
     const li = interaction('marks', { action: 'retract', target: 'b-1' });
@@ -1199,10 +1172,8 @@ describe('/marks', () => {
       // A retract's cancel: no pointer, since retract takes a batch id or all.
       ['cancel', { target: 'r-5', kind: 'retract', cancelled: 1, confirmed: 0, mayStillLand: 0 },
         '✅ Cancelled retract `r-5`: 1 reaction will never be requested; cancel removes nothing from Discord.'],
-      // A retract whose target names no message queued nothing.
       ['retract', { requestId: 'r-6', removalsQueued: 0, addsSuperseded: 0, keysWithUnresolvedAdds: 0 },
         '✅ Retract `r-6` queued no removal: its target names no message.'],
-      // An accepted control whose receipt can't be read.
       ['retract', { requestId: 'r-7' }, "✅ The host accepted /marks action:retract `b-1` (its receipt couldn't be read). `/marks action:list` shows what it did."],
     ];
     for (const [action, receipt, short] of receipts) {
@@ -1330,8 +1301,6 @@ describe('rendering', () => {
   it("reads a ledger entry only when every field it shows has the type it's read as", () => {
     assert.ok(isView(batch(1)));
     assert.ok(isView(retractView(1)));
-    // Shown as the host names them: a later host's batch state, AF's legacy
-    // scope, a reaction state this server doesn't know.
     const later = batch(1, { status: 'staged', scope: 'legacy', reactions: { queued: 1, superseded: 2 } });
     assert.ok(isView(later));
     assert.match(renderListPage([later], 1), /— staged, legacy, 3 messages \(lena\): reactions queued 1, superseded 2\n/);

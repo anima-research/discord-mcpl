@@ -13,7 +13,6 @@ function fixture(t: TestContext) {
   });
   const client = adapter.rawClient;
   t.after(() => client.destroy());
-  // The bot is in the guild these deletions come from.
   (client.guilds as any)._add({ id: 'g1', name: 'Guild' });
   const server = new DiscordMcplServer(adapter);
   const s = server as any;
