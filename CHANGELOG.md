@@ -5,6 +5,31 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Fixed
+
+- **`filters_update` refuses an update that would empty the server list,
+  or that it can't read as written.** A `removeGuilds` that removed the
+  last listed server left the list empty, and an empty list admits every
+  server the bot is in, so the agent heard every server, though the tool
+  says a removed server's events stop being delivered. Such a call is now
+  refused, and nothing changes; the refusal says to keep another server
+  listed, by adding one in the same call. Refused the same way, naming
+  the value it can't read:
+  - an `addGuilds` entry that isn't a server id, or a server id, a colon
+    and channel ids joined by `+` (`"111:"` and `"111::222"` were read as
+    the whole server, and `"111:+"` as an empty channel list);
+  - an id, in any of `addGuilds`, `removeGuilds` and `setDmUsers`, that
+    isn't a string or is empty, or has whitespace, a colon, a comma or a
+    plus sign inside it (a numeric id in `removeGuilds` lifted that
+    server's channel list instead of removing the server, and a
+    `setDmUsers` of empty strings admitted DMs from anyone).
+
+  Whitespace around an id is ignored, as it already was for channel ids,
+  and an argument given as `null` is read as left out. A call that sets
+  only the DM notice needs no filters file when the lists beside it are
+  `null` or an empty `addGuilds` or `removeGuilds`. A filters file with an
+  empty `guildIds` still means every server.
+
 ## 0.4.0 — 2026-10-22
 
 ### Upgrade notes
