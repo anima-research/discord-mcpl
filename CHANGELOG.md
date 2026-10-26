@@ -15,10 +15,13 @@ in the git log and PR descriptions.
   survive the next reconnect. Only `unmute_channel` lifts a mute now. An
   open of a muted channel still opens it and returns its history, and its
   answer carries `muted: true` and a `note` naming `unmute_channel`.
-  Unmuting a channel that is already open says its traffic is back. A host
-  shows the agent that note only if it passes the open's `note` on:
-  agent-framework's `channel_open` answer carries only `history` and
-  `historyTruncated` at present.
+  Unmuting a channel that is already open says its traffic is back, and
+  `mute_channel`'s and `unmute_channel`'s descriptions say that an open
+  keeps a mute. A host shows the agent the open's note only if it passes the
+  `note` on: agent-framework's `channel_open` answer carries only `history`
+  and `historyTruncated` at present. Deliveries owed to a channel that is
+  opened while muted are now given up, as they are for any muted channel;
+  before, the open lifted the mute and they were delivered.
 
 ## 0.5.0 — 2026-10-26
 
