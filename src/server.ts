@@ -137,6 +137,10 @@ type ChannelOpenRequest = ChannelsOpenParams & {
 type ChannelOpenResponse = ChannelsOpenResult & {
   history?: ChannelsIncomingParams['messages'];
   historyTruncated?: boolean;
+  /** Set when the channel opened is muted (#95): it opens and returns its history, and the mute stays. */
+  muted?: true;
+  /** What to tell the agent about the mute, naming unmute_channel. */
+  note?: string;
 };
 
 interface ChannelRefresh {
@@ -2008,6 +2012,11 @@ export class DiscordMcplServer {
         const compositeId = this.channelManager.getAll()
           .find((channel) => parseMcplChannelId(channel.id)?.channelId === channelId)?.id;
         const target = compositeId ? `channelId "${compositeId}"` : 'its MCPL channel id';
+        // A channel opened while muted is already open (#95), so its traffic is back as of now.
+        if (removed && compositeId && this.channelManager.isOpen(compositeId)) {
+          return `Unmuted channel ${channelId}. It is open, so its traffic and direct addresses reach you again.` +
+            unsavedNote('muted channel list', unsaved);
+        }
         return (
           (removed
             ? `Unmuted channel ${channelId}. Direct addresses will reach you again. Ordinary traffic requires channel_open with ${target}. If the host still shows it as open, use channel_close then channel_open with the same id to reconcile.`
@@ -3554,6 +3563,12 @@ export class DiscordMcplServer {
       result.historyTruncated = backscroll.truncated;
     }
     this.subscribeRawChannel(parsed.channelId);
+    if (this.isChannelMuted(parsed.channelId)) {
+      result.muted = true;
+      result.note =
+        `${opened.id} is muted: it is open and its history is returned, but its traffic doesn't reach you and a ` +
+        `mention or reply doesn't wake you. unmute_channel("${parsed.channelId}") brings its traffic back.`;
+    }
     return result;
   }
 
@@ -3647,8 +3662,9 @@ export class DiscordMcplServer {
     }
     this.ensureWatermarkLoaded();
     if (this.missedTally.delete(channelId)) this.saveWatermark();
-    this.ensureMutedLoaded();
-    if (this.mutedChannels.delete(channelId)) this.saveMuted();
+    // An open leaves a mute in place (#95): only unmute_channel lifts one. A host's reconcile channels/open, after a
+    // reconnect or a restart, is the same request as an explicit open, so lifting it here undid mute_channel
+    // whenever the host still wanted the channel open. The open's answer says the channel is muted instead.
   }
 
   private unsubscribeRawChannel(channelId: string): void {
