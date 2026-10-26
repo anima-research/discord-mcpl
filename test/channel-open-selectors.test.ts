@@ -43,6 +43,8 @@ const historyItem = (channelId: string) => ({
 interface OpenResult {
   channel: { id: string; label: string };
   history?: Array<{ channelId: string; content: Array<{ text: string }> }>;
+  muted?: true;
+  note?: string;
 }
 
 function fixture(
@@ -729,12 +731,45 @@ describe('channels/open: what arrives during the lookup or the history fetch sta
     assert.equal(f.server.channelManager.isOpen('discord:g1:t1'), true);
   });
 
-  it('still lifts a mute that was in place before the open began', async () => {
+  // #95: this test used to assert the opposite ("still lifts a mute that was in place before the open began",
+  // from #62). An open lifted the mute silently, and a host's reconcile open (after a reconnect or a restart) is
+  // the same request to this server, so a mute set with mute_channel didn't survive the host still wanting the
+  // channel open. Only unmute_channel lifts a mute now, and the open says the channel is muted (Lottie's ruling).
+  it('keeps a mute in place through an open, returns the history, and says the channel is muted (#95)', async () => {
     const f = fixture([general]);
     await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
-    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord', history: { limit: 5 } });
+    const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord', history: { limit: 5 } });
+    assert.equal(f.server.mutedChannels.has('c1'), true, 'the mute stays');
+    assert.equal(f.server.channelManager.isOpen('discord:g1:c1'), true, 'the channel opens');
+    assert.equal(res.history?.length, 1, 'with its history');
+    assert.equal(res.muted, true);
+    assert.match(res.note ?? '', /muted/);
+    assert.match(res.note ?? '', /unmute_channel\("c1"\)/);
+  });
+
+  it("keeps a mute through a host's reconcile open, which asks for no history: #95's founding case", async () => {
+    const f = fixture([general]);
+    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
+    const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    assert.equal(f.server.mutedChannels.has('c1'), true, 'the mute survives the reconcile');
+    assert.equal(res.muted, true);
+  });
+
+  it('says nothing about a mute when the channel opened is not muted', async () => {
+    const f = fixture([general]);
+    const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord', history: { limit: 5 } });
+    assert.equal(res.muted, undefined);
+    assert.equal(res.note, undefined);
+  });
+
+  it('unmuting a channel that was opened while muted says its traffic is back, since it is already open', async () => {
+    const f = fixture([general]);
+    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
+    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    const answer = String(await f.server.executeToolCall('unmute_channel', { channelId: 'c1' }));
     assert.equal(f.server.mutedChannels.has('c1'), false);
-    assert.deepEqual(f.subscribed(), ['c1']);
+    assert.match(answer, /open/);
+    assert.doesNotMatch(answer, /requires channel_open/, 'no reopen asked for a channel that is already open');
   });
 
   it('answers a history fetch that fails as an open that failed, with its cause, and opens nothing', async () => {
