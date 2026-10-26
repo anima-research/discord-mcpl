@@ -5,6 +5,21 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Fixed
+
+- **A mute survives an open of its channel, a host's reconcile open
+  included (#95).** Opening a muted channel lifted the mute and saved the
+  muted list without it, and a host's reconcile `channels/open` (after a
+  reconnect, or a server restart, while the host still wanted the channel
+  open) is the same request, so a mute set with `mute_channel` didn't
+  survive the next reconnect. Only `unmute_channel` lifts a mute now. An
+  open of a muted channel still opens it and returns its history, and its
+  answer carries `muted: true` and a `note` naming `unmute_channel`.
+  Unmuting a channel that is already open says its traffic is back. A host
+  shows the agent that note only if it passes the open's `note` on:
+  agent-framework's `channel_open` answer carries only `history` and
+  `historyTruncated` at present.
+
 ## 0.5.0 — 2026-10-26
 
 ### Changed
