@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.5.0 — 2026-10-26
+
 ### Changed
 
 - **A message edit carries the edited message's address tags, as its
