@@ -137,10 +137,6 @@ type ChannelOpenRequest = ChannelsOpenParams & {
 type ChannelOpenResponse = ChannelsOpenResult & {
   history?: ChannelsIncomingParams['messages'];
   historyTruncated?: boolean;
-  /** Set when the channel opened is muted (#95): it opens and returns its history, and the mute stays. */
-  muted?: true;
-  /** What to tell the agent about the mute, naming unmute_channel. */
-  note?: string;
 };
 
 interface ChannelRefresh {
@@ -2006,14 +2002,15 @@ export class DiscordMcplServer {
 
       case 'unmute_channel': {
         const channelId = requiredChannelId('unmute_channel', args.channelId);
+        this.ensureSubscriptionsLoaded();
         this.ensureMutedLoaded();
         const removed = this.mutedChannels.delete(channelId);
         const unsaved = removed || this.mutedUnsaved ? this.saveMuted() : null;
         const compositeId = this.channelManager.getAll()
           .find((channel) => parseMcplChannelId(channel.id)?.channelId === channelId)?.id;
         const target = compositeId ? `channelId "${compositeId}"` : 'its MCPL channel id';
-        // A channel opened while muted is already open (#95), so its traffic is back as of now.
         if (removed && compositeId && this.channelManager.isOpen(compositeId)) {
+          this.subscribeRawChannel(channelId);
           return `Unmuted channel ${channelId}. It is open, so its traffic and direct addresses reach you again.` +
             unsavedNote('muted channel list', unsaved);
         }
@@ -2050,6 +2047,14 @@ export class DiscordMcplServer {
         const channelId = requiredChannelId('channel_missed', args.channelId, 'Nothing was read');
         this.ensureSubscriptionsLoaded();
         this.ensureWatermarkLoaded();
+        if (this.isChannelMuted(channelId)) {
+          return {
+            ...this.resolveChannelMeta(channelId),
+            subscribed: false,
+            muted: true,
+            note: `Muted: nothing posted in this channel is delivered to you as it's posted, mentions and replies included, until unmute_channel("${channelId}") lifts the mute. Opening it doesn't.`,
+          };
+        }
         if (this.subscribedChannels.has(channelId)) {
           return {
             ...this.resolveChannelMeta(channelId),
@@ -2411,7 +2416,7 @@ export class DiscordMcplServer {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         for (const id of parsed) {
-          if (typeof id === 'string' && id.length > 0) this.subscribedChannels.add(id);
+          if (typeof id === 'string' && id.length > 0 && !this.isChannelMuted(id)) this.subscribedChannels.add(id);
         }
       }
       dbg('subscriptions:loaded', { count: this.subscribedChannels.size, path });
@@ -3563,12 +3568,6 @@ export class DiscordMcplServer {
       result.historyTruncated = backscroll.truncated;
     }
     this.subscribeRawChannel(parsed.channelId);
-    if (this.isChannelMuted(parsed.channelId)) {
-      result.muted = true;
-      result.note =
-        `${opened.id} is muted: it is open and its history is returned, but its traffic doesn't reach you and a ` +
-        `mention or reply doesn't wake you. unmute_channel("${parsed.channelId}") brings its traffic back.`;
-    }
     return result;
   }
 
@@ -3651,6 +3650,7 @@ export class DiscordMcplServer {
   }
 
   private subscribeRawChannel(channelId: string): void {
+    if (this.isChannelMuted(channelId)) return;
     this.ensureSubscriptionsLoaded();
     if (!this.subscribedChannels.has(channelId)) {
       this.subscribedChannels.add(channelId);
@@ -3662,9 +3662,6 @@ export class DiscordMcplServer {
     }
     this.ensureWatermarkLoaded();
     if (this.missedTally.delete(channelId)) this.saveWatermark();
-    // An open leaves a mute in place (#95): only unmute_channel lifts one. A host's reconcile channels/open, after a
-    // reconnect or a restart, is the same request as an explicit open, so lifting it here undid mute_channel
-    // whenever the host still wanted the channel open. The open's answer says the channel is muted instead.
   }
 
   private unsubscribeRawChannel(channelId: string): void {

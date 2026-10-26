@@ -55,7 +55,7 @@ function fixture(t: TestContext, filed?: string) {
   return { server, pushes, react, open };
 }
 
-it('a muted channel delivers no reactions, and they return with channel_open, not with unmute', async (t) => {
+it('a muted channel delivers no reactions, and once the mute has closed it they return with channel_open, not with unmute', async (t) => {
   const f = fixture(t);
   f.server.subscribeRawChannel('chan1');
   f.react();

@@ -43,8 +43,6 @@ const historyItem = (channelId: string) => ({
 interface OpenResult {
   channel: { id: string; label: string };
   history?: Array<{ channelId: string; content: Array<{ text: string }> }>;
-  muted?: true;
-  note?: string;
 }
 
 function fixture(
@@ -84,6 +82,9 @@ function fixture(
     },
     getCachedChannelFactsFor(channelIds: Iterable<string>) {
       return opts.cachedFacts ? opts.cachedFacts([...channelIds]) : new Map();
+    },
+    getCachedChannelMeta() {
+      return null;
     },
   } as unknown as DiscordAdapter;
   const server = new DiscordMcplServer(adapter) as unknown as {
@@ -731,90 +732,6 @@ describe('channels/open: what arrives during the lookup or the history fetch sta
     assert.equal(f.server.channelManager.isOpen('discord:g1:t1'), true);
   });
 
-  // #95: this test used to assert the opposite ("still lifts a mute that was in place before the open began",
-  // from #62). An open lifted the mute silently, and a host's reconcile open (after a reconnect or a restart) is
-  // the same request to this server, so a mute set with mute_channel didn't survive the host still wanting the
-  // channel open. Only unmute_channel lifts a mute now, and the open says the channel is muted (Lottie's ruling).
-  it('keeps a mute in place through an open, returns the history, and says the channel is muted (#95)', async () => {
-    const f = fixture([general]);
-    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
-    const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord', history: { limit: 5 } });
-    assert.equal(f.server.mutedChannels.has('c1'), true, 'the mute stays');
-    assert.equal(f.server.channelManager.isOpen('discord:g1:c1'), true, 'the channel opens');
-    assert.equal(res.history?.length, 1, 'with its history');
-    assert.equal(res.muted, true);
-    assert.match(res.note ?? '', /muted/);
-    assert.match(res.note ?? '', /unmute_channel\("c1"\)/);
-  });
-
-  it("keeps a mute through a host's reconcile open, which asks for no history: #95's founding case", async () => {
-    const f = fixture([general]);
-    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
-    const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
-    assert.equal(f.server.mutedChannels.has('c1'), true, 'the mute survives the reconcile');
-    assert.equal(res.muted, true);
-  });
-
-  it('says nothing about a mute when the channel opened is not muted', async () => {
-    const f = fixture([general]);
-    const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord', history: { limit: 5 } });
-    assert.equal(res.muted, undefined);
-    assert.equal(res.note, undefined);
-  });
-
-  // #95's founding case is a restart: the mute was set before the host reconnected, so the server that answers the
-  // reconcile is not the one that muted. A fresh server over the same muted file must keep it.
-  it('keeps a mute set before a restart through the new server\'s reconcile open, and leaves the muted file as it was', async (t: TestContext) => {
-    const dir = mkdtempSync(join(tmpdir(), 'open-mute-restart-'));
-    t.after(() => { delete process.env.DISCORD_MUTED_CHANNELS_FILE; rmSync(dir, { recursive: true, force: true }); });
-    process.env.DISCORD_MUTED_CHANNELS_FILE = join(dir, 'muted.json');
-    await fixture([general]).server.executeToolCall('mute_channel', { channelId: 'c1' });
-    const before = readFileSync(process.env.DISCORD_MUTED_CHANNELS_FILE, 'utf8');
-    const after = fixture([general]);
-    const res = await after.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
-    assert.equal(res.muted, true, 'the new server reads the mute before it answers');
-    assert.equal(readFileSync(process.env.DISCORD_MUTED_CHANNELS_FILE, 'utf8'), before, 'and the file still holds it');
-    const third = await fixture([general]).server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
-    assert.equal(third.muted, true, 'and so does the next restart');
-  });
-
-  it('unmuting a muted channel that is not open still asks for channel_open', async () => {
-    const f = fixture([general]);
-    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
-    const answer = String(await f.server.executeToolCall('unmute_channel', { channelId: 'c1' }));
-    assert.match(answer, /requires channel_open/);
-    assert.doesNotMatch(answer, /reach you again\.$/);
-  });
-
-  it('unmuting an open channel that was never muted says it was not muted', async () => {
-    const f = fixture([general]);
-    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
-    assert.equal(String(await f.server.executeToolCall('unmute_channel', { channelId: 'c1' })), 'Channel c1 was not muted.');
-  });
-
-  it('unmuting a channel that is already open still says when the muted list could not be saved', async (t: TestContext) => {
-    const dir = mkdtempSync(join(tmpdir(), 'open-mute-unsaved-'));
-    t.after(() => { delete process.env.DISCORD_MUTED_CHANNELS_FILE; rmSync(dir, { recursive: true, force: true }); });
-    writeFileSync(join(dir, 'a-file'), '');
-    process.env.DISCORD_MUTED_CHANNELS_FILE = join(dir, 'a-file', 'muted.json'); // under a regular file: every save fails
-    const f = fixture([general]);
-    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
-    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
-    const answer = String(await f.server.executeToolCall('unmute_channel', { channelId: 'c1' }));
-    assert.match(answer, /^Unmuted channel c1\. It is open/);
-    assert.match(answer, /muted channel list couldn't be saved/);
-  });
-
-  it('unmuting a channel that was opened while muted says its traffic is back, since it is already open', async () => {
-    const f = fixture([general]);
-    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
-    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
-    const answer = String(await f.server.executeToolCall('unmute_channel', { channelId: 'c1' }));
-    assert.equal(f.server.mutedChannels.has('c1'), false);
-    assert.match(answer, /open/);
-    assert.doesNotMatch(answer, /requires channel_open/, 'no reopen asked for a channel that is already open');
-  });
-
   it('answers a history fetch that fails as an open that failed, with its cause, and opens nothing', async () => {
     const f = fixture([general], { history: async () => { throw new Error('Missing Access'); } });
     await assert.rejects(
@@ -1124,5 +1041,128 @@ describe('the adapter: which channels an exact open may register', () => {
     assert.deepEqual(deleted, ['g1/text']);
     assert.equal(client.channels.cache.has('text'), false);
     assert.equal(adapter.isStale('text'), false);
+  });
+});
+
+describe('channels/open and a mute (#95)', () => {
+  const listed = async (f: ReturnType<typeof fixture>) =>
+    ((await f.server.executeToolCall('list_subscriptions', {})) as { channels: string[] }).channels;
+  const missed = async (f: ReturnType<typeof fixture>) =>
+    (await f.server.executeToolCall('channel_missed', { channelId: 'c1' })) as { subscribed: boolean; muted?: true; note: string };
+  const unmute = async (f: ReturnType<typeof fixture>) => String(await f.server.executeToolCall('unmute_channel', { channelId: 'c1' }));
+
+  it('keeps a mute through an open, which opens the channel and returns its history but subscribes nothing', async () => {
+    const f = fixture([general]);
+    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
+    const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord', history: { limit: 5 } });
+    assert.equal(f.server.channelManager.isOpen('discord:g1:c1'), true, 'the channel opens');
+    assert.equal(res.history?.length, 1, 'with its history');
+    assert.deepEqual(await listed(f), [], 'list_subscriptions leaves it out');
+    const report = await missed(f);
+    assert.equal(report.subscribed, false);
+    assert.equal(report.muted, true, 'channel_missed says it is muted');
+    assert.match(report.note, /unmute_channel\("c1"\)/);
+    assert.match(await unmute(f), /^Unmuted channel c1\./, 'the mute was still there to lift');
+  });
+
+  it("keeps a mute through a host's reconcile open, which asks for no history", async () => {
+    const f = fixture([general]);
+    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
+    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    assert.deepEqual(await listed(f), []);
+    assert.equal((await missed(f)).muted, true, 'the mute survives the reconcile');
+  });
+
+  it("keeps a mute set before a restart through the new server's reconcile open, and leaves the muted file as it was", async (t: TestContext) => {
+    const dir = mkdtempSync(join(tmpdir(), 'open-mute-restart-'));
+    t.after(() => { delete process.env.DISCORD_MUTED_CHANNELS_FILE; rmSync(dir, { recursive: true, force: true }); });
+    process.env.DISCORD_MUTED_CHANNELS_FILE = join(dir, 'muted.json');
+    await fixture([general]).server.executeToolCall('mute_channel', { channelId: 'c1' });
+    const before = readFileSync(process.env.DISCORD_MUTED_CHANNELS_FILE, 'utf8');
+    const second = fixture([general]);
+    await second.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    assert.equal((await missed(second)).muted, true, 'the new server reads the mute before it answers');
+    assert.deepEqual(await listed(second), []);
+    assert.equal(readFileSync(process.env.DISCORD_MUTED_CHANNELS_FILE, 'utf8'), before, 'and the file still holds it');
+    const third = fixture([general]);
+    await third.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    assert.equal((await missed(third)).muted, true, 'and so does the next restart');
+  });
+
+  it('leaves out of the subscriptions a muted channel that the subscriptions file lists, after a restart', async (t: TestContext) => {
+    const dir = mkdtempSync(join(tmpdir(), 'open-mute-subscribed-'));
+    t.after(() => {
+      delete process.env.DISCORD_MUTED_CHANNELS_FILE;
+      delete process.env.DISCORD_SUBSCRIPTIONS_FILE;
+      rmSync(dir, { recursive: true, force: true });
+    });
+    process.env.DISCORD_SUBSCRIPTIONS_FILE = join(dir, 'subs.json');
+    process.env.DISCORD_MUTED_CHANNELS_FILE = join(dir, 'muted.json');
+    writeFileSync(process.env.DISCORD_SUBSCRIPTIONS_FILE, JSON.stringify(['c1']));
+    const first = fixture([general]);
+    assert.deepEqual(await listed(first), ['c1'], 'the file subscribes it');
+    await first.server.executeToolCall('mute_channel', { channelId: 'c1' });
+    const second = fixture([general]);
+    assert.deepEqual(await listed(second), [], 'muted, it is not subscribed after the restart');
+    await second.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    assert.deepEqual(await listed(second), [], 'nor once the host opens it');
+    assert.equal((await missed(second)).muted, true);
+  });
+
+  it('unmuting, as the first call after a restart, a closed channel that the subscriptions file lists leaves it to channel_open, as its answer says', async (t: TestContext) => {
+    const dir = mkdtempSync(join(tmpdir(), 'open-mute-unmute-first-'));
+    t.after(() => {
+      delete process.env.DISCORD_MUTED_CHANNELS_FILE;
+      delete process.env.DISCORD_SUBSCRIPTIONS_FILE;
+      rmSync(dir, { recursive: true, force: true });
+    });
+    process.env.DISCORD_SUBSCRIPTIONS_FILE = join(dir, 'subs.json');
+    process.env.DISCORD_MUTED_CHANNELS_FILE = join(dir, 'muted.json');
+    writeFileSync(process.env.DISCORD_SUBSCRIPTIONS_FILE, JSON.stringify(['c1']));
+    await fixture([general]).server.executeToolCall('mute_channel', { channelId: 'c1' });
+    const second = fixture([general]);
+    assert.match(await unmute(second), /requires channel_open/);
+    assert.deepEqual(await listed(second), [], 'not subscribed until it is opened');
+  });
+
+  it('unmuting a channel that was opened while muted subscribes it and says its traffic is back, asking for no reopen', async () => {
+    const f = fixture([general]);
+    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
+    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    const answer = await unmute(f);
+    assert.match(answer, /traffic and direct addresses reach you again/);
+    assert.doesNotMatch(answer, /requires channel_open/, 'no reopen asked for a channel that is already open');
+    assert.deepEqual(await listed(f), ['c1'], 'list_subscriptions lists it again');
+    const report = await missed(f);
+    assert.equal(report.subscribed, true);
+    assert.equal(report.muted, undefined);
+  });
+
+  it('unmuting a muted channel that is not open still asks for channel_open, and subscribes nothing', async () => {
+    const f = fixture([general]);
+    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
+    const answer = await unmute(f);
+    assert.match(answer, /requires channel_open/);
+    assert.match(answer, /use channel_close then channel_open with the same id to reconcile/);
+    assert.deepEqual(await listed(f), []);
+  });
+
+  it('unmuting an open channel that was never muted says it was not muted', async () => {
+    const f = fixture([general]);
+    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    assert.equal(await unmute(f), 'Channel c1 was not muted.');
+  });
+
+  it('unmuting a channel that is open still says when the muted list could not be saved', async (t: TestContext) => {
+    const dir = mkdtempSync(join(tmpdir(), 'open-mute-unsaved-'));
+    t.after(() => { delete process.env.DISCORD_MUTED_CHANNELS_FILE; rmSync(dir, { recursive: true, force: true }); });
+    writeFileSync(join(dir, 'a-file'), '');
+    process.env.DISCORD_MUTED_CHANNELS_FILE = join(dir, 'a-file', 'muted.json'); // under a regular file: every save fails
+    const f = fixture([general]);
+    await f.server.executeToolCall('mute_channel', { channelId: 'c1' });
+    await f.server.handleChannelOpen({ channelId: 'discord:g1:c1', type: 'discord' });
+    const answer = await unmute(f);
+    assert.match(answer, /^Unmuted channel c1\. It is open/);
+    assert.match(answer, /muted channel list couldn't be saved/);
   });
 });
