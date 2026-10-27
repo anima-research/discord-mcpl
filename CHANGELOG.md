@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.5.1 — 2026-10-27
+
 ### Fixed
 
 - **`filters_update` refuses an update that would empty the server list,
