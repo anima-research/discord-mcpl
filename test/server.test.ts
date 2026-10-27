@@ -77,7 +77,13 @@ class MockDiscordAdapter {
   simulateDelete(channelId: string, messageId: string, isDM: boolean, info?: unknown): void {
     this._deleteHandler?.(channelId, messageId, isDM, info);
   }
-  onReaction(): void {}
+  private _reactionHandler?: (ev: unknown) => void;
+  onReaction(handler: (ev: unknown) => void): void {
+    this._reactionHandler = handler;
+  }
+  simulateReaction(ev: unknown): void {
+    this._reactionHandler?.(ev);
+  }
   onReady(): void {}
 
   historyIngressReason(): string | null {
@@ -3087,5 +3093,68 @@ describe('RFC-006 coalescing', () => {
     assert.equal((e1.params as Push).coalesce, undefined);
     assert.notEqual((e1.params as Push).eventId, (e2.params as Push).eventId);
     await h.finish();
+  });
+});
+
+describe('a channel opened while muted (#95)', () => {
+  it('delivers none of its messages, edits, deletes or reactions, and unmute_channel brings them back with no reopen', async (t) => {
+    const { client, serverConn, discord } = await createTestPair();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
+    await mcplHandshake(client);
+    const reg = await nextWithin(client);
+    if (reg.type === 'request') client.sendResponse(reg.request.id, {});
+    const tool = async (name: string) =>
+      ((await client.sendRequest('tools/call', { name, arguments: { channelId: 'c1' } })) as { content: Array<{ text?: string }> })
+        .content[0]?.text ?? '';
+    const message = (id: string, mentions: string[] = []): DiscordMessageData => ({
+      id, content: `${id} text`, cleanContent: `${id} text`, authorId: 'u1', authorName: 'Bob', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server', mentions, attachments: [], timestamp: new Date(),
+    });
+    const reaction = (messageId: string) => ({
+      channelId: 'c1', messageId, guildId: 'g1', userId: 'u1', userName: 'Bob', action: 'add', emoji: '😀', emojiId: null,
+      token: '😀', onOwnMessage: false, messageSnippet: 'hello', timestamp: new Date(),
+    });
+    const traffic = (prefix: string) => {
+      discord.simulateMessage(message(`${prefix}-ambient`));
+      discord.simulateMessage(message(`${prefix}-mention`, ['bot_123']));
+      discord.simulateEdit('c1', `${prefix}-edited`, 'second version', false, { guildId: 'g1', authorName: 'Bob', editedAt: '2026-10-26T00:00:01.000Z' });
+      discord.simulateDelete('c1', `${prefix}-deleted`, false, { guildId: 'g1', authorName: 'Bob' });
+      discord.simulateReaction(reaction(`${prefix}-reacted`));
+    };
+
+    await tool('mute_channel');
+    await client.sendRequest(method.CHANNELS_OPEN, { channelId: 'discord:g1:c1', type: 'discord' });
+    traffic('muted');
+    assert.match(await tool('unmute_channel'), /traffic and direct addresses reach you again/);
+    traffic('unmuted');
+
+    const expected = [
+      'chat:deleted:unmuted-deleted',
+      'chat:edited:unmuted-edited',
+      'chat:reaction:unmuted-reacted',
+      'unmuted-ambient',
+      'unmuted-mention',
+    ];
+    const seen: string[] = [];
+    while (!expected.every((e) => seen.includes(e))) {
+      const m = await nextWithin(client, 5_000);
+      if (m.type !== 'request') assert.fail(`expected a request, got a ${m.type}`);
+      const params = m.request.params as Record<string, unknown>;
+      if (m.request.method === method.CHANNELS_INCOMING) {
+        const messages = (params as unknown as ChannelsIncomingParams).messages;
+        seen.push(...messages.map((x) => x.messageId));
+        client.sendResponse(m.request.id, { results: messages.map((x) => ({ messageId: x.messageId, accepted: true })) });
+      } else {
+        const origin = (params as unknown as PushEventParams).origin as Record<string, unknown>;
+        seen.push(`${(params as unknown as PushEventParams).tags?.join(',')}:${String(origin.messageId)}`);
+        client.sendResponse(m.request.id, { accepted: true });
+      }
+      assert.deepEqual(seen.filter((s) => !expected.includes(s)), [], 'nothing from the muted phase, and nothing else');
+    }
   });
 });

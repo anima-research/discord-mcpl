@@ -5,6 +5,27 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Fixed
+
+- **A mute survives an open of its channel, a host's reconcile open
+  included (#95).** Opening a muted channel lifted the mute and saved the
+  muted list without it, and a host's reconcile `channels/open` (after a
+  reconnect, or a server restart, while the host still wanted the channel
+  open) is the same request, so a mute set with `mute_channel` didn't
+  survive the next reconnect. Only `unmute_channel` lifts a mute now. An
+  open of a muted channel still opens it and returns any history it asks
+  for, but leaves its traffic stopped, and it isn't subscribed:
+  `list_subscriptions` leaves it out, `channel_missed` says it's muted and
+  names `unmute_channel`, and after a restart a channel that
+  `DISCORD_SUBSCRIPTIONS_FILE` lists isn't subscribed while it's muted.
+  Unmuting a channel that is open brings its traffic back with no reopen,
+  and says so. `mute_channel`'s description says that `channel_open`
+  doesn't lift a mute, and both descriptions say that unmuting's answer
+  says whether traffic is back or still needs `channel_open`. Deliveries
+  owed to a channel that is opened while muted are now given up, as they
+  are for any muted channel; before, the open lifted the mute and they
+  were delivered.
+
 ## 0.5.0 — 2026-10-26
 
 ### Changed

@@ -2002,12 +2002,18 @@ export class DiscordMcplServer {
 
       case 'unmute_channel': {
         const channelId = requiredChannelId('unmute_channel', args.channelId);
+        this.ensureSubscriptionsLoaded();
         this.ensureMutedLoaded();
         const removed = this.mutedChannels.delete(channelId);
         const unsaved = removed || this.mutedUnsaved ? this.saveMuted() : null;
         const compositeId = this.channelManager.getAll()
           .find((channel) => parseMcplChannelId(channel.id)?.channelId === channelId)?.id;
         const target = compositeId ? `channelId "${compositeId}"` : 'its MCPL channel id';
+        if (removed && compositeId && this.channelManager.isOpen(compositeId)) {
+          this.subscribeRawChannel(channelId);
+          return `Unmuted channel ${channelId}. It is open, so its traffic and direct addresses reach you again.` +
+            unsavedNote('muted channel list', unsaved);
+        }
         return (
           (removed
             ? `Unmuted channel ${channelId}. Direct addresses will reach you again. Ordinary traffic requires channel_open with ${target}. If the host still shows it as open, use channel_close then channel_open with the same id to reconcile.`
@@ -2041,6 +2047,14 @@ export class DiscordMcplServer {
         const channelId = requiredChannelId('channel_missed', args.channelId, 'Nothing was read');
         this.ensureSubscriptionsLoaded();
         this.ensureWatermarkLoaded();
+        if (this.isChannelMuted(channelId)) {
+          return {
+            ...this.resolveChannelMeta(channelId),
+            subscribed: false,
+            muted: true,
+            note: `Muted: nothing posted in this channel is delivered to you as it's posted, mentions and replies included, until unmute_channel("${channelId}") lifts the mute. Opening it doesn't.`,
+          };
+        }
         if (this.subscribedChannels.has(channelId)) {
           return {
             ...this.resolveChannelMeta(channelId),
@@ -2402,7 +2416,7 @@ export class DiscordMcplServer {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         for (const id of parsed) {
-          if (typeof id === 'string' && id.length > 0) this.subscribedChannels.add(id);
+          if (typeof id === 'string' && id.length > 0 && !this.isChannelMuted(id)) this.subscribedChannels.add(id);
         }
       }
       dbg('subscriptions:loaded', { count: this.subscribedChannels.size, path });
@@ -3636,6 +3650,7 @@ export class DiscordMcplServer {
   }
 
   private subscribeRawChannel(channelId: string): void {
+    if (this.isChannelMuted(channelId)) return;
     this.ensureSubscriptionsLoaded();
     if (!this.subscribedChannels.has(channelId)) {
       this.subscribedChannels.add(channelId);
@@ -3647,8 +3662,6 @@ export class DiscordMcplServer {
     }
     this.ensureWatermarkLoaded();
     if (this.missedTally.delete(channelId)) this.saveWatermark();
-    this.ensureMutedLoaded();
-    if (this.mutedChannels.delete(channelId)) this.saveMuted();
   }
 
   private unsubscribeRawChannel(channelId: string): void {
