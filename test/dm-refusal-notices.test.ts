@@ -626,6 +626,9 @@ describe('the notice setting', () => {
     assert.ok(first.logs.some((l) => /sender stranger.*notice silenced/.test(l)));
     await assert.rejects(first.server.filtersUpdate({ setDmNotice: true, setDmUsers: ['x'] }), /DISCORD_FILTERS_FILE is not set/);
     assert.equal(JSON.parse(readFileSync(noticesPath, 'utf-8')).enabled, false, 'a refused filter change applies nothing');
+    const leftOut = await first.server.filtersUpdate({ setDmNotice: true, addGuilds: [], removeGuilds: null, setDmUsers: null });
+    assert.equal(leftOut.applied.dmNotice, true, 'null lists, and an empty list to add or remove, change no filter, so this needs no filters file');
+    await first.server.filtersUpdate({ setDmNotice: false });
     const on = await first.server.filtersUpdate({ setDmNotice: true });
     assert.equal(on.applied.dmNotice, true);
     await assert.rejects(first.server.filtersUpdate({ setDmNotice: 'no' }), /true or false/);
@@ -655,6 +658,8 @@ describe('the notice setting', () => {
       rmSync(dir, { recursive: true, force: true });
     });
     const h = await harness(t, { dmUsers: ['friend'] });
+    const kept = await h.server.filtersUpdate({ setDmNotice: null, setDmUsers: ['friend'] });
+    assert.equal(kept.applied.dmNotice, true, 'a null setDmNotice leaves the setting as it was');
     const res = await h.server.filtersUpdate({ setDmNotice: false, setDmUsers: ['friend', 'new-friend'] });
     assert.equal(res.applied.dmNotice, false);
     assert.deepEqual(JSON.parse(readFileSync(path, 'utf-8')), { dmUsers: ['friend', 'new-friend'] });

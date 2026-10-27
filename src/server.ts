@@ -2169,10 +2169,46 @@ export class DiscordMcplServer {
   }
 
   private async filtersUpdate(args: Record<string, unknown>): Promise<unknown> {
-    if (args.setDmNotice !== undefined && typeof args.setDmNotice !== 'boolean') {
+    if (args.setDmNotice != null && typeof args.setDmNotice !== 'boolean') {
       throw new Error('setDmNotice must be true or false. Nothing was changed.');
     }
-    const setDmNotice = args.setDmNotice as boolean | undefined;
+    const shown = (value: unknown): string => JSON.stringify(value) ?? String(value);
+    const ID = /^[^\s:+,]+$/;
+    const id = (text: string): string | undefined => (ID.test(text.trim()) ? text.trim() : undefined);
+    const entry = (text: string): { text: string; gid: string; channels?: string[] } | undefined => {
+      const colon = text.indexOf(':');
+      const gid = id(colon < 0 ? text : text.slice(0, colon));
+      if (gid === undefined) return undefined;
+      if (colon < 0) return { text, gid };
+      const channels = text.slice(colon + 1).split('+').filter((part) => part.trim()).map(id);
+      if (!channels.length || channels.includes(undefined)) return undefined;
+      return { text, gid, channels: channels as string[] };
+    };
+    const listOf = <T>(key: string, what: string, read: (text: string) => T | undefined): T[] | undefined => {
+      const value = args[key];
+      if (value == null) return undefined;
+      if (!Array.isArray(value)) {
+        throw new Error(`${key} takes a list of ${what}, not ${shown(value)}. Nothing was changed.`);
+      }
+      return value.map((item) => {
+        const parsed = typeof item === 'string' ? read(item) : undefined;
+        if (parsed === undefined) {
+          const why = typeof item === 'string' ? "isn't one" : "isn't a string";
+          throw new Error(`${key} takes a list of ${what}, and ${shown(item)} ${why}. Nothing was changed.`);
+        }
+        return parsed;
+      });
+    };
+    const ids = (kind: string) => `${kind} ids, each a string with no spaces, colons, commas or plus signs`;
+    const addGuilds = listOf(
+      'addGuilds',
+      'entries, each a server id alone, for all its channels, or a server id with the channel ids to add ' +
+        '("serverId:channelId+channelId")',
+      entry,
+    ) ?? [];
+    const removeGuilds = listOf('removeGuilds', ids('server'), id) ?? [];
+    const setDmUsers = listOf('setDmUsers', ids('user'), id);
+    const setDmNotice = (args.setDmNotice ?? undefined) as boolean | undefined;
     const applyNotice = async (notes: string[]): Promise<void> => {
       if (setDmNotice === undefined) return;
       const unconfirmed = await this.dmNoticeState().setEnabled(setDmNotice);
@@ -2183,7 +2219,7 @@ export class DiscordMcplServer {
       );
       if (unconfirmed) notes.push(`The notice setting is in effect but not confirmed durable: ${unconfirmed}`);
     };
-    const filterChange = ['addGuilds', 'removeGuilds', 'setDmUsers'].some((k) => args[k] !== undefined);
+    const filterChange = addGuilds.length > 0 || removeGuilds.length > 0 || setDmUsers !== undefined;
     if (setDmNotice !== undefined && !filterChange) {
       const notes: string[] = [];
       await applyNotice(notes);
@@ -2219,20 +2255,15 @@ export class DiscordMcplServer {
     };
     const notes: string[] = [];
 
-    const addGuilds = (args.addGuilds as string[] | undefined) ?? [];
-    const removeGuilds = (args.removeGuilds as string[] | undefined) ?? [];
     if ((addGuilds.length || removeGuilds.length) && !next.guildIds?.length) {
       next.guildIds = (await this.discord.listGuilds()).map((g) => g.id);
       notes.push(
         'Guild filter was unrestricted; materialized it as the list of all current guilds before applying your change.',
       );
     }
-    for (const entry of addGuilds) {
-      const [gid, chans] = entry.split(':', 2);
-      if (!gid) continue;
+    for (const { text: entry, gid, channels: wanted } of addGuilds) {
       if (!next.guildIds!.includes(gid)) next.guildIds!.push(gid);
-      if (chans) {
-        const wanted = chans.split('+').map((s) => s.trim()).filter(Boolean);
+      if (wanted) {
         const existing = next.guildChannels?.[gid];
         if (existing) {
           (next.guildChannels ??= {})[gid] = [...new Set([...existing, ...wanted])];
@@ -2252,11 +2283,18 @@ export class DiscordMcplServer {
       next.guildIds = next.guildIds!.filter((g) => g !== gid);
       if (next.guildChannels) delete next.guildChannels[gid];
     }
+    if (removeGuilds.length && !next.guildIds!.length) {
+      throw new Error(
+        `Removing ${removeGuilds.join(', ')} would leave no server listed, and an empty server list admits every ` +
+          'server the bot is in. To narrow what you hear, keep another server listed: add one you want to hear ' +
+          "(addGuilds) in the same call. With no other server to keep, this tool can't stop that one's events. " +
+          'Nothing was changed.',
+      );
+    }
 
-    if (args.setDmUsers !== undefined) {
-      const list = (args.setDmUsers as string[]).map(String).filter(Boolean);
-      next.dmUsers = list.length ? list : undefined;
-      if (!list.length) notes.push('DM whitelist cleared — DMs from ANYONE are now delivered.');
+    if (setDmUsers !== undefined) {
+      next.dmUsers = setDmUsers.length ? setDmUsers : undefined;
+      if (!setDmUsers.length) notes.push('DM whitelist cleared — DMs from ANYONE are now delivered.');
     }
 
     saveFiltersFile(path, next);
