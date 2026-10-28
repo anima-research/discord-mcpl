@@ -187,13 +187,13 @@ describe('filters_update refuses an entry that isn\'t a server id or a server id
   }
 
   const notIdLists: Array<[string, Record<string, unknown>, RegExp]> = [
-    ['a number in removeGuilds', { removeGuilds: [111] }, /removeGuilds takes a list of server ids, .* and 111 isn't a string/],
-    ['a number in addGuilds', { addGuilds: [222] }, /addGuilds takes a list of entries, .* and 222 isn't a string/],
+    ['a boolean in removeGuilds', { removeGuilds: [true] }, /removeGuilds takes a list of server ids, .* and true isn't a string/],
+    ['a boolean in addGuilds', { addGuilds: [false] }, /addGuilds takes a list of entries, .* and false isn't a string/],
     ['an empty string in removeGuilds', { removeGuilds: ['guild-1', ''] }, /removeGuilds takes a list of server ids, .* and "" isn't one/],
     ['an id with a space inside it in removeGuilds', { removeGuilds: ['guild 1'] }, /and "guild 1" isn't one/],
     ['a removeGuilds that is not a list', { removeGuilds: 'guild-1' }, /removeGuilds takes a list of server ids, .* not "guild-1"/],
     ['a setDmUsers of empty strings', { setDmUsers: [''] }, /setDmUsers takes a list of user ids, .* and "" isn't one/],
-    ['a number in setDmUsers', { setDmUsers: [123] }, /setDmUsers takes a list of user ids, .* and 123 isn't a string/],
+    ['a boolean in setDmUsers', { setDmUsers: [true] }, /setDmUsers takes a list of user ids, .* and true isn't a string/],
     ['a setDmUsers that is not a list', { setDmUsers: 'user-2' }, /setDmUsers takes a list of user ids, .* not "user-2"/],
   ];
   for (const [what, args, says] of notIdLists) {

@@ -130,6 +130,17 @@ const packageJson: typeof import('../package.json') = JSON.parse(
 
 const INSPECTION_TOOLS: ReadonlySet<string> = new Set(['fetch_history', 'fetch_around']);
 
+export const ID_ARGUMENTS: readonly string[] = [
+  'channelId', 'messageId', 'userId', 'guildId', 'categoryId', 'before', 'after', 'latestFrom',
+  'addGuilds', 'removeGuilds', 'setDmUsers',
+];
+
+const holdsNumber = (value: unknown): boolean =>
+  typeof value === 'number' || (Array.isArray(value) && value.some((item) => typeof item === 'number'));
+
+const listed = (items: string[]): string =>
+  items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items.join('');
+
 type ChannelOpenRequest = ChannelsOpenParams & {
   channelId?: string;
   history?: { limit: number; beforeMessageId?: string; sinceLastSeen?: boolean };
@@ -1736,6 +1747,19 @@ export class DiscordMcplServer {
           `${name} is turned off here: this host has disabled the "${fs}" feature set it belongs to, ` +
             "so the call didn't run, and calling it again won't change that. " +
             'If you need it, ask whoever runs this host.',
+        )],
+        isError: true,
+      };
+    }
+
+    const declared = toolDefinitions.find((tool) => tool.name === name)?.inputSchema.properties ?? {};
+    const numbered = ID_ARGUMENTS.filter((key) => Object.hasOwn(declared, key) && holdsNumber(args[key]));
+    if (numbered.length > 0) {
+      return {
+        content: [textContent(
+          'Nothing was done: ids must be strings in quotes, since a number past 2^53 can lose its last digits. ' +
+            `This call sent a number at ${listed(numbered)}, which arrived as ` +
+            `${listed(numbered.map((key) => JSON.stringify(args[key])))}.`,
         )],
         isError: true,
       };

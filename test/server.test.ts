@@ -26,7 +26,8 @@ import type {
   ChannelsPublishResult,
 } from '@animalabs/mcpl-core';
 
-import { DiscordMcplServer, serveStdio } from '../src/server.js';
+import { DiscordMcplServer, ID_ARGUMENTS, serveStdio } from '../src/server.js';
+import { toolDefinitions } from '../src/tools.js';
 import { agentJson, senderText } from '../src/source-header.js';
 import { parseChannelRef } from '../src/channel-names.js';
 import { applyMentionCandidates } from '../src/discord-adapter.js';
@@ -3424,5 +3425,110 @@ describe("a sender's words and names can't take the server's place in what the a
     assert.equal(senderText(`<${' '.repeat(100_000)}`), `<${' '.repeat(100_000)}`);
     const used = process.cpuUsage(started);
     assert.ok((used.user + used.system) / 1000 < 1000, `${(used.user + used.system) / 1000} ms of CPU`);
+  });
+});
+
+describe('an id sent as a number', () => {
+  const WRITTEN = '1309876543210987654';
+  const ARRIVED = String(JSON.parse(WRITTEN));
+  const NOT_IDS = ['content', 'emoji', 'name', 'limit', 'files', 'visible', 'setDmNotice'];
+  const idCases = toolDefinitions.flatMap((tool) =>
+    Object.keys(tool.inputSchema.properties).filter((key) => ID_ARGUMENTS.includes(key)).map((key) => ({ tool, key })));
+  const refusal = (keys: string, arrived: string) =>
+    'Nothing was done: ids must be strings in quotes, since a number past 2^53 can lose its last digits. ' +
+    `This call sent a number at ${keys}, which arrived as ${arrived}.`;
+
+  function rawLine(id: number, tool: string, args: Record<string, unknown>, unquoted: string[] = []): string {
+    let json = JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: tool, arguments: args } });
+    for (const text of unquoted) json = json.replace(JSON.stringify(text), text);
+    return `${json}\n`;
+  }
+
+  async function wired(t: TestContext) {
+    const { client, clientSocket, serverConn, discord } = await createTestPair();
+    discord.facts.c1 = { id: 'c1', guildId: 'g1', guildName: 'Test Server', type: 'text', name: 'general' };
+    const calls: string[] = [];
+    let counting = false;
+    const watched = new Proxy(discord, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function'
+          ? (...a: unknown[]) => {
+            if (counting) calls.push(String(property));
+            return (value as (...x: unknown[]) => unknown).apply(target, a);
+          }
+          : value;
+      },
+    });
+    const written: string[] = [];
+    clientSocket.on('data', (chunk) => written.push(String(chunk)));
+    const server = new DiscordMcplServer(watched as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
+    await mcpHandshake(client);
+    const answer = async (line: string, id: number): Promise<{ text: string; isError?: boolean }> => {
+      counting = true;
+      clientSocket.write(line);
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const found = written.join('').split('\n').slice(0, -1).map((l) => JSON.parse(l) as { id?: unknown; result?: { content: Array<{ text?: string }>; isError?: boolean } })
+          .find((m) => m.id === id);
+        if (found?.result) {
+          counting = false;
+          return { text: found.result.content[0]?.text ?? '', isError: found.result.isError };
+        }
+        if (Date.now() > deadline) throw new Error(`no answer to call ${id}`);
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+    return { discord, calls, answer };
+  }
+
+  it('every argument any tool takes is classed either as an id argument or as not one', () => {
+    const keys = [...new Set(toolDefinitions.flatMap((tool) => Object.keys(tool.inputSchema.properties)))];
+    assert.deepEqual(keys.filter((key) => ID_ARGUMENTS.includes(key) === NOT_IDS.includes(key)), []);
+  });
+
+  it('is refused at every id argument of every tool, alone or in a list, naming it and what arrived, before anything is done', async (t) => {
+    assert.ok(idCases.length > 0);
+    const { calls, answer } = await wired(t);
+    let id = 100;
+    for (const { tool, key } of idCases) {
+      for (const list of [false, true]) {
+        const args: Record<string, unknown> = {};
+        for (const required of tool.inputSchema.required ?? []) args[required] = required === 'channelId' ? 'c1' : 'x';
+        args[key] = list ? [WRITTEN] : WRITTEN;
+        const result = await answer(rawLine(++id, tool.name, args, [WRITTEN]), id);
+        const which = `${tool.name} ${key}${list ? ' in a list' : ''}`;
+        assert.equal(result.isError, true, `${which}: ${result.text}`);
+        assert.equal(result.text, refusal(key, list ? `[${ARRIVED}]` : ARRIVED), which);
+        assert.deepEqual(calls, [], `${which}: the adapter was called`);
+      }
+    }
+  });
+
+  it('names every id sent as a number, small ones included', async (t) => {
+    const { calls, answer } = await wired(t);
+    const result = await answer(rawLine(5, 'delete_message', { channelId: '42', messageId: WRITTEN }, ['42', WRITTEN]), 5);
+    assert.equal(result.isError, true, result.text);
+    assert.equal(result.text, refusal('channelId and messageId', `42 and ${ARRIVED}`));
+    assert.deepEqual(calls, []);
+  });
+
+  it('leaves a number alone under a name the tool does not take, as before', async (t) => {
+    const { discord, answer } = await wired(t);
+    const result = await answer(rawLine(6, 'send_message', { channelId: 'c1', content: 'x', messageId: WRITTEN }, [WRITTEN]), 6);
+    assert.equal(result.isError ?? false, false, result.text);
+    assert.deepEqual(discord.sentMessages.map((m) => [m.channelId, m.content]), [['c1', 'x']]);
+  });
+
+  it('as a string, the same id reaches Discord exactly as written', async (t) => {
+    const { discord, answer } = await wired(t);
+    const result = await answer(rawLine(7, 'delete_message', { channelId: 'c1', messageId: WRITTEN }), 7);
+    assert.equal(result.isError ?? false, false, result.text);
+    assert.deepEqual(discord.deletedMessages, [{ channelId: 'c1', messageId: WRITTEN }]);
   });
 });
