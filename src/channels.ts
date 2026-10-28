@@ -1,6 +1,7 @@
 import { ERR_UNKNOWN_CHANNEL, type ChannelDescriptor } from '@animalabs/mcpl-core';
 import type { ChannelFacts } from './discord-adapter.js';
 import { formatChannelLabel, formatThreadLabel, isNameAddressableKind, isThreadLabelShape } from './channel-names.js';
+import { nameValue, quotedLabel } from './source-header.js';
 
 export type DiscordChannelDescriptor = ChannelDescriptor & {
   initiallyOpen?: boolean;
@@ -70,6 +71,10 @@ export function toDescriptor(
   };
 }
 
+export function dmLabel(recipientName: string): string {
+  return `DM: ${nameValue(recipientName)}`;
+}
+
 export function toDmDescriptor(
   channelId: string,
   recipientName: string,
@@ -80,7 +85,7 @@ export function toDmDescriptor(
   return {
     id: mcplChannelId('dm', channelId),
     type: 'discord',
-    label: `DM: ${recipientName}`,
+    label: dmLabel(recipientName),
     direction: 'bidirectional',
     address: { guildId: 'dm', channelId },
     // The host resolves `>>@name` and `<@id>` mention tokens against recipientName and recipientId.
@@ -179,7 +184,7 @@ export function resolveOpenTarget(
   if (candidates.length === 0) {
     return refuse(ERR_UNKNOWN_CHANNEL, `No ${typeName(type)} channel is registered, so there is none to open without a selector. Nothing was opened.`);
   }
-  const shown = candidates.slice(0, OPEN_CHOICES_SHOWN).map((c) => `${c.id} (${c.label})`).join(', ');
+  const shown = candidates.slice(0, OPEN_CHOICES_SHOWN).map((c) => `${c.id} (${quotedLabel(c.label)})`).join(', ');
   const more = candidates.length > OPEN_CHOICES_SHOWN
     ? `, and ${candidates.length - OPEN_CHOICES_SHOWN} more, which channels/list returns`
     : '';
