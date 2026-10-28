@@ -585,7 +585,7 @@ describe('the tool chokepoint', () => {
   });
 
   it('quotes the text as sent, where a mention reads <@id>, or <@&id> for a role', async (t) => {
-    const member = { nickname: null, user: { id: '111111111111111111', username: 'ra', displayName: 'ra' } };
+    const member = { nickname: null, displayName: 'ra', user: { id: '111111111111111111', username: 'ra', displayName: 'ra' } };
     const role = { id: '222222222222222222', name: 'ops' };
     const guild = { id: '555555555555555555', members: { cache: new Map([['m', member]]) }, roles: { cache: new Map([['r', role]]) } };
     for (const [handle, sent] of [['@ra', '<@111111111111111111>'], ['@ops', '<@&222222222222222222>']]) {

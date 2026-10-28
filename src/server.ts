@@ -40,7 +40,7 @@ import type {
   ChannelsOutgoingCompleteParams,
 } from '@animalabs/mcpl-core';
 
-import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, PostedParts, ThreadPlace } from './discord-adapter.js';
+import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, MentionsField, PostedParts, ThreadPlace } from './discord-adapter.js';
 import { LATEST_FROM_WINDOW, attachmentUrlExpiry, holdsNoMessages, isListedKind, kindOfValue } from './discord-adapter.js';
 import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, type DmNoticeDecision } from './dm-notices.js';
 
@@ -129,6 +129,9 @@ const packageJson: typeof import('../package.json') = JSON.parse(
 );
 
 const INSPECTION_TOOLS: ReadonlySet<string> = new Set(['fetch_history', 'fetch_around']);
+
+const withMentions = <T extends object>(result: T, report: MentionsField | undefined): T | (T & MentionsField) =>
+  report ? { ...result, ...report } : result;
 
 type ChannelOpenRequest = ChannelsOpenParams & {
   channelId?: string;
@@ -1825,7 +1828,7 @@ export class DiscordMcplServer {
         const content = messageContent(name, args.content);
         const files = args.files as OutgoingFile[] | undefined;
         requireContentOrFiles(content, files);
-        let result: { messageId: string };
+        let result: Awaited<ReturnType<DiscordAdapter['sendMessage']>>;
         try {
           result = await this.discord.sendMessage(channelId, content, { files });
         } catch (err) {
@@ -1833,7 +1836,7 @@ export class DiscordMcplServer {
         }
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
-        return this.augmentSendResult(result.messageId, channelId, shifted);
+        return withMentions(await this.augmentSendResult(result.messageId, channelId, shifted), result.report);
       }
 
       case 'reply_message': {
@@ -1842,7 +1845,7 @@ export class DiscordMcplServer {
         const files = args.files as OutgoingFile[] | undefined;
         requireContentOrFiles(content, files);
         const { messageId: replyTo, target } = await this.resolveTargetMessage(channelId, args);
-        let result: { messageId: string };
+        let result: Awaited<ReturnType<DiscordAdapter['sendMessage']>>;
         try {
           result = await this.discord.sendMessage(
             channelId,
@@ -1855,7 +1858,7 @@ export class DiscordMcplServer {
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
         const receipt = await this.augmentSendResult(result.messageId, channelId, shifted);
-        return target ? { ...receipt, target } : receipt;
+        return withMentions(target ? { ...receipt, target } : receipt, result.report);
       }
 
       case 'send_dm': {
@@ -1863,7 +1866,7 @@ export class DiscordMcplServer {
         const content = messageContent(name, args.content);
         const files = args.files as OutgoingFile[] | undefined;
         requireContentOrFiles(content, files);
-        let result: { messageId: string; channelId: string; recipientName: string };
+        let result: Awaited<ReturnType<DiscordAdapter['sendDM']>>;
         try {
           result = await this.discord.sendDM(
             userId,
@@ -1879,7 +1882,10 @@ export class DiscordMcplServer {
           throw err;
         }
         const shifted = this.markOutboundSend(result.channelId);
-        return this.augmentSendResult(result.messageId, result.channelId, shifted, { recipientName: result.recipientName });
+        return withMentions(
+          await this.augmentSendResult(result.messageId, result.channelId, shifted, { recipientName: result.recipientName }),
+          result.report,
+        );
       }
 
       case 'add_reaction': {
@@ -3728,7 +3734,7 @@ export class DiscordMcplServer {
     }
   }
 
-  private async handlePublish(params: ChannelsPublishParams): Promise<ChannelsPublishResult> {
+  private async handlePublish(params: ChannelsPublishParams): Promise<ChannelsPublishResult & Partial<MentionsField>> {
     const parsed = parseMcplChannelId(params.channelId);
     if (!parsed) {
       throw new Error(`Invalid channel ID: ${params.channelId}`);
@@ -3749,7 +3755,7 @@ export class DiscordMcplServer {
     this.stateTracker.recordSent(result.messageId, parsed.channelId, text);
     dbg('handlePublish:sent', { channelId: params.channelId, messageId: result.messageId });
 
-    return { delivered: true, messageId: result.messageId };
+    return withMentions({ delivered: true, messageId: result.messageId }, result.report);
   }
 
   private async handleRollback(params: StateRollbackParams): Promise<StateRollbackResult> {

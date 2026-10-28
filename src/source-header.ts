@@ -79,6 +79,12 @@ export function senderText(text: string): string {
   return text.replace(LINE_BREAK, '\n  ').replace(SERVER_TAG, '&lt;');
 }
 
+export function agentValue(value: string): string {
+  return value
+    .replace(SERVER_TAG, '&lt;')
+    .replace(/[\u0085\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 export function agentJson(value: unknown): string {
   return JSON.stringify(value)
     ?.replace(SERVER_TAG_IN_JSON, '\\u003c')

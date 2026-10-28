@@ -45,7 +45,7 @@ import {
 } from './channel-names.js';
 import { channelLabelFor, mcplChannelId } from './channels.js';
 import { INVALID_FORM_BODY, MISSING_ACCESS, UNKNOWN_CHANNEL } from './discord-errors.js';
-import { errorValue, nameValue } from './source-header.js';
+import { agentValue, errorValue, nameValue } from './source-header.js';
 
 interface NameView {
   (name: string): ChannelCandidate[];
@@ -530,29 +530,110 @@ export interface MentionCandidate {
   id: string;
   aliases: string[];
   kind: 'user' | 'role';
+  name: string;
+  username?: string;
 }
+
+type MentionWho =
+  | { user: string; username: string | undefined; mention: string }
+  | { role: string; mention: string };
+
+export type MentionReport =
+  | { wrote: string; sentAs: string; user: string; username: string | undefined }
+  | { wrote: string; sentAs: string; role: string }
+  | { wrote: string; sentAs: 'text'; because: string; nearest: MentionWho[] }
+  | { wrote: string; sentAs: 'text'; because: string; choices: MentionWho[]; more?: number };
+
+export interface MentionsField {
+  mentions: MentionReport[];
+  mentionsNotShown?: number;
+}
+
+const MENTIONS_SHOWN = 20;
+const AS_TEXT = 'It went out as plain text and pinged no one: ';
+const COPY_MENTION = 'copy its mention exactly into a new message.';
+const mentionOf = (c: MentionCandidate): string => (c.kind === 'user' ? `<@${c.id}>` : `<@&${c.id}>`);
+const namesOf = (c: MentionCandidate) =>
+  c.kind === 'user'
+    ? { user: agentValue(c.name), username: c.username === undefined ? undefined : agentValue(c.username) }
+    : { role: agentValue(c.name) };
+const whoOf = (c: MentionCandidate): MentionWho => ({ ...namesOf(c), mention: mentionOf(c) });
+const squeezed = (s: string): string => s.toLowerCase().replace(/\s+/gu, '');
 
 /** `@everyone` and `@here` are left as they are: Discord handles them itself. */
 export function applyMentionCandidates(
   content: string,
   candidates: MentionCandidate[],
-): string {
-  if (candidates.length === 0) return content;
-  return content.replace(/@([A-Za-z0-9_.][A-Za-z0-9_.-]*)/g, (whole, handle) => {
-    const lower = String(handle).toLowerCase();
+  where: { inDm?: boolean; selfAliases?: string[] } = {},
+): { content: string; report?: MentionsField } {
+  const self = new Set((where.selfAliases ?? []).map((a) => a.toLowerCase()));
+  const mentions: MentionReport[] = [];
+  const reported = new Set<string>();
+  const report = (entry: MentionReport) => {
+    const key = entry.wrote.toLowerCase();
+    if (!reported.has(key)) {
+      reported.add(key);
+      mentions.push(entry);
+    }
+  };
+  const rewritten = content.replace(/@([A-Za-z0-9_.][A-Za-z0-9_.-]*)/g, (whole: string, handle: string, at: number) => {
+    const lower = handle.toLowerCase();
     if (lower === 'everyone' || lower === 'here') return whole;
     const matches = (kind: 'user' | 'role') =>
       candidates.filter(
         (c) => c.kind === kind && c.aliases.some((a) => a.toLowerCase() === lower),
       );
     const users = matches('user');
-    if (users.length === 1) return `<@${users[0].id}>`;
-    if (users.length === 0) {
-      const roles = matches('role');
-      if (roles.length === 1) return `<@&${roles[0].id}>`;
+    const roles = users.length === 0 ? matches('role') : [];
+    const one = users.length === 1 ? users[0] : users.length === 0 && roles.length === 1 ? roles[0] : undefined;
+    if (one) {
+      report({ wrote: whole, sentAs: mentionOf(one), ...namesOf(one) });
+      return mentionOf(one);
     }
+    const before = Array.from(content.slice(Math.max(0, at - 2), at)).pop() ?? '';
+    if (before === '<' && /^\d+$/.test(handle)) return whole;
+    if (/[\p{L}\p{N}\p{M}_.+-]/u.test(before)) return whole;
+    const bare = lower.replace(/\.+$/u, '');
+    if (!bare || bare === 'everyone' || bare === 'here' || self.has(lower) || self.has(bare)) return whole;
+    const several = users.length > 1 ? users : roles;
+    if (several.length > 1) {
+      report({
+        wrote: whole,
+        sentAs: 'text',
+        because: `${AS_TEXT}several cached ${users.length > 1 ? 'members' : 'roles'} have that name. To mention one of them, ${COPY_MENTION}`,
+        choices: several.slice(0, 10).map(whoOf),
+        ...(several.length > 10 ? { more: several.length - 10 } : {}),
+      });
+      return whole;
+    }
+    const wanted = squeezed(handle).replace(/\.+$/u, '');
+    const near = candidates
+      .map((c) => ({
+        c,
+        gap: Math.min(...c.aliases.map(squeezed)
+          .filter((a) => Math.min(a.length, wanted.length) >= 2 && (a.startsWith(wanted) || wanted.startsWith(a)))
+          .map((a) => Math.abs(a.length - wanted.length))),
+      }))
+      .filter(({ gap }) => Number.isFinite(gap))
+      .sort((a, b) => (a.c.kind === b.c.kind ? 0 : a.c.kind === 'user' ? -1 : 1) || a.gap - b.gap)
+      .slice(0, 3);
+    const reason = where.inDm ? "it isn't exactly the cached name of anyone else in this DM" : 'no cached member or role is named exactly that';
+    report({
+      wrote: whole,
+      sentAs: 'text',
+      because: `${AS_TEXT}${reason}.${near.length > 0 ? ` To mention one of the names below, ${COPY_MENTION}` : ''}`,
+      nearest: near.map(({ c }) => whoOf(c)),
+    });
     return whole;
   });
+  if (mentions.length === 0) return { content: rewritten };
+  return {
+    content: rewritten,
+    report: {
+      mentions: mentions.slice(0, MENTIONS_SHOWN),
+      ...(mentions.length > MENTIONS_SHOWN ? { mentionsNotShown: mentions.length - MENTIONS_SHOWN } : {}),
+    },
+  };
 }
 
 export class DiscordAdapter {
@@ -936,11 +1017,11 @@ export class DiscordAdapter {
     channelId: string,
     content: string,
     options?: { replyTo?: string; files?: OutgoingFile[]; requireReplyTarget?: boolean },
-  ): Promise<{ messageId: string }> {
+  ): Promise<{ messageId: string; report?: MentionsField }> {
     const channel = await this.channelById(channelId);
     if (!channel) throw channelUnusable(channelId, 'nothing was sent');
     if (!('send' in channel)) throw noMessagesHere(channel, channelId, 'nothing was sent');
-    const resolved = await this.resolveOutgoingMentions(channel, content);
+    const { content: resolved, report } = await this.resolveOutgoingMentions(channel, content);
     const attachments = buildAttachments(options?.files);
     const chunks = this.splitForDiscord(resolved);
     if (chunks.length === 0 && attachments.length > 0) chunks.push('');
@@ -970,7 +1051,7 @@ export class DiscordAdapter {
       posted.push(sent.id);
       lastId = sent.id;
     }
-    return { messageId: lastId };
+    return { messageId: lastId, ...(report ? { report } : {}) };
   }
 
   private async resolveRecipientId(recipient: string): Promise<string> {
@@ -1023,13 +1104,13 @@ export class DiscordAdapter {
     userId: string,
     content: string,
     options?: { files?: OutgoingFile[] },
-  ): Promise<{ messageId: string; channelId: string; recipientName: string }> {
+  ): Promise<{ messageId: string; channelId: string; recipientName: string; report?: MentionsField }> {
     const resolvedId = await this.resolveRecipientId(userId);
     const user = await this.client.users.fetch(resolvedId);
     const dm = await user.createDM();
     const recipientName = user.username;
     try {
-      const resolved = await this.resolveOutgoingMentions(dm, content);
+      const { content: resolved, report } = await this.resolveOutgoingMentions(dm, content);
       const attachments = buildAttachments(options?.files);
       const chunks = this.splitForDiscord(resolved);
       if (chunks.length === 0 && attachments.length > 0) chunks.push('');
@@ -1048,7 +1129,7 @@ export class DiscordAdapter {
         posted.push(sent.id);
         lastId = sent.id;
       }
-      return { messageId: lastId, channelId: dm.id, recipientName };
+      return { messageId: lastId, channelId: dm.id, recipientName, ...(report ? { report } : {}) };
     } catch (err) {
       if (err && typeof err === 'object') Object.assign(err, { dmChannel: { id: dm.id, recipientName } });
       throw err;
@@ -1071,7 +1152,7 @@ export class DiscordAdapter {
     if (!channel) throw channelUnusable(channelId, 'nothing was edited');
     if (!('messages' in channel)) throw noMessagesHere(channel, channelId, 'nothing was edited');
     const msg = await (channel as TextChannel).messages.fetch(messageId);
-    const resolved = await this.resolveOutgoingMentions(channel, content);
+    const { content: resolved } = await this.resolveOutgoingMentions(channel, content);
     await msg.edit(resolved);
   }
 
@@ -1081,7 +1162,7 @@ export class DiscordAdapter {
   private async resolveOutgoingMentions(
     channel: unknown,
     content: string,
-  ): Promise<string> {
+  ): Promise<{ content: string; report?: MentionsField }> {
     const selfId = this.client.user?.id;
     const candidates: MentionCandidate[] = [];
 
@@ -1095,13 +1176,13 @@ export class DiscordAdapter {
           member.user.displayName,
           member.user.username,
         ].filter((s): s is string => typeof s === 'string' && s.length > 0);
-        candidates.push({ id: member.user.id, aliases, kind: 'user' });
+        candidates.push({ id: member.user.id, aliases, kind: 'user', name: member.displayName, username: member.user.username });
       }
       // The default @everyone role's id is the guild's, and Discord pings @everyone itself.
       for (const role of ch.guild.roles.cache.values() as IterableIterator<Role>) {
         if (role.id === ch.guild.id) continue;
         if (typeof role.name === 'string' && role.name.length > 0) {
-          candidates.push({ id: role.id, aliases: [role.name], kind: 'role' });
+          candidates.push({ id: role.id, aliases: [role.name], kind: 'role', name: role.name });
         }
       }
     } else if (ch.recipient) {
@@ -1111,11 +1192,14 @@ export class DiscordAdapter {
           ch.recipient.displayName,
           ch.recipient.username,
         ].filter((s): s is string => typeof s === 'string' && s.length > 0);
-        candidates.push({ id: ch.recipient.id, aliases, kind: 'user' });
+        candidates.push({ id: ch.recipient.id, aliases, kind: 'user', name: ch.recipient.displayName, username: ch.recipient.username });
       }
     }
 
-    return applyMentionCandidates(content, candidates);
+    const me = this.client.user as (User & { globalName?: string | null }) | null;
+    const selfAliases = [ch.guild?.members.me?.nickname, me?.globalName, me?.displayName, me?.username]
+      .filter((s): s is string => typeof s === 'string' && s.length > 0);
+    return applyMentionCandidates(content, candidates, { inDm: !ch.guild, selfAliases });
   }
 
   async deleteMessage(channelId: string, messageId: string): Promise<void> {
