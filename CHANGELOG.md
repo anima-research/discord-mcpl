@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.5.3 — 2026-10-28
+
 ### Fixed
 
 - **A message holding U+2028 or U+2029 is no longer lost between
