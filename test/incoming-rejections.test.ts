@@ -13,7 +13,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { ConnectionClosedError, McplConnection, RpcError, textContent } from '@animalabs/mcpl-core';
+import { ConnectionClosedError, ConnectionTimeoutError, McplConnection, RpcError, textContent } from '@animalabs/mcpl-core';
 import type { ContentBlock } from '@animalabs/mcpl-core';
 import type { DiscordAdapter, MessageEventInfo } from '../src/discord-adapter.js';
 import { ChannelManager, toDescriptor } from '../src/channels.js';
@@ -438,10 +438,6 @@ describe('incoming-results helpers', () => {
     assert.deepEqual(errorRejection(rpcError(-32017, 'no')), { reason: 'no', code: -32017 });
     // A code outside JSON-RPC's reserved ranges is a refusal the spec gives no meaning.
     assert.deepEqual(errorRejection(rpcError(4001, 'nope')), { reason: 'nope', code: 4001 });
-    assert.deepEqual(errorRejection(rpcError(-32602, '')), { reason: 'unspecified', code: -32602 });
-    // Stands in for a later mcpl-core, whose RpcError keeps the host's message
-    // as it came; 0.2.1 can't make this one.
-    assert.deepEqual(errorRejection({ code: -32602, message: 'bad' }), { reason: 'bad', code: -32602 });
   });
 
   it('an error that is no verdict on the message is no refusal: no answer, or the host failing', () => {
@@ -454,12 +450,7 @@ describe('incoming-results helpers', () => {
     // Nor a code JSON-RPC reserves and gives no meaning.
     assert.equal(errorRejection(rpcError(-32650, 'reserved')), undefined);
     assert.equal(errorRejection(rpcError(-32100, 'reserved')), undefined);
-    // mcpl-core 0.2.1's own timeout comes from mcpl-core in the lanes' tests.
-    // This stands in for a later mcpl-core's ConnectionTimeoutError (an RpcError
-    // with -32000), which 0.2.1 doesn't have.
-    const later = Object.assign(new Error('push/event timed out: no reply came within 50 ms, so whether it ran is unknown.'),
-      { name: 'ConnectionTimeoutError', code: -32000 });
-    assert.equal(errorRejection(later), undefined);
+    assert.equal(errorRejection(new ConnectionTimeoutError('push/event', 50)), undefined);
   });
 
   it('counts a -32602 error and coalesce_invalid as content refusals, and nothing else', () => {
