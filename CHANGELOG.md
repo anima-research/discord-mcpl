@@ -5,6 +5,10 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.4.2 — 2026-10-28
+
+This release doesn't include 0.5.2's fix for #122, which keeps a sender's words and chosen names from taking the shape of the server's framing.
+
 ### Fixed
 
 - **This change requires sharp 0.35.5 or a later 0.35.x on install.** The dependency was `^0.33.5`, which can't install any version with the fixes for GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w (#124). If sharp uses system-installed image libraries, upgrading sharp alone does not update them; the operator must separately ensure that any libvips, libheif and librsvg libraries it uses include the relevant fixes.
