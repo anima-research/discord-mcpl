@@ -2807,20 +2807,95 @@ describe('what a send reports about each @name in its content', () => {
     }]);
   });
 
-  it("doesn't report an unresolved @everyone or @here, an explicit <@id>, the bot's own name, a name of only dots, or an unmatched @ inside a word, and does report one that resolved, inside a word or sharing the bot's name", () => {
+  it("doesn't report an unresolved @everyone or @here, an explicit <@id>, the bot's own name, a name of only dots, or an @ inside a word that names no one, and does report a member sharing the bot's name", () => {
     const candidates = [user('111', 'Alice', 'alice_g'), user('222', 'Bob', 'bob'), user('333', 'everyone', 'everyone_u')];
-    const content = '@everyone @here @everyone. @here... <@111> ana@example.com ana_@example.com 𐐀@example.com cafe\u0301@example.com a.@x b+@y c-@z 1@w @... @MyBot @mybot. @Bot. x@bob';
-    assert.deepEqual(report(content, candidates, { selfAliases: ['MyBot', 'Bot.'] }, content.replace('x@bob', 'x<@222>')), [
-      { wrote: '@bob', sentAs: '<@222>', user: 'Bob', username: 'bob' },
-    ]);
+    const content = '@everyone @here @everyone. @here... <@111> ana@example.com ana_@example.com 𐐀@example.com cafe\u0301@example.com a.@x b+@y c-@z 1@w @... @MyBot @mybot. @Bot.';
+    assert.deepEqual(report(content, candidates, { selfAliases: ['MyBot', 'Bot.'] }), []);
     assert.deepEqual(report('see "@animalabs/membrane" and <@alic> <@12ab>', candidates).map((m) => [m.wrote, (m as { nearest?: unknown[] }).nearest?.length]), [
       ['@animalabs', 0],
-      ['@alic', 1],
-      ['@12ab', 0],
+      ['<@alic>', 1],
+      ['<@12ab>', 0],
     ]);
     assert.deepEqual(report('@MyBot', [user('444', 'MyBot', 'mybot_m')], { selfAliases: ['MyBot'] }, '<@444>'), [
       { wrote: '@MyBot', sentAs: '<@444>', user: 'MyBot', username: 'mybot_m' },
     ]);
+  });
+
+  it('reads periods after a name it finds no one by as the sentence\'s, and resolves the name before them, keeping the periods after the mention, but not inside <@…>', () => {
+    const candidates = [user('111', 'Alice', 'alice_g'), user('222', 'J.R.', 'jr_g'), user('3', 'Sam', 'sam_a'), user('4', 'Sam', 'sam_b')];
+    assert.deepEqual(report('thanks @alice. and @Alice...', candidates, {}, 'thanks <@111>. and <@111>...'), [
+      { wrote: '@alice', sentAs: '<@111>', user: 'Alice', username: 'alice_g' },
+    ]);
+    assert.deepEqual(report('@J.R.', candidates, {}, '<@222>'), [{ wrote: '@J.R.', sentAs: '<@222>', user: 'J.R.', username: 'jr_g' }]);
+    assert.deepEqual(report('hi <@alice.>', candidates), [{
+      wrote: '<@alice.>', sentAs: 'text', because: NO_MATCH + COPY_BELOW,
+      nearest: [{ user: 'Alice', username: 'alice_g', mention: '<@111>' }],
+    }]);
+    const [several] = report('ask @sam.', candidates);
+    assert.equal(several.wrote, '@sam.');
+    assert.deepEqual((several as { choices: unknown[] }).choices, [
+      { user: 'Sam', username: 'sam_a', mention: '<@3>' },
+      { user: 'Sam', username: 'sam_b', mention: '<@4>' },
+    ]);
+  });
+
+  it('posts a <@id>, <@!id> or <@&id> of up to 20 digits the agent wrote exactly as written, whatever anyone is called, and doesn\'t report it', () => {
+    const candidates = [user('333', 'Digits', 'digits_g', '999999999999999999'), user('111', 'Alice', 'alice_g')];
+    assert.deepEqual(report('<@999999999999999999> and <@111>, <@!999999999999999999> and <@&999999999999999999>', candidates), []);
+    const longer = `<@${'1'.repeat(21)}>`;
+    assert.deepEqual(report(longer, candidates), [{ wrote: longer, sentAs: 'text', because: NO_MATCH, nearest: [] }]);
+  });
+
+  it('turns a <@name> of up to 100 characters, spaces included, that resolves into that mention alone, and posts and reports one that doesn\'t as written', () => {
+    const candidates = [user('111', 'Alice', 'alice_g'), role('9', 'Ops')];
+    assert.deepEqual(report('hi <@alice_g> and <@Ops>', candidates, {}, 'hi <@111> and <@&9>'), [
+      { wrote: '<@alice_g>', sentAs: '<@111>', user: 'Alice', username: 'alice_g' },
+      { wrote: '<@Ops>', sentAs: '<@&9>', role: 'Ops' },
+    ]);
+    assert.deepEqual(report('hi <@alic>', candidates), [{
+      wrote: '<@alic>', sentAs: 'text', because: NO_MATCH + COPY_BELOW,
+      nearest: [{ user: 'Alice', username: 'alice_g', mention: '<@111>' }],
+    }]);
+    assert.deepEqual(report('hi <@Alice Smith> and <@Bo Bo>', [...candidates, user('222', 'Bo Bo', 'bobo_g')], {}, 'hi <@Alice Smith> and <@222>'), [
+      { wrote: '<@Alice Smith>', sentAs: 'text', because: NO_MATCH + COPY_BELOW, nearest: [{ user: 'Alice', username: 'alice_g', mention: '<@111>' }] },
+      { wrote: '<@Bo Bo>', sentAs: '<@222>', user: 'Bo Bo', username: 'bobo_g' },
+    ]);
+    const hundred = `${'R'.repeat(49)} ${'R'.repeat(50)}`;
+    assert.deepEqual(report(`<@${hundred}>`, [role('100', hundred)], {}, '<@&100>').map((m) => m.sentAs), ['<@&100>']);
+    const long = 'a'.repeat(101);
+    assert.deepEqual(report(`<@${long}>`, candidates).map((m) => m.wrote), [`@${long}`]);
+    for (const lineBreak of ['\n', '\r', '\u0085', '\u2028', '\u2029']) {
+      const split = `<@Alice${lineBreak}Smith>`;
+      assert.deepEqual(report(split, [user('5', `Alice${lineBreak}Smith`, 'as_g')]).map((m) => m.sentAs), ['text']);
+    }
+  });
+
+  it('reads a name whole in any script, and never looks up a part of it on its own', () => {
+    const candidates = [user('4', 'Jos', 'jos_g'), user('5', 'José', 'jose_g'), user('6', '太郎', 'taro_g'), user('7', 'राहुल', 'rahul_g'), user('111', 'Alice', 'alice_g')];
+    assert.deepEqual(report('hi @José, @太郎 and @राहुल', candidates, {}, 'hi <@5>, <@6> and <@7>').map((m) => m.sentAs), ['<@5>', '<@6>', '<@7>']);
+    assert.deepEqual(report('@aliceさん', candidates), [{
+      wrote: '@aliceさん', sentAs: 'text', because: NO_MATCH + COPY_BELOW,
+      nearest: [{ user: 'Alice', username: 'alice_g', mention: '<@111>' }],
+    }]);
+    assert.equal(report('@Josette', [user('4', 'Jos', 'jos_g')])[0].sentAs, 'text');
+  });
+
+  it('leaves an @ inside a word as text, and reports one that names a member or role, with its mention to copy', () => {
+    const candidates = [user('111', 'Alice', 'alice_g'), user('444', 'Ann', 'ann_x')];
+    const content = 'mail me@ann_x today, or a.@alice b+@alice c-@alice d_@alice é@alice 1@alice ありがとう@Alice ana@example.com';
+    const INSIDE = "It went out as plain text and pinged no one: it's written inside a word, such as an email address.";
+    assert.deepEqual(report(content, candidates), [
+      { wrote: '@ann_x', sentAs: 'text', because: INSIDE + COPY_BELOW, nearest: [{ user: 'Ann', username: 'ann_x', mention: '<@444>' }] },
+      { wrote: '@alice', sentAs: 'text', because: INSIDE + COPY_BELOW, nearest: [{ user: 'Alice', username: 'alice_g', mention: '<@111>' }] },
+    ]);
+    assert.deepEqual(report('x@alice @alice', candidates, {}, 'x@alice <@111>'), [
+      { wrote: '@alice', sentAs: 'text', because: INSIDE + COPY_BELOW, nearest: [{ user: 'Alice', username: 'alice_g', mention: '<@111>' }] },
+      { wrote: '@alice', sentAs: '<@111>', user: 'Alice', username: 'alice_g' },
+    ]);
+    assert.deepEqual(report('team@Ops', [role('9', 'Ops')]), [
+      { wrote: '@Ops', sentAs: 'text', because: INSIDE + COPY_BELOW, nearest: [{ role: 'Ops', mention: '<@&9>' }] },
+    ]);
+    assert.deepEqual(report('x@sam', [user('3', 'Sam', 'sam_a'), user('4', 'Sam', 'sam_b')]), []);
   });
 
   it('shows at most twenty names, with how many it left out', () => {

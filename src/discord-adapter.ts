@@ -87,6 +87,15 @@ function hardCut(text: string, limit: number): number {
   return unit >= 0xd800 && unit <= 0xdbff ? limit - 1 : limit;
 }
 
+/** Discord makes a member or role mention, or a channel link, only from a whole `<@id>`, `<@!id>`, `<@&id>` or `<#id>`. */
+function outsideMentionTokens(text: string, cut: number): number {
+  for (const token of text.matchAll(/<(?:@[!&]?|#)\d{1,20}>/g)) {
+    if (token.index >= cut) break;
+    if (token.index > 0 && token.index + token[0].length > cut) return token.index;
+  }
+  return cut;
+}
+
 export interface DmSendFailure {
   dmChannel?: { id: string; recipientName: string };
 }
@@ -569,6 +578,9 @@ const namesOf = (c: MentionCandidate) =>
     : { role: agentValue(c.name) };
 const whoOf = (c: MentionCandidate): MentionWho => ({ ...namesOf(c), mention: mentionOf(c) });
 const squeezed = (s: string): string => s.toLowerCase().replace(/\s+/gu, '');
+const NAME = String.raw`[\p{L}\p{N}_.][\p{L}\p{N}\p{M}_.-]*`;
+const BRACKETED = String.raw`[^<>@\r\n\u0085\u2028\u2029]{1,100}`;
+const HANDLE = new RegExp(`<@(${BRACKETED})>|@(${NAME})`, 'gu');
 
 /** `@everyone` and `@here` are left as they are: Discord handles them itself. */
 export function applyMentionCandidates(
@@ -580,31 +592,46 @@ export function applyMentionCandidates(
   const mentions: MentionReport[] = [];
   const reported = new Set<string>();
   const report = (entry: MentionReport) => {
-    const key = entry.wrote.toLowerCase();
+    const key = `${entry.wrote.toLowerCase()}\u0000${entry.sentAs}`;
     if (!reported.has(key)) {
       reported.add(key);
       mentions.push(entry);
     }
   };
-  const rewritten = content.replace(/@([A-Za-z0-9_.][A-Za-z0-9_.-]*)/g, (whole: string, handle: string, at: number) => {
-    const lower = handle.toLowerCase();
-    if (lower === 'everyone' || lower === 'here') return whole;
-    const matches = (kind: 'user' | 'role') =>
-      candidates.filter(
-        (c) => c.kind === kind && c.aliases.some((a) => a.toLowerCase() === lower),
-      );
-    const users = matches('user');
-    const roles = users.length === 0 ? matches('role') : [];
-    const one = users.length === 1 ? users[0] : users.length === 0 && roles.length === 1 ? roles[0] : undefined;
-    if (one) {
-      report({ wrote: whole, sentAs: mentionOf(one), ...namesOf(one) });
-      return mentionOf(one);
-    }
+  const matches = (name: string, kind: 'user' | 'role') =>
+    candidates.filter((c) => c.kind === kind && c.aliases.some((a) => a.toLowerCase() === name.toLowerCase()));
+  const rewritten = content.replace(HANDLE, (whole: string, bracketed: string | undefined, plain: string | undefined, at: number) => {
+    const handle = bracketed ?? plain ?? '';
+    const explicitId = bracketed !== undefined && /^[!&]?\d{1,20}$/u.test(bracketed);
     const before = Array.from(content.slice(Math.max(0, at - 2), at)).pop() ?? '';
-    if (before === '<' && /^\d+$/.test(handle)) return whole;
-    if (/[\p{L}\p{N}\p{M}_.+-]/u.test(before)) return whole;
-    const bare = lower.replace(/\.+$/u, '');
-    if (!bare || bare === 'everyone' || bare === 'here' || self.has(lower) || self.has(bare)) return whole;
+    const insideAWord = plain !== undefined && /[\p{L}\p{N}\p{M}_.+-]/u.test(before);
+    const bare = plain !== undefined ? handle.replace(/\.+$/u, '') : handle;
+    if (explicitId || !bare || ['everyone', 'here'].includes(bare.toLowerCase())) return whole;
+    let named = handle;
+    let users = matches(handle, 'user');
+    let roles = users.length === 0 ? matches(handle, 'role') : [];
+    if (users.length + roles.length === 0 && bare !== handle) {
+      named = bare;
+      users = matches(bare, 'user');
+      roles = users.length === 0 ? matches(bare, 'role') : [];
+    }
+    const one = users.length === 1 ? users[0] : users.length === 0 && roles.length === 1 ? roles[0] : undefined;
+    if (insideAWord) {
+      if (one) {
+        report({
+          wrote: `@${named}`,
+          sentAs: 'text',
+          because: `${AS_TEXT}it's written inside a word, such as an email address. To mention one of the names below, ${COPY_MENTION}`,
+          nearest: [whoOf(one)],
+        });
+      }
+      return whole;
+    }
+    if (one) {
+      report({ wrote: bracketed !== undefined ? whole : `@${named}`, sentAs: mentionOf(one), ...namesOf(one) });
+      return mentionOf(one) + handle.slice(named.length);
+    }
+    if (self.has(handle.toLowerCase()) || self.has(bare.toLowerCase())) return whole;
     const several = users.length > 1 ? users : roles;
     if (several.length > 1) {
       report({
@@ -616,7 +643,7 @@ export function applyMentionCandidates(
       });
       return whole;
     }
-    const wanted = squeezed(handle).replace(/\.+$/u, '');
+    const wanted = squeezed(bare);
     const near = candidates
       .map((c) => ({
         c,
@@ -990,7 +1017,7 @@ export class DiscordAdapter {
     while (rest.length > limit) {
       let cut = rest.lastIndexOf('\n', limit);
       if (cut < limit * 0.5) cut = rest.lastIndexOf(' ', limit);
-      if (cut < limit * 0.5) cut = hardCut(rest, limit);
+      if (cut < limit * 0.5) cut = outsideMentionTokens(rest, hardCut(rest, limit));
       chunks.push(rest.slice(0, cut));
       rest = rest.slice(cut).replace(/^\s+/, '');
     }

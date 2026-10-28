@@ -24,12 +24,46 @@ in the git log and PR descriptions.
   `mentionsNotShown` counts the rest. `@everyone` and `@here` aren't
   reported, nor is an `@name` that didn't become a mention when it's
   `@everyone` or `@here` with trailing periods, an explicit `<@id>`,
-  inside a word such as an email address, one of the bot's own names, or
-  only periods. Names in the list, usernames included, have the server's
-  own tag openings neutralized and U+0085, U+2028 and U+2029 written as
-  escapes. What's posted doesn't change, and no tool description changes.
+  inside a word such as an email address and naming no single member or
+  role, one of the bot's own names, or only periods. Names in the list,
+  usernames included, have the server's own tag openings neutralized and
+  U+0085, U+2028 and U+2029 written as escapes. What's posted doesn't
+  change, and no tool description changes.
 
 ### Fixed
+
+- **An `@name` in what the agent sends is read more exactly, so some pings
+  start and some stop.** These now ping:
+  - a name followed by a sentence's periods, such as "thanks @alice.",
+    with the periods kept after the mention;
+  - a name with letters outside ASCII, such as `@José` or `@太郎`, which is
+    now looked up whole, and reported like any other name when it matches
+    no one;
+  - `<@name>` with the name of a member or role, up to 100 characters,
+    spaces included but not `<`, `>`, `@` or a line break, which now posts
+    as that mention alone. A name without a space pinged inside stray
+    brackets before.
+
+  These stop:
+  - an `@name` inside a word that names a member, such as `me@ann_x` in
+    an email address, which pinged a member called ann_x; it's now left as
+    text, and the send's report names that member with their mention to
+    copy;
+  - `@José` pinging a member called Jos, from reading only "Jos";
+  - `<@Alice Smith>` pinging a member called Alice inside stray brackets,
+    from reading only "Alice";
+  - a name followed straight by a letter of another script, such as
+    "@aliceさん", which pinged Alice and is now read as "aliceさん": unless
+    someone is called exactly that, it goes as text, with the send's report
+    giving near names, such as Alice, with their mentions to copy;
+  - `<@digits>` the agent wrote pinging a member nicknamed those digits,
+    inside stray brackets; it now posts as written.
+
+  A long send that has no space or line break to split at no longer
+  splits through a mention or channel link that follows other text in
+  the part being cut: the cut moves to just before it, so it starts the
+  next message. Such a split posted as two halves of plain text, so the
+  mention pinged no one.
 
 - **This change requires sharp 0.35.5 or a later 0.35.x on install.** The dependency was `^0.33.5`, which can't install any version with the fixes for GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w (#124). If sharp uses system-installed image libraries, upgrading sharp alone does not update them; the operator must separately ensure that any libvips, libheif and librsvg libraries it uses include the relevant fixes.
 

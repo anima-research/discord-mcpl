@@ -129,3 +129,30 @@ it('edits with each @name resolved as a send resolves it, and returns nothing', 
   assert.equal(await adapter.editMessage(C, MSG, 'thanks @Al and @nobody'), undefined);
   assert.deepEqual(edited, [`thanks <@${ALICE}> and @nobody`]);
 });
+
+it('cuts a long send with nowhere to break before a mention or channel link rather than through it, so the posted text holds every mention the report names', async (t) => {
+  const twenty = `<@${'1'.repeat(20)}>`;
+  for (const [written, token] of [['@alice_g', `<@${ALICE}>`], ['@Ops', `<@&${OPS}>`], [`<#${C}>`, `<#${C}>`], [`<@!${ALICE}>`, `<@!${ALICE}>`], [twenty, twenty]]) {
+    const { adapter, posted } = adapterWith(t);
+    const pad = `${'x'.repeat(1900 - token.length + 4)}(`;
+    const sent = await adapter.sendMessage(C, pad + written);
+    assert.deepEqual(posted.map((p) => p.content), [pad, token]);
+    assert.deepEqual(sent.report?.mentions.map((m) => m.sentAs), written.startsWith('@') ? [token] : undefined);
+  }
+});
+
+it('cuts brackets around more digits than an id has like any other text', async (t) => {
+  for (const text of [`abc <@${'1'.repeat(2500)}>`, `${'x'.repeat(1880)}(<@${'1'.repeat(21)}>`]) {
+    const { adapter, posted } = adapterWith(t);
+    await adapter.sendMessage(C, text);
+    assert.deepEqual(posted.map((p) => p.content), [text.slice(0, 1900), text.slice(1900)]);
+  }
+});
+
+it('posts all of a send whose hard cut falls inside a mention that starts the text, as before', async (t) => {
+  const { adapter, posted } = adapterWith(t);
+  const marks = '\u0301'.repeat(2000);
+  await adapter.sendMessage(C, `<@${ALICE}>${marks}`);
+  assert.equal(posted.map((p) => p.content).join(''), `<@${ALICE}>${marks}`);
+  assert.ok(posted.every((p) => p.content.length > 0 && p.content.length <= 1900));
+});
