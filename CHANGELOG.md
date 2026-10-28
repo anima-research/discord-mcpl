@@ -7,6 +7,11 @@ in the git log and PR descriptions.
 
 ### Added
 
+- **`list_channels` gives each channel's topic.** A channel whose topic
+  isn't blank carries it as `topic`, a forum or media channel's guidelines
+  included, cut at 300 code points with an ellipsis. The tool's description
+  doesn't change.
+
 - **A send's result says what each `@name` in it became.** The results of
   `send_message`, `reply_message` and `send_dm`, and the answer to
   `channels/publish`, now carry a `mentions` list when the content has an
@@ -25,6 +30,8 @@ in the git log and PR descriptions.
   escapes. What's posted doesn't change, and no tool description changes.
 
 ### Fixed
+
+- **This change requires sharp 0.35.5 or a later 0.35.x on install.** The dependency was `^0.33.5`, which can't install any version with the fixes for GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w (#124). If sharp uses system-installed image libraries, upgrading sharp alone does not update them; the operator must separately ensure that any libvips, libheif and librsvg libraries it uses include the relevant fixes.
 
 - **`filters_update` refuses an update that would empty the server list,
   or that it can't read as written.** A `removeGuilds` that removed the
@@ -114,6 +121,27 @@ in the git log and PR descriptions.
   carries only `dm="true"` and its count. A single-line message's own
   text, without those tag openings or a mentioned name that isn't plain,
   reads as it did before; a forward's attachment note moves, as above.
+
+- **A message holding U+2028 or U+2029 is no longer lost between
+  discord-mcpl and its host, and a TCP client's reset no longer ends the
+  process.** discord-mcpl now depends on `@animalabs/mcpl-core` `^0.4.0`.
+  It wrote U+2028 and U+2029 raw, so a host whose reader ends lines at
+  them, as `readline` does on Node 24 and later, lost a
+  `channels/incoming` message carrying either in its text, and any message
+  whose author's name holds either; it now writes them as `\u` escapes.
+  The reader discord-mcpl used, mcpl-core 0.2.1's, ended lines there too
+  on Node 24, so a host's call holding either raw was lost; it is now read
+  whole. A served TCP client whose connection was reset could raise an
+  uncaught error that ended the process, with the next client refused
+  meanwhile; now only that client's serving ends, and the next client is
+  served once any request it was handling has returned. Where a failed
+  host call's error is quoted, in the logs and in the replies of `/undo`,
+  `/marks`, `/hide`, `/unstick` and `/nudge`, it now reads in mcpl-core
+  0.4.0's words: without the `RPC error <code>: ` prefix; a timeout as
+  "<method> timed out: no reply came within <n> ms, so whether it ran is
+  unknown. Check its effect before retrying, since a retry may repeat
+  it."; and an error with no message, or with a message that isn't text,
+  as a sentence that says so.
 
 ## 0.5.0 — 2026-10-26
 
