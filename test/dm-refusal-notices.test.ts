@@ -25,6 +25,7 @@ const historyMessage = (id: string, authorId: string, text: string, mentionsBot 
 });
 
 const REAL_CONSOLE_ERROR = console.error;
+const envBeforeTest = new WeakMap<TestContext, { wm: string | undefined; notices: string | undefined }>();
 
 type ChannelMeta = { name: string | null; guildId: string | null; guildName: string | null; isDM: boolean };
 type Refusal = { decided: Promise<unknown>; settled: Promise<void> };
@@ -46,7 +47,8 @@ async function harness(t: TestContext, opts: {
   beforeRefusals?: (emit: (authorId: string, opts?: { id?: string; channelId?: string }) => void) => void;
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dm-refusal-'));
-  const env = { wm: process.env.DISCORD_WATERMARK_FILE, notices: process.env.DISCORD_DM_NOTICES_FILE };
+  const env = envBeforeTest.get(t) ?? { wm: process.env.DISCORD_WATERMARK_FILE, notices: process.env.DISCORD_DM_NOTICES_FILE };
+  envBeforeTest.set(t, env);
   const wm = join(dir, 'wm.json');
   writeFileSync(wm, JSON.stringify({ watermarks: opts.watermarks ?? {}, dmChannels: opts.dmChannels ?? [] }));
   process.env.DISCORD_WATERMARK_FILE = wm;

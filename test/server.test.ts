@@ -286,7 +286,7 @@ async function createTestPair(): Promise<{
   serverConn: McplConnection;
   discord: MockDiscordAdapter;
 }> {
-  const tcpServer = net.createServer();
+  const tcpServer = net.createServer({ noDelay: true });
   tcpServer.listen(0, '127.0.0.1');
   await new Promise<void>((resolve) => tcpServer.once('listening', resolve));
   const addr = tcpServer.address() as net.AddressInfo;
@@ -294,7 +294,7 @@ async function createTestPair(): Promise<{
   const [serverConn, clientSocket] = await Promise.all([
     McplConnection.acceptTcp(tcpServer),
     new Promise<net.Socket>((resolve, reject) => {
-      const socket = net.createConnection({ host: '127.0.0.1', port: addr.port }, () => resolve(socket));
+      const socket = net.createConnection({ host: '127.0.0.1', port: addr.port, noDelay: true }, () => resolve(socket));
       socket.once('error', reject);
     }),
   ]);
@@ -657,7 +657,7 @@ describe('DiscordMcplServer', () => {
     try {
       await mcpHandshake(client);
       errors = t.mock.method(console, 'error', () => {});
-      first = await client.sendRequest('tools/list', {}, 1_000).then(() => 'answered', (err: unknown) => err);
+      first = await client.sendRequest('tools/list', {}, 50).then(() => 'answered', (err: unknown) => err);
       second = await answeredWithin(client.sendRequest('tools/list', {}), 5_000);
     } finally {
       client.close();
@@ -2485,7 +2485,6 @@ describe('DiscordMcplServer', () => {
       channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
       mentions: [], attachments: [], timestamp: new Date(),
     } as DiscordMessageData);
-    await new Promise((r) => setTimeout(r, 20));
 
     const missed = await call('channel_missed', { channelId: 'c1' });
     assert.equal(missed.subscribed, false);
@@ -2554,7 +2553,6 @@ describe('DiscordMcplServer', () => {
       channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Server',
       mentions: [], attachments: [], timestamp: new Date(),
     } as DiscordMessageData);
-    await new Promise((r) => setTimeout(r, 20));
 
     const subs = await call('list_subscriptions', {});
     assert.equal(subs.unsubscribedWithBacklog.length, 1);

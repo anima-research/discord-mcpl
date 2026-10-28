@@ -23,21 +23,25 @@ import { writeJsonFile } from '../src/persisted-json.js';
 import { loadFiltersFile, saveFiltersFile } from '../src/filters.js';
 
 const ENV = ['DISCORD_MUTED_CHANNELS_FILE', 'DISCORD_REACTION_CHANNELS_FILE', 'DISCORD_WATERMARK_FILE', 'DISCORD_MCPL_DEBUG_LOG'];
+const envAtLoad = new Map(ENV.map((name) => [name, process.env[name]]));
 let dir: string;
 const asRoot = process.getuid?.() === 0; // permission bits don't stop root
 
-beforeEach(() => {
+function setUpStores(): void {
+  for (const name of ENV) delete process.env[name];
   dir = mkdtempSync(join(tmpdir(), 'persisted-stores-'));
   process.env.DISCORD_MUTED_CHANNELS_FILE = join(dir, 'muted.json');
   process.env.DISCORD_REACTION_CHANNELS_FILE = join(dir, 'reactions.json');
   process.env.DISCORD_WATERMARK_FILE = join(dir, 'watermarks.json');
-});
+}
 
-afterEach(() => {
-  for (const name of ENV) delete process.env[name];
+function tearDownStores(): void {
+  for (const [name, value] of envAtLoad) {
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
   chmodSync(dir, 0o700);
   rmSync(dir, { recursive: true, force: true });
-});
+}
 
 function server(t: TestContext) {
   const adapter = new DiscordAdapter({ token: 'unused' });
@@ -108,6 +112,8 @@ const fresh = () => {
 const NOTE = /couldn't be saved \((.*)\), so as it stands now it wouldn't survive a restart\.$/;
 
 describe('a store whose file has content it can not use', () => {
+  beforeEach(setUpStores);
+  afterEach(tearDownStores);
   it('copies an unparsable muted list aside and empties it, so the next mute writes a fresh list', async (t) => {
     const log = errors(t);
     process.env.DISCORD_MCPL_DEBUG_LOG = join(dir, 'debug.log');
@@ -246,6 +252,8 @@ describe('a store whose file has content it can not use', () => {
 });
 
 describe('a store whose file is left in place', () => {
+  beforeEach(setUpStores);
+  afterEach(tearDownStores);
   it('never saves over a file it could neither use nor copy aside, and starts with what it could use', async (t) => {
     const log = errors(t);
     process.env.DISCORD_MCPL_DEBUG_LOG = join(dir, 'debug.log');
@@ -370,6 +378,8 @@ describe('a store whose file is left in place', () => {
 });
 
 describe('the watermark store and the tools', () => {
+  beforeEach(setUpStores);
+  afterEach(tearDownStores);
   it("refuses to save watermarks over a path it can't read, and logs a lasting refusal once", (t) => {
     const log = errors(t);
     mkdirSync(join(dir, 'watermarks.json'));
@@ -502,6 +512,8 @@ describe('the watermark store and the tools', () => {
 });
 
 describe('a store whose file it can write but not read', () => {
+  beforeEach(setUpStores);
+  afterEach(tearDownStores);
   it("never saves over it, since it can't tell what the file holds", { skip: asRoot }, async (t) => {
     errors(t);
     writeFileSync(join(dir, 'muted.json'), '["keep-me"]');
@@ -515,6 +527,8 @@ describe('a store whose file it can write but not read', () => {
 });
 
 describe('a store whose file is there and readable, or not there yet', () => {
+  beforeEach(setUpStores);
+  afterEach(tearDownStores);
   it('starts empty with no files, and the first save of each store creates its file at the default mode', async (t) => {
     await withUmask(0o022, async () => {
       const s = server(t);
@@ -584,6 +598,8 @@ describe('a store whose file is there and readable, or not there yet', () => {
 });
 
 describe('writeJsonFile', () => {
+  beforeEach(setUpStores);
+  afterEach(tearDownStores);
   it('replaces the file only by the rename, so a save that fails leaves the old bytes and no temp file', async (t) => {
     const path = join(dir, 'store.json');
     writeJsonFile(path, ['a']);
@@ -798,6 +814,8 @@ describe('writeJsonFile', () => {
 });
 
 describe('the filters file', () => {
+  beforeEach(setUpStores);
+  afterEach(tearDownStores);
   it('keeps a private filters file private', async () => {
     const path = join(dir, 'filters.json');
     saveFiltersFile(path, { dmUsers: ['111'] });
