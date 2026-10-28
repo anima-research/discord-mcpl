@@ -116,7 +116,7 @@ describe('buildForwardedContent', () => {
   it('keeps text AND attachment note when a forward has both', () => {
     assert.equal(
       buildForwardedContent('', [{ content: 'caption', attachments: { size: 1 } }]),
-      '[forwarded message] caption [1 attachment]',
+      '[forwarded message] [1 attachment] caption',
     );
   });
 
@@ -174,7 +174,7 @@ describe('resolveVisibleContent (shared by live + history paths)', () => {
     });
     assert.equal(
       resolveVisibleContent(m),
-      'check this\n[forwarded message] forwarded body [1 attachment]',
+      'check this\n[forwarded message] [1 attachment] forwarded body',
     );
   });
 

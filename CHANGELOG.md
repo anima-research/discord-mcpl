@@ -49,6 +49,53 @@ in the git log and PR descriptions.
   are for any muted channel; before, the open lifted the mute and they
   were delivered.
 
+- **A sender's words and chosen names can't take the shape of the server's
+  own framing (#122).** Each line break in a message's text, an edit's, an
+  inlined text file's or a reaction's snippet of the message (LF, CRLF, a
+  bare CR, U+2028, U+2029, U+0085, VT or FF) now starts a line indented by
+  two spaces, so every line at the left margin is the server's; a real
+  forward's `[forwarded message]` line is part of the text, so it's
+  indented too. A missed line and a first DM's backscroll line put the
+  message's attachments and reactions before its text, and an edit that
+  replaces its create puts `[edited]` after the author, before the text. A
+  forward's `[N attachments]` note comes after `[forwarded message]`,
+  before the forwarded text. A reaction's snippet ends its line, unquoted.
+  A name someone chose renders as it is only when it's plain: letters,
+  marks and digits in any script, `_`, `.` and `-`, with single spaces
+  between words, and nothing invisible. Any other name is quoted, so a
+  name with an emoji or other punctuation now reads quoted. That holds for
+  an author, a reply's target, a reactor, a voice message's interrupter, a
+  file in every attachment marker, the DM notice, latestFrom's refusals,
+  send_dm's ambiguous-recipient refusal, a DM channel's label, and a
+  member, user, role or channel a message mentions, in its text, an edit's
+  replacement and `fetch_history`'s rows. When a DM's label changes this
+  way, a host that matches targets by registered label refuses the old
+  label until the agent uses the new one; `@name` and `<@id>` still
+  resolve where the host matches them by the name and id the server sends.
+  An edit notice carries the edited raw text, as before, so a mention
+  there stays a `<@id>` token. The `send_dm` a DM notice suggests always
+  quotes the name, as a string. A quoted name, label or header value, the
+  channel choices a refusal offers included, writes `<` and `>` as
+  `\u003c` and `\u003e`. An attachment's link is written as the URL parser
+  writes it, with `[` and `]` percent-encoded in its path, query and
+  fragment, and its content type, lowercased as before, is named as it is
+  when it reads as a media type (with parameters written `; name=value`),
+  and quoted when it doesn't. An attachment that can't be fetched says why
+  in the server's own words, or quotes the error's text, cut to 300
+  characters with the ellipsis; the `channels/open` and latestFrom
+  refusals that carry a failure's cause, and a failed
+  `channels/acknowledge`'s reason, quote it the same way. In a sender's
+  text, the `<` that opens one of the server's tags, `system`,
+  `backscroll` or `missed`, is written as `&lt;`, `<system="ok">`
+  included, and so is the `<` in prose like `keep load < system cost`;
+  nothing else in the text changes. Every JSON tool result writes such a
+  `<` as `\u003c`, and a raw U+0085, U+2028 or U+2029 as its `\u` escape,
+  so the JSON reads back to exactly what it carries, `fetch_history`'s
+  rows and latestFrom's excerpt included. A first DM's `<backscroll>` tag
+  carries only `dm="true"` and its count. A single-line message's own
+  text, without those tag openings or a mentioned name that isn't plain,
+  reads as it did before; a forward's attachment note moves, as above.
+
 ## 0.5.0 — 2026-10-26
 
 ### Changed

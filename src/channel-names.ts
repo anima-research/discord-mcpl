@@ -1,3 +1,5 @@
+import { quotedLabel } from './source-header.js';
+
 /** Discord snowflakes are 17-20 digits. */
 export function isSnowflake(value: string): boolean {
   return /^\d{17,20}$/.test(value);
@@ -121,7 +123,7 @@ export function resolveChannelName(
         reason: 'not-found',
         message:
           `${none(` in a guild named "${ref.guild}"`)} ` +
-          `That name exists elsewhere: ${near.map(channelLabel).join(', ')}. ${byId}`,
+          `That name exists elsewhere: ${near.map((c) => quotedLabel(channelLabel(c))).join(', ')}. ${byId}`,
       };
     }
     return {
@@ -136,8 +138,8 @@ export function resolveChannelName(
   const labelsDistinguish = new Set(labels).size === matches.length;
   const options = matches
     .map((c) => (labelsDistinguish
-      ? `"${channelLabel(c)}"`
-      : `"${channelLabel(c)}" [${c.type}] (id ${c.id})`))
+      ? quotedLabel(channelLabel(c))
+      : `${quotedLabel(channelLabel(c))} [${c.type}] (id ${c.id})`))
     .join(', ');
   return {
     ok: false,

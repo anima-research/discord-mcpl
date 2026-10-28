@@ -24,6 +24,8 @@ import {
   type ChatInputCommandInteraction,
   type ApplicationCommandDataResolvable,
   type GatewayThreadListSyncDispatchData,
+  type TextBasedChannel,
+  cleanContent as discordCleanContent,
 } from 'discord.js';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { basename, resolve as resolvePath } from 'node:path';
@@ -43,6 +45,7 @@ import {
 } from './channel-names.js';
 import { channelLabelFor, mcplChannelId } from './channels.js';
 import { INVALID_FORM_BODY, MISSING_ACCESS, UNKNOWN_CHANNEL } from './discord-errors.js';
+import { errorValue, nameValue } from './source-header.js';
 
 interface NameView {
   (name: string): ChannelCandidate[];
@@ -309,7 +312,7 @@ export interface HistoryMessage {
    *  discord.js counts as system, which nobody wrote as a message. */
   system?: true;
   content: string;
-  /** discord.js's cleanContent is null when the message's channel isn't in its cache, so raw content stands in. */
+  /** The text the agent reads (resolveVisibleContent): mentions named by mentionNamedContent, a forward's text and notes, a system notice's text; raw content stands in when the message's channel isn't in discord.js's cache. */
   cleanContent: string;
   attachments: DiscordAttachment[];
   mentionsBot: boolean;
@@ -397,7 +400,7 @@ export function buildForwardedContent(
       notes.push(`[${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'}]`);
     }
     if (!text && (snap.embeds?.length ?? 0) > 0) notes.push('[embed]');
-    const body = [text, ...notes].filter(Boolean).join(' ');
+    const body = [...notes, text].filter(Boolean).join(' ');
     parts.push(`[forwarded message] ${body || '[no text content]'}`);
   }
   if (parts.length === 0) return baseContent;
@@ -457,19 +460,47 @@ export function editForwardDecision(
   return 'forward';
 }
 
-/** discord.js's cleanContent is null when the message's channel isn't in its
- *  cache, so raw content stands in. Discord system messages (member joins,
- *  boosts, pins…) carry no content, so their text is made from `message.type`,
- *  as the human client renders them. */
+// discord.js 14.26.5's cleanContent token pattern (src/util/Util.js), so a
+// message's tokens are found as discord.js finds them, in one scan.
+const DISCORD_TOKEN = /<(?:(?<type>@[!&]?|#)|(?:\/(?<commandName>[-_\p{L}\p{N}\p{sc=Deva}\p{sc=Thai} ]+):)|(?:a?:(?<emojiName>[\w]+):))(?<id>\d{17,19})>/gu;
+
+export function mentionNamedContent(m: { content?: string | null; cleanContent?: string | null; channel?: unknown }): string | null | undefined {
+  const channel = m.channel as TextBasedChannel | null | undefined;
+  if (typeof m.content !== 'string' || !channel || !('client' in channel)) return m.cleanContent;
+  const guild = 'guild' in channel ? channel.guild : null;
+  return m.content.replaceAll(DISCORD_TOKEN, (match, type: string | undefined, _command: unknown, _emoji: unknown, id: string) => {
+    if (!type) return discordCleanContent(match, channel);
+    if (type === '#') {
+      const mentioned = channel.client.channels.cache.get(id) as { name?: string | null } | undefined;
+      return mentioned ? `#${typeof mentioned.name === 'string' ? nameValue(mentioned.name) : mentioned.name}` : match;
+    }
+    if (type === '@&') {
+      if (channel.type === ChannelType.DM) return match;
+      const role = guild?.roles.cache.get(id);
+      return role ? `@${nameValue(role.name)}` : match;
+    }
+    const member = guild?.members.cache.get(id);
+    if (member) return `@${nameValue(member.displayName)}`;
+    const user = channel.client.users.cache.get(id);
+    return user ? `@${nameValue(user.displayName)}` : match;
+  });
+}
+
+/** mentionNamedContent gives null when the message's channel isn't in
+ *  discord.js's cache, so raw content stands in. Discord
+ *  system messages (member joins, boosts, pins…) carry no content, so their
+ *  text is made from `message.type`, as the human client renders them. */
 export function resolveVisibleContent(m: {
   content: string;
   cleanContent?: string | null;
+  channel?: unknown;
   messageSnapshots?: { size: number; values(): Iterable<ForwardSnapshot> } | null;
   type?: MessageType;
 }): string {
+  const cleaned = mentionNamedContent(m);
   let base =
-    typeof m.cleanContent === 'string' && m.cleanContent.length > 0
-      ? m.cleanContent
+    typeof cleaned === 'string' && cleaned.length > 0
+      ? cleaned
       : m.content;
   if (base.length === 0 && m.type !== undefined && m.type !== MessageType.Default) {
     base = systemMessageText(m.type);
@@ -984,7 +1015,7 @@ export class DiscordAdapter {
     }
     throw new Error(
       `"${recipient}" is ambiguous — ${matches.size} members match ` +
-        `(${[...matches.values()].slice(0, 5).join(', ')}). Use the numeric user ID.`,
+        `(${[...matches.values()].slice(0, 5).map(nameValue).join(', ')}). Use the numeric user ID.`,
     );
   }
 
@@ -1169,7 +1200,7 @@ export class DiscordAdapter {
       const authorId = msg.author?.id ?? null;
       const resolvedMsg = msg.partial ? await msg.fetch().catch(() => null) : msg;
       const snippetSource = resolvedMsg
-        ? ((resolvedMsg as { cleanContent?: string | null }).cleanContent ?? resolvedMsg.content)
+        ? (mentionNamedContent(resolvedMsg) ?? resolvedMsg.content)
         : null;
       this.reactionHandler({
         action,
@@ -1838,7 +1869,7 @@ export class DiscordAdapter {
       } catch (err) {
         return {
           ok: false,
-          message: `"${raw}" can't be checked for people sharing that name: this channel's member list is unavailable (${(err as Error).message}). Use their numeric user id; nothing was done.`,
+          message: `"${raw}" can't be checked for people sharing that name: this channel's member list is unavailable (${errorValue(err)}). Use their numeric user id; nothing was done.`,
         };
       } finally {
         const outcome = guildId ? warmups.get(guildId) : undefined;
@@ -1873,7 +1904,7 @@ export class DiscordAdapter {
       }
       if (matches.size > 1) {
         const choices = [...matches].slice(0, 10)
-          .map(([id, m]) => `${m.label}${m.username ? ` (@${m.username})` : ''}${m.isBot ? ' [bot]' : ''} = ${id}`)
+          .map(([id, m]) => `${nameValue(m.label)}${m.username ? ` (@${nameValue(m.username)})` : ''}${m.isBot ? ' [bot]' : ''} = ${id}`)
           .join('; ');
         return { ok: false, message: `"${raw}" matches ${matches.size} people here: ${choices}. Use the numeric user id; nothing was done.` };
       }
@@ -1885,7 +1916,7 @@ export class DiscordAdapter {
     if (!target) {
       return {
         ok: false,
-        message: `No message from ${authorLabel} among ${span}; nothing was done. latestFrom never reaches further back or picks another author.`,
+        message: `No message from ${nameValue(authorLabel)} among ${span}; nothing was done. latestFrom never reaches further back or picks another author.`,
       };
     }
     const refusedNow = await this.latestFromFilterRefusal(channel, channelId);
@@ -1909,7 +1940,7 @@ export class DiscordAdapter {
         try {
           other = this.dmOtherParty(await this.client.channels.fetch(channelId, { force: true }));
         } catch (err) {
-          return unconfirmed(`looking up its DM channel failed: ${(err as Error).message}`);
+          return unconfirmed(`looking up its DM channel failed: ${errorValue(err)}`);
         }
         if (!other) return unconfirmed('Discord names no recipient for its DM channel');
       }
@@ -2131,7 +2162,7 @@ export class DiscordAdapter {
     const { channelId, id: messageId } = newMsg;
     // RFC-006: an edit's occurrence identity and its replacing rendering need the edit time and the mention-resolved body.
     const editedAt = newMsg.editedTimestamp ? new Date(newMsg.editedTimestamp).toISOString() : undefined;
-    const cleanContent = newMsg.cleanContent ?? undefined;
+    const cleanContent = mentionNamedContent(newMsg) ?? undefined;
     // Whom the message addresses as edited, from the update's own payload: an
     // edit can add a mention or take one away. Where that isn't known, the
     // address is left out rather than read as ambient: a partial message

@@ -360,7 +360,7 @@ describe('an edit that replaces a create carries what the agent was sent', () =>
         const edited = contentOf(sent[2]);
         assert.equal(edited.some((b: any) => b.type === 'image'), false);
         const texts = edited.map((b: any) => b.text ?? '').join('\n');
-        assert.match(texts, /look at this one \[edited\]/);
+        assert.match(texts, /someone \[edited\]: look at this one/);
         assert.match(texts, /\[image omitted: the host refused this message with the image inline/);
         assert.match(texts, /\[image attachment: shot\.png — https:\/\/cdn\.example\/shot\.png\]/);
       });
