@@ -227,6 +227,7 @@ describe('thread fields', () => {
     assert.equal('threadId' in channel, false, 'a channel is no thread');
   });
 
+  const silenced = new WeakSet<TestContext>();
   // Built as discord.js builds a thread from a message event: its type, but
   // not its name or its channel. A lookup gets past the cache, as discord.js's
   // fetch with force does, and fills it in.
@@ -241,7 +242,10 @@ describe('thread fields', () => {
       Object.assign(partly, { name: 'late-thread', parentId: 'chan-1' });
       return partly;
     });
-    t.mock.method(console, 'error', () => {});
+    if (!silenced.has(t)) {
+      silenced.add(t);
+      t.mock.method(console, 'error', () => {});
+    }
     return { partly, forced };
   }
   const named = (m: { threadId?: string; threadName?: string; threadParentName?: string | null }) =>
