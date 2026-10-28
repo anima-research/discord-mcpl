@@ -6,9 +6,7 @@ import type { FeatureSetDeclaration } from '@animalabs/mcpl-core';
 export interface NamedFeatureSetDeclaration extends FeatureSetDeclaration {
   name: string;
   /** Dropped from MCPL 0.5's core type but kept on the wire, since the
-   *  conformance corpus hashes extra fields verbatim into the digest. Required:
-   *  the installed 0.2.1 core type requires it, so an optional override is a
-   *  TS2430. */
+   *  conformance corpus hashes extra fields verbatim into the digest. */
   hostState: boolean;
 }
 

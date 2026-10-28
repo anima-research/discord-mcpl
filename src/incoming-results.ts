@@ -58,8 +58,7 @@ const DEFINED_RESERVED_CODES = new Set([-32700, -32600, -32601, -32602, -32603, 
  * - any other code in JSON-RPC's reserved range (-32768 to -32000) that
  *   neither JSON-RPC nor SPEC Appendix A defines: an implementation-defined
  *   server error (-32000 to -32099), which mcpl-core's own timeout is too
- *   (-32000, "Request timed out after <n>ms: <method>" in 0.2.1), or a code
- *   JSON-RPC reserves and gives no meaning.
+ *   (-32000), or a code JSON-RPC reserves and gives no meaning.
  *
  * Every other code is the host refusing this request: -32602 (malformed),
  * the spec's feature-set, capability and channel codes, JSON-RPC's -32600,
@@ -74,12 +73,7 @@ export function errorRejection(err: unknown): HostRejection | undefined {
   if (!e || typeof e.code !== 'number') return undefined;
   if (e.code === -32603) return undefined;
   if (e.code <= -32000 && e.code >= -32768 && !DEFINED_RESERVED_CODES.has(e.code)) return undefined;
-  const message = typeof e.message === 'string' ? e.message : '';
-  // mcpl-core 0.2.1 puts "RPC error <code>: " in front of the host's message,
-  // and later versions don't. The reason is the host's own words.
-  const prefix = `RPC error ${e.code}: `;
-  const reason = message.startsWith(prefix) ? message.slice(prefix.length) : message;
-  return { reason: reason || 'unspecified', code: e.code };
+  return { reason: typeof e.message === 'string' ? e.message : '', code: e.code };
 }
 
 /**

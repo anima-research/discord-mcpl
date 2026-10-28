@@ -96,6 +96,27 @@ in the git log and PR descriptions.
   text, without those tag openings or a mentioned name that isn't plain,
   reads as it did before; a forward's attachment note moves, as above.
 
+- **A message holding U+2028 or U+2029 is no longer lost between
+  discord-mcpl and its host, and a TCP client's reset no longer ends the
+  process.** discord-mcpl now depends on `@animalabs/mcpl-core` `^0.4.0`.
+  It wrote U+2028 and U+2029 raw, so a host whose reader ends lines at
+  them, as `readline` does on Node 24 and later, lost a
+  `channels/incoming` message carrying either in its text, and any message
+  whose author's name holds either; it now writes them as `\u` escapes.
+  The reader discord-mcpl used, mcpl-core 0.2.1's, ended lines there too
+  on Node 24, so a host's call holding either raw was lost; it is now read
+  whole. A served TCP client whose connection was reset could raise an
+  uncaught error that ended the process, with the next client refused
+  meanwhile; now only that client's serving ends, and the next client is
+  served once any request it was handling has returned. Where a failed
+  host call's error is quoted, in the logs and in the replies of `/undo`,
+  `/marks`, `/hide`, `/unstick` and `/nudge`, it now reads in mcpl-core
+  0.4.0's words: without the `RPC error <code>: ` prefix; a timeout as
+  "<method> timed out: no reply came within <n> ms, so whether it ran is
+  unknown. Check its effect before retrying, since a retry may repeat
+  it."; and an error with no message, or with a message that isn't text,
+  as a sentence that says so.
+
 ## 0.5.0 — 2026-10-26
 
 ### Changed
