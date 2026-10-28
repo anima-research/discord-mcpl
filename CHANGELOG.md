@@ -5,6 +5,13 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Added
+
+- **`list_channels` gives each channel's topic.** A channel whose topic
+  isn't blank carries it as `topic`, a forum or media channel's guidelines
+  included, cut at 300 code points with an ellipsis. The tool's description
+  doesn't change.
+
 ### Fixed
 
 - **`filters_update` refuses an update that would empty the server list,
