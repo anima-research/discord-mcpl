@@ -213,7 +213,7 @@ npm run build
 node --test dist/test/server.test.js  # the built server
 ```
 
-CI runs these on Ubuntu with Node 22.12.0, 24 and the newest release, and builds on macOS with Node 22.12.0 and the newest release.
+CI runs these on Ubuntu with Node 22.12.0. On macOS with Node 22.12.0 and the newest release, and on Ubuntu with Node 24 and the newest release, it installs, builds, and checks that the built server loads every module it imports at startup and reaches its check for a token, and that its voice modules load.
 
 `npm test` runs every test file in one process (`--experimental-test-isolation=none`, Node 22.8 or later), and expects the server's own `DISCORD_*` variables unset, as CI has them. So a test puts back any process-wide state it changes, such as an environment variable, a global or `console`, and a hook goes inside a `describe`: at a file's top level, a `beforeEach` or `afterEach` runs around every file's tests, and a `before` or `after` once for the whole run. `test/top-level-hooks.test.ts` fails on a line of a `.ts` file in `test/` that starts with any of these:
 - a hook call, by name, by the alias a `node:test` import gives it, or through an object such as `test.before`;
