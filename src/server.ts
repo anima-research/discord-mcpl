@@ -46,7 +46,7 @@ import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, type DmNoticeDecis
 
 const LATEST_FROM_EXCERPT = 80;
 import type { ChatInputCommandInteraction } from 'discord.js';
-import { headerValue, labelValue, quotedValue, renderSourceHeader } from './source-header.js';
+import { agentJson, errorValue, headerValue, labelValue, mediaTypeValue, nameValue, quotedLabel, quotedValue, renderSourceHeader, senderText, urlValue } from './source-header.js';
 import { ApplicationCommandOptionType, MessageFlags } from 'discord.js';
 import {
   boundedReply,
@@ -86,6 +86,7 @@ import {
   INVALID_PARAMS,
   RequestRefusal,
   channelLabelFor,
+  dmLabel,
   typeName,
   mcplChannelId,
   parseMcplChannelId,
@@ -459,6 +460,7 @@ const IMAGE_OUTPUT_RAW_CAP = 3.5 * 1024 * 1024;
 const IMAGE_FETCH_CEILING = 25 * 1024 * 1024;
 
 const MAX_TEXT_BYTES = 256 * 1024;
+const FETCH_TIMEOUT_MS = 15_000;
 const DEFAULT_ATTACHMENT_INLINE_MAX_BYTES = 5120;
 
 interface NormalizedImage {
@@ -563,6 +565,12 @@ export function parseHostCoalescing(
     channelsIncoming: o.channelsIncoming === true,
     channelScopedPush: o.channelScopedPush === true,
   };
+}
+
+class HttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+  }
 }
 
 export class DiscordMcplServer {
@@ -703,7 +711,7 @@ export class DiscordMcplServer {
     const failed = r.status === 'failed';
     const secs = (r.playedMs / 1000).toFixed(1);
     const who = r.interruptedBy
-      ? `@${r.interruptedBy.username ?? r.interruptedBy.userId}${r.interruptedBy.bot ? ' (bot)' : ''}`
+      ? `@${r.interruptedBy.username ? nameValue(r.interruptedBy.username) : r.interruptedBy.userId}${r.interruptedBy.bot ? ' (bot)' : ''}`
       : null;
     const tail = r.voicedText.length > 120 ? `…${r.voicedText.slice(-120)}` : r.voicedText;
     const head = r.unvoicedText.length > 400 ? `${r.unvoicedText.slice(0, 400)}…` : r.unvoicedText;
@@ -1791,13 +1799,13 @@ export class DiscordMcplServer {
       if (fs === 'discord.messaging') {
         const cpId = this.stateTracker.createCheckpoint();
         return {
-          content: [textContent(typeof result === 'string' ? result : JSON.stringify(result))],
+          content: [textContent(typeof result === 'string' ? result : agentJson(result))],
           state: { checkpoint: cpId },
         };
       }
 
       return {
-        content: [textContent(typeof result === 'string' ? result : JSON.stringify(result))],
+        content: [textContent(typeof result === 'string' ? result : agentJson(result))],
       };
     } catch (err) {
       return {
@@ -2385,7 +2393,7 @@ export class DiscordMcplServer {
       const recipient = dm?.recipientName
         ?? this.discord.getCachedDmRecipientName?.(discordChannelId)
         ?? ((this.channelManager.get(dmId)?.metadata as { recipientName?: string } | undefined)?.recipientName ?? null);
-      if (recipient) fallbackLabel = `DM: ${recipient}`;
+      if (recipient) fallbackLabel = dmLabel(recipient);
     } else {
       const meta = this.resolveChannelMeta(discordChannelId);
       canonical = meta.mcplChannelId;
@@ -2700,10 +2708,10 @@ export class DiscordMcplServer {
   ): string[] {
     const place = messagePlace(meta?.name ?? undefined, meta ?? {});
     const attrs: string[] = [];
-    if (place.channel) attrs.push(`channel=${quotedValue(`#${place.channel}`)}`);
-    if (place.thread) attrs.push(`thread=${quotedValue(place.thread)}`);
+    if (place.channel) attrs.push(`channel=${quotedLabel(`#${place.channel}`)}`);
+    if (place.thread) attrs.push(`thread=${quotedLabel(place.thread)}`);
     attrs.push(`channelId="${channelId}"`);
-    if (meta?.guildName) attrs.push(`guild=${quotedValue(meta.guildName)}`);
+    if (meta?.guildName) attrs.push(`guild=${quotedLabel(meta.guildName)}`);
     else if (isDM) attrs.push('dm="true"');
     return attrs;
   }
@@ -2712,9 +2720,9 @@ export class DiscordMcplServer {
     const ts = formatAgentDateTime(m.timestamp, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
     const att =
       m.attachments && m.attachments.length > 0
-        ? ` [attachments: ${m.attachments.map((a) => a.name).join(', ')}]`
+        ? ` [attachments: ${m.attachments.map((a) => nameValue(a.name)).join(', ')}]`
         : '';
-    return `[${ts ? `${ts} ` : ''}id=${m.id}] ${m.authorName}${mark}: ${m.cleanContent}${att}${this.renderReactionState(m.reactions)}`;
+    return `[${ts ? `${ts} ` : ''}id=${m.id}] ${nameValue(m.authorName)}${mark}${att}${this.renderReactionState(m.reactions)}: ${senderText(m.cleanContent)}`;
   }
 
   private owe(channelId: string, messageId: string, how: { uncertain: boolean; edit?: boolean }): void {
@@ -3517,7 +3525,7 @@ export class DiscordMcplServer {
           if (gone) throw gone;
           throw new RequestRefusal(
             ERR_CHANNEL_OPEN_FAILED,
-            `${desc.id} couldn't be checked against the channel filters, so nothing was opened: ${errorText(err)}`,
+            `${desc.id} couldn't be checked against the channel filters, so nothing was opened: ${errorValue(err)}`,
           );
         }
         if (refusal) {
@@ -3547,7 +3555,7 @@ export class DiscordMcplServer {
         if (gone) throw gone;
         throw new RequestRefusal(
           ERR_CHANNEL_OPEN_FAILED,
-          `${desc.id}'s history couldn't be fetched, so nothing was opened: ${err instanceof Error ? err.message : String(err)}`,
+          `${desc.id}'s history couldn't be fetched, so nothing was opened: ${errorValue(err)}`,
         );
       }
       if (await filtersRefusal()) {
@@ -3580,7 +3588,7 @@ export class DiscordMcplServer {
         messageId: message.id,
         author: { id: message.authorId, name: message.authorName },
         timestamp: message.timestamp.toISOString(),
-        content: [textContent(`${message.authorName}: ${message.cleanContent}`)],
+        content: [textContent(`${nameValue(message.authorName)}: ${senderText(message.cleanContent)}`)],
         metadata: {
           isBot: message.isBot,
           attachments: message.attachments,
@@ -3669,7 +3677,7 @@ export class DiscordMcplServer {
       await this.discord.addReaction(parsed.channelId, params.messageId, representation);
       return { acknowledged: true, representation };
     } catch (error) {
-      return { acknowledged: false, reason: (error as Error).message };
+      return { acknowledged: false, reason: errorValue(error) };
     }
   }
 
@@ -3855,12 +3863,12 @@ export class DiscordMcplServer {
     const scope = this.subjectScope(messageId, info?.guildId ?? null, channelId);
     const mem = this.recentCreates.get(messageId);
     const timestamp = info?.editedAt ?? new Date().toISOString();
-    const who = info?.authorName ? `${info.authorName}: ` : '';
+    const who = info?.authorName ? `${nameValue(info.authorName)}: ` : '';
     // An edit may replace the unread create (RFC-006 §4.1), so it must be as self-contained as the create was.
     const render = this.hostCoalescing?.pushEvents ? mem?.render : undefined;
     const content: ContentBlock[] = render
-      ? [textContent(`${render.prefix}${render.replyMarker}${render.location}${render.authorName}: ${info?.cleanContent ?? newContent} [edited]`), ...render.attachments]
-      : [textContent(`[message edited] ${who}${newContent}`)];
+      ? [textContent(`${render.prefix}${render.replyMarker}${render.location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
+      : [textContent(`[message edited] ${who}${senderText(newContent)}`)];
     const params: CoalescedPushEventParams = {
       featureSet: 'discord.messaging',
       // The occurrence id (RFC-006 §3.1): a second edit of one message is a new
@@ -3909,7 +3917,7 @@ export class DiscordMcplServer {
       origin: this.messageEventOrigin(channelId, messageId, info, registeredId),
       tags: ['chat:deleted', ...threadTags(info ?? {})],
       // The deletion notice (RFC-006 §6): a coalescing host leaves it out only when it knows no model read a version of the message.
-      payload: { content: [textContent(`[message deleted] ${messageId}${info?.authorName ? ` by @${info.authorName}` : ''}`)] },
+      payload: { content: [textContent(`[message deleted] ${messageId}${info?.authorName ? ` by @${nameValue(info.authorName)}` : ''}`)] },
       ...(this.hostCoalescing?.pushEvents
         ? { coalesce: { key: `message:${messageId}`, retract: true, ...(scope ? { channelId: scope } : {}) } }
         : {}),
@@ -4048,8 +4056,8 @@ export class DiscordMcplServer {
       }
       const verb = ev.action === 'add' ? 'reacted' : 'removed a reaction';
       const target = ev.onOwnMessage ? 'your message' : `message ${ev.messageId}`;
-      const quoted = ev.messageSnippet ? ` — "${ev.messageSnippet}"` : '';
-      const line = `[reaction] @${ev.userName} ${verb} ${ev.emoji} on ${target}${quoted}`;
+      const quoted = ev.messageSnippet ? ` — ${senderText(ev.messageSnippet)}` : '';
+      const line = `[reaction] @${nameValue(ev.userName)} ${verb} ${ev.emoji} on ${target}${quoted}`;
       const reactionChannelId = mcplChannelId(ev.guildId ?? 'dm', ev.channelId);
       this.conn.sendRequest(method.PUSH_EVENT, {
         featureSet: 'discord.messaging',
@@ -4167,7 +4175,7 @@ export class DiscordMcplServer {
       /\.(txt|md|markdown|json|jsonl|csv|tsv|log|ya?ml|xml|html?|css|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cpp|hpp|sh|bash|zsh|toml|ini|cfg|conf|sql|diff|patch|env)$/i;
     const fmt = (n: number) =>
       n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : n >= 1024 ? `${Math.round(n / 1024)}KB` : `${n}B`;
-    const fetchWithTimeout = async (url: string, ms = 15000): Promise<Response> => {
+    const fetchWithTimeout = async (url: string, ms = FETCH_TIMEOUT_MS): Promise<Response> => {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), ms);
       try {
@@ -4179,13 +4187,13 @@ export class DiscordMcplServer {
     const fetchTextCapped = async (
       url: string,
       maxBytes: number,
-      ms = 15000,
+      ms = FETCH_TIMEOUT_MS,
     ): Promise<{ text: string; overflow: boolean; bytesRead: number }> => {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), ms);
       try {
         const res = await fetch(url, { signal: ctrl.signal });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) throw new HttpStatusError(res.status);
         if (!res.body) {
           return { text: '', overflow: true, bytesRead: 0 };
         }
@@ -4230,15 +4238,17 @@ export class DiscordMcplServer {
     // marker says when, and the message says once how to get a fresh one.
     let linksExpire = false;
     const link = (att: DiscordAttachment) => {
+      const url = urlValue(att.url);
       const expiry = attachmentUrlExpiry(att.url);
-      if (!expiry) return att.url;
+      if (!expiry) return url;
       linksExpire = true;
-      return `${att.url} (link expires ${expiry.toISOString().slice(0, 16).replace('T', ' ')} UTC)`;
+      return `${url} (link expires ${expiry.toISOString().slice(0, 16).replace('T', ' ')} UTC)`;
     };
 
     const inlineCap = this.attachmentInlineMaxBytes;
     const blocks: ContentBlock[] = [];
     for (const att of attachments) {
+      const name = nameValue(att.name);
       const ct = (att.contentType || '').toLowerCase();
       const isImage = ct.startsWith('image/');
       const isText =
@@ -4248,28 +4258,28 @@ export class DiscordMcplServer {
       try {
         if (!isImage && isText && att.size > inlineCap) {
           blocks.push(textContent(
-            `[attachment: ${att.name}${fwd(att)} (${fmt(att.size)}) over the ${fmt(inlineCap)} inline cap — not inlined: ${link(att)}]`,
+            `[attachment: ${name}${fwd(att)} (${fmt(att.size)}) over the ${fmt(inlineCap)} inline cap — not inlined: ${link(att)}]`,
           ));
           dbg('attachment:over-inline-cap', { name: att.name, declaredSize: att.size, cap: inlineCap });
         } else if ((isImage || isText) && att.size > fetchBudgetLeft) {
           blocks.push(textContent(
-            `[attachment: ${att.name}${fwd(att)} (${fmt(att.size)}) not inlined — message attachment budget exhausted: ${link(att)}]`,
+            `[attachment: ${name}${fwd(att)} (${fmt(att.size)}) not inlined — message attachment budget exhausted: ${link(att)}]`,
           ));
           dbg('attachment:budget-exhausted', { name: att.name, size: att.size, budgetLeft: fetchBudgetLeft });
         } else if (isImage) {
           if (att.size > IMAGE_FETCH_CEILING) {
-            blocks.push(textContent(`[image attachment "${att.name}"${fwd(att)} (${fmt(att.size)}) too large to fetch — ${link(att)}]`));
+            blocks.push(textContent(`[image attachment ${name}${fwd(att)} (${fmt(att.size)}) too large to fetch — ${link(att)}]`));
           } else {
             fetchBudgetLeft -= att.size;
             const res = await fetchWithTimeout(att.url);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) throw new HttpStatusError(res.status);
             const raw = Buffer.from(await res.arrayBuffer());
             const norm = await normalizeImageForInference(raw, att.contentType);
             if (norm) {
               blocks.push({ type: 'image', data: norm.data, mimeType: norm.mimeType } as ContentBlock);
-              blocks.push(textContent(`[image attachment: ${att.name}${fwd(att)} — ${link(att)}]`));
+              blocks.push(textContent(`[image attachment: ${name}${fwd(att)} — ${link(att)}]`));
             } else {
-              blocks.push(textContent(`[image attachment "${att.name}"${fwd(att)} (${fmt(att.size)}) could not be inlined — ${link(att)}]`));
+              blocks.push(textContent(`[image attachment ${name}${fwd(att)} (${fmt(att.size)}) could not be inlined — ${link(att)}]`));
             }
           }
         } else if (isText) {
@@ -4278,7 +4288,7 @@ export class DiscordMcplServer {
           fetchBudgetLeft -= bytesRead;
           if (overflow) {
             blocks.push(textContent(
-              `[attachment: ${att.name}${fwd(att)} (over the ${fmt(inlineCap)} inline cap; declared ${fmt(att.size)}) — not inlined: ${link(att)}]`,
+              `[attachment: ${name}${fwd(att)} (over the ${fmt(inlineCap)} inline cap; declared ${fmt(att.size)}) — not inlined: ${link(att)}]`,
             ));
             dbg('attachment:over-inline-cap', {
               name: att.name,
@@ -4287,10 +4297,10 @@ export class DiscordMcplServer {
               misdeclared: true,
             });
           } else {
-            blocks.push(textContent(`[attachment: ${att.name}${fwd(att)} (${fmt(att.size)}) — ${link(att)}]\n${text}`));
+            blocks.push(textContent(`[attachment: ${name}${fwd(att)} (${fmt(att.size)}) — ${link(att)}]\n  ${senderText(text)}`));
           }
         } else {
-          blocks.push(textContent(`[attachment: ${att.name}${fwd(att)} (${ct || 'unknown type'}, ${fmt(att.size)}) — not inlined: ${link(att)}]`));
+          blocks.push(textContent(`[attachment: ${name}${fwd(att)} (${mediaTypeValue(ct)}, ${fmt(att.size)}) — not inlined: ${link(att)}]`));
         }
         dbg('attachment', {
           name: att.name,
@@ -4299,8 +4309,15 @@ export class DiscordMcplServer {
           kind: isImage ? 'image' : isText ? 'text' : 'other',
         });
       } catch (err) {
-        blocks.push(textContent(`[attachment: ${att.name}${fwd(att)} — could not fetch (${(err as Error).message}); ${link(att)}]`));
-        dbg('attachment:failed', { name: att.name, error: (err as Error).message });
+        const why = !URL.canParse(att.url)
+          ? "the link isn't a valid URL"
+          : err instanceof HttpStatusError
+            ? `HTTP ${err.status}`
+            : (err as { name?: unknown } | null)?.name === 'AbortError'
+              ? `not fetched within ${FETCH_TIMEOUT_MS / 1000} s`
+              : errorValue(err);
+        blocks.push(textContent(`[attachment: ${name}${fwd(att)} — could not fetch (${why}); ${link(att)}]`));
+        dbg('attachment:failed', { name: att.name, error: why });
       }
     }
     if (linksExpire) {
@@ -4425,25 +4442,20 @@ export class DiscordMcplServer {
 
       const blocks: string[] = [];
       blocks.push(
-        `<system>Direct message from @${msg.authorName} (user id ${msg.authorId}). ` +
-          `To reply, use send_dm("${msg.authorName}", content="your message") — or ` +
+        `<system>Direct message from @${nameValue(msg.authorName)} (user id ${msg.authorId}). ` +
+          `To reply, use send_dm(${quotedLabel(msg.authorName)}, content="your message") — or ` +
           `send_dm("${msg.authorId}", content="your message") if the name is ambiguous. ` +
           `The message text always travels in the "content" parameter; a send_dm with ` +
           `only userId sends nothing. DMs always reach you; there is nothing to subscribe to.</system>`,
       );
       if (backscrollMsgs.length > 0) {
-        const attrs: string[] = [];
-        if (msg.channelName) attrs.push(`channel="#${msg.channelName}"`);
-        if (msg.guildName) attrs.push(`guild=${JSON.stringify(msg.guildName)}`);
-        else if (isDM) attrs.push('dm="true"');
-        attrs.push(`count="${backscrollMsgs.length}"`);
-        const open = `<backscroll ${attrs.join(' ')}>`;
+        const open = `<backscroll dm="true" count="${backscrollMsgs.length}">`;
         const lines = backscrollMsgs.map((m) => {
           const ts = formatAgentDateTime(m.timestamp, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
           const att = m.attachments && m.attachments.length > 0
-            ? ` [attachments: ${m.attachments.map((a) => a.name).join(', ')}]`
+            ? ` [attachments: ${m.attachments.map((a) => nameValue(a.name)).join(', ')}]`
             : '';
-          return `${ts ? `[${ts}] ` : ''}${m.authorName}: ${m.cleanContent}${att}${this.renderReactionState(m.reactions)}`;
+          return `${ts ? `[${ts}] ` : ''}${nameValue(m.authorName)}${att}${this.renderReactionState(m.reactions)}: ${senderText(m.cleanContent)}`;
         });
         blocks.push([open, ...lines, '</backscroll>'].join('\n'));
       }
@@ -4460,8 +4472,6 @@ export class DiscordMcplServer {
     const guildId = msg.guildId ?? 'dm';
     const channelMcplId = mcplChannelId(guildId, msg.channelId);
 
-    // discord.js's `cleanContent` resolves the mentions it can, to cached names,
-    // and leaves the rest as raw tokens.
     const contextChanged = this.lastChannelId !== msg.channelId;
     let location = '';
     if (contextChanged) {
@@ -4471,17 +4481,17 @@ export class DiscordMcplServer {
       const locationParts: string[] = [];
       const place = messagePlace(msg.channelName, msg);
       if (place.channel) {
-        locationParts.push(`#${/\s/.test(place.channel) ? quotedValue(place.channel) : headerValue(place.channel)}`);
+        locationParts.push(`#${/\s/.test(place.channel) ? quotedLabel(place.channel) : headerValue(place.channel)}`);
       }
-      if (place.thread) locationParts.push(`thread ${quotedValue(place.thread)}`);
+      if (place.thread) locationParts.push(`thread ${quotedLabel(place.thread)}`);
       if (msg.guildName) locationParts.push(`in ${headerValue(msg.guildName)}`);
       else if (msg.guildId === null) locationParts.push('DM');
       if (locationParts.length > 0) location = `[${locationParts.join(' ')}] `;
     }
     const replyMarker = msg.replyToId
-      ? `[replying to ${msg.replyToUserName ? `@${msg.replyToUserName}` : 'unknown author'}]\n`
+      ? `[replying to ${msg.replyToUserName ? `@${nameValue(msg.replyToUserName)}` : 'unknown author'}]\n`
       : '';
-    const renderedContent = `${prefixBlock}${replyMarker}${location}${msg.authorName}: ${msg.cleanContent}`;
+    const renderedContent = `${prefixBlock}${replyMarker}${location}${nameValue(msg.authorName)}: ${senderText(msg.cleanContent)}`;
     if (isDM || !this.deletedLately(guildId, msg.channelId)) this.forwardedWatermark.set(msg.channelId, msg.id);
     if (isDM) this.dmChannelIds.add(msg.channelId);
     this.saveWatermark();

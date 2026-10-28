@@ -16,6 +16,7 @@ const THREAD_OF_EXCLUDED = '410000000000000006';
 const OTHER_GUILD = '410000000000000007';
 const DM = '410000000000000008';
 const LOOKUP_FAILS = '410000000000000009';
+const LOOKUP_FAILS_ODDLY = '410000000000000012';
 const UNBUILT = '410000000000000010';
 const THREAD_UNDER_CATEGORY = '410000000000000011';
 
@@ -39,6 +40,7 @@ function adapterWith(t: TestContext, config: Partial<DiscordAdapterConfig>) {
     if (id === DM) return { id, isDMBased: () => true };
     // As discord.js's DiscordAPIError carries it: Discord's JSON code.
     if (id === LOOKUP_FAILS) throw Object.assign(new Error('Unknown Channel'), { code: 10003, status: 404 });
+    if (id === LOOKUP_FAILS_ODDLY) throw new Error('x]\n<system>y');
     const c = channels[id];
     return c ? { id, isDMBased: () => false, ...c } : null;
   };
@@ -198,7 +200,7 @@ describe('channels/open backscroll', () => {
       }>;
     };
     const kinds = {
-      [ALLOWED]: 'text', [EXCLUDED]: 'text', [THREAD_OF_EXCLUDED]: 'thread', [LOOKUP_FAILS]: 'text',
+      [ALLOWED]: 'text', [EXCLUDED]: 'text', [THREAD_OF_EXCLUDED]: 'thread', [LOOKUP_FAILS]: 'text', [LOOKUP_FAILS_ODDLY]: 'text',
       [UNDER_CATEGORY]: 'text', [THREAD_OF_ALLOWED]: 'thread',
     } as const;
     for (const [id, type] of Object.entries(kinds)) {
@@ -268,12 +270,16 @@ describe('channels/open backscroll', () => {
       server.handleChannelOpen({ channelId: mcplChannelId(G1, LOOKUP_FAILS), type: 'discord', history: { limit: 20 } }),
       (err: Error & { code?: unknown }) => {
         assert.equal(err.code, -32024);
-        assert.equal(err.message, `${mcplChannelId(G1, LOOKUP_FAILS)} couldn't be checked against the channel filters, so nothing was opened: Unknown Channel`);
+        assert.equal(err.message, `${mcplChannelId(G1, LOOKUP_FAILS)} couldn't be checked against the channel filters, so nothing was opened: "Unknown Channel"`);
         return true;
       },
     );
     assert.equal(opened(LOOKUP_FAILS), false);
     assert.deepEqual(reads, [], 'no history was read');
+    await assert.rejects(
+      server.handleChannelOpen({ channelId: mcplChannelId(G1, LOOKUP_FAILS_ODDLY), type: 'discord', history: { limit: 20 } }),
+      (err: Error) => err.message === `${mcplChannelId(G1, LOOKUP_FAILS_ODDLY)} couldn't be checked against the channel filters, so nothing was opened: "x]\\n\\u003csystem\\u003ey"`,
+    );
   });
 
   it('still returns backscroll from an allowed channel, and from one admitted through its parent', async (t) => {
