@@ -3,8 +3,7 @@
  *
  * The invariant under test: no more than DISCORD_ATTACHMENT_INLINE_MAX_BYTES
  * of attachment text ever becomes a context block, and the bound holds on
- * ACTUAL bytes — Discord's declared attachment.size is advisory. Images are
- * out of scope by design (native image blocks, their own ceilings).
+ * ACTUAL bytes — Discord's declared attachment.size is advisory.
  *
  * buildAttachmentBlocks is private; tests reach it with the same cast-hack
  * precedent server.test.ts uses for private access. No Discord connection —
@@ -13,6 +12,7 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert/strict';
+import sharp from 'sharp';
 
 import { DiscordMcplServer } from '../src/server.js';
 import type { DiscordAdapter, DiscordAttachment } from '../src/discord-adapter.js';
@@ -60,7 +60,7 @@ function allText(blocks: Block[]): string {
   return blocks.map((b) => b.text ?? '').join('\n');
 }
 
-describe('attachment inline cap (issue #30)', () => {
+describe('attachment inlining (issues #30 and #124)', () => {
   const realFetch = globalThis.fetch;
   let fetchCalls: string[];
   let originalEnv: string | undefined;
@@ -123,6 +123,42 @@ describe('attachment inline cap (issue #30)', () => {
     assert.equal(blocks[1].text, `[image attachment: pixel.png — ${url} ${EXPIRES}]`);
     assert.deepEqual(blocks[2], LINKS_NOTE);
   });
+
+  for (const fixture of [
+    {
+      name: 'svg', contentType: 'image/svg+xml',
+      bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="3" height="2"><rect width="3" height="2" fill="#285078"/></svg>'),
+    },
+    { name: 'tiff', contentType: 'image/tiff', bytes: Buffer.from([
+        'SUkqABgAAAB4nNMIqGAAAw0YAwAW4gHhEAAAAQMAAQAAAAMAAAABAQMAAQAAAAIAAAACAQMAAwAAAO4AAAADAQMAAQAAAAgA',
+        'AAAGAQMAAQAAAAIAAAARAQQAAQAAAAgAAAASAQMAAQAAAAEAAAAVAQMAAQAAAAMAAAAWAQMAAQAAAAABAAAXAQQAAQAAABAA',
+        'AAAaAQUAAQAAAN4AAAAbAQUAAQAAAOYAAAAcAQMAAQAAAAEAAAAoAQMAAQAAAAIAAAA9AQMAAQAAAAIAAABTAQMAAwAAAPQA',
+        'AAAAAAAAMzPLAAAACAAzM8sAAAAIAAgACAAIAAEAAQABAA==',
+      ].join(''), 'base64') },
+    { name: 'avif', contentType: 'image/avif', bytes: Buffer.from([
+        'AAAAHGZ0eXBhdmlmAAAAAG1pZjFhdmlmbWlhZgAAANZtZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAA',
+        'AAAAACJpbG9jAAAAAERAAAEAAQAAAAAA+gABAAAAAAAAACUAAAAjaWluZgAAAAAAAQAAABVpbmZlAgAAAAABAABhdjAxAAAA',
+        'AA5waXRtAAAAAAABAAAAVmlwcnAAAAA4aXBjbwAAAAxhdjFDgSACAAAAABRpc3BlAAAAAAAAAAMAAAACAAAAEHBpeGkAAAAA',
+        'AwgICAAAABZpcG1hAAAAAAAAAAEAAQOBAgMAAAAtbWRhdBIACgg4BCtICGg0gDIXGUJjBMAANAAkxbXOKle0gN1/CPQvl5A=',
+      ].join(''), 'base64') },
+  ]) {
+    it('transcodes a benign ' + fixture.name.toUpperCase() + ' attachment to PNG or JPEG', async () => {
+      const url = 'https://cdn.discordapp.example/a1/still.' + fixture.name;
+      stubFetch(fixture.bytes);
+      const blocks = await buildBlocks([
+        makeAttachment({ name: 'still.' + fixture.name, url, contentType: fixture.contentType, size: fixture.bytes.length }),
+      ]);
+      assert.deepEqual(fetchCalls, [url]);
+      assert.equal(blocks[0]?.type, 'image', fixture.name);
+      const image = blocks[0] as Block & { data: string; mimeType: string };
+      assert.ok(['image/png', 'image/jpeg'].includes(image.mimeType), fixture.name);
+      assert.ok(typeof image.data === 'string' && image.data.length > 0, fixture.name);
+      const output = await sharp(Buffer.from(image.data, 'base64')).metadata();
+      assert.equal('image/' + output.format, image.mimeType, fixture.name);
+      assert.deepEqual([output.width, output.height], [3, 2], fixture.name);
+      assert.equal(blocks[1]?.type, 'text', fixture.name);
+    });
+  }
 
   it('marks inlined forwarded text with its URL, numbering the snapshot when there are several', async () => {
     const body = 'hello\n';
