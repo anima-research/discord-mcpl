@@ -12,6 +12,23 @@ in the git log and PR descriptions.
   included, cut at 300 code points with an ellipsis. The tool's description
   doesn't change.
 
+- **A send's result says what each `@name` in it became.** The results of
+  `send_message`, `reply_message` and `send_dm`, and the answer to
+  `channels/publish`, now carry a `mentions` list when the content has an
+  `@name` to report, one entry per name: the user or role it became; or
+  that it went out as plain text and pinged no one, because no cached
+  member or role is named exactly that, with up to three near names; or
+  because several members or roles share the name, listing them, up to
+  ten. Each near name or choice comes with its mention, to copy exactly
+  into a new message. The list shows at most twenty names, and
+  `mentionsNotShown` counts the rest. `@everyone` and `@here` aren't
+  reported, nor is an `@name` that didn't become a mention when it's
+  `@everyone` or `@here` with trailing periods, an explicit `<@id>`,
+  inside a word such as an email address, one of the bot's own names, or
+  only periods. Names in the list, usernames included, have the server's
+  own tag openings neutralized and U+0085, U+2028 and U+2029 written as
+  escapes. What's posted doesn't change, and no tool description changes.
+
 ### Fixed
 
 - **This change requires sharp 0.35.5 or a later 0.35.x on install.** The dependency was `^0.33.5`, which can't install any version with the fixes for GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w (#124). If sharp uses system-installed image libraries, upgrading sharp alone does not update them; the operator must separately ensure that any libvips, libheif and librsvg libraries it uses include the relevant fixes.

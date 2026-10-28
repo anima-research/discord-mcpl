@@ -366,7 +366,7 @@ describe('a failed or uncertain send still names where it was aimed', () => {
     t.after(() => client.destroy());
     const a = adapter as unknown as Record<string, unknown>;
     a.resolveRecipientId = async () => '100000000000000001';
-    a.resolveOutgoingMentions = async (_dm: unknown, content: string) => content;
+    a.resolveOutgoingMentions = async (_dm: unknown, content: string) => ({ content, mentions: [] });
     const user = {
       id: '100000000000000001', username: 'ra', displayName: 'Ra',
       createDM: async () => ({ id: '160000000000000009' }),

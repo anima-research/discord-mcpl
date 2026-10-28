@@ -41,6 +41,7 @@ import type {
   DiscordMessageData,
   DiscordChannelInfo,
   MentionCandidate,
+  MentionsField,
 } from '../src/discord-adapter.js';
 
 class MockDiscordAdapter {
@@ -2680,47 +2681,214 @@ describe("a closed channel's push", () => {
 
 describe('applyMentionCandidates', () => {
   const cands: MentionCandidate[] = [
-    { id: 'u_alice', aliases: ['Alice', 'alice_g'], kind: 'user' },
-    { id: 'r_mods', aliases: ['Moderators'], kind: 'role' },
-    { id: 'u_mods', aliases: ['Moderators'], kind: 'user' },
-    { id: 'r_team', aliases: ['Team'], kind: 'role' },
+    { id: 'u_alice', aliases: ['Alice', 'alice_g'], kind: 'user', name: 'Alice', username: 'alice_g' },
+    { id: 'r_mods', aliases: ['Moderators'], kind: 'role', name: 'Moderators' },
+    { id: 'u_mods', aliases: ['Moderators'], kind: 'user', name: 'Moderators', username: 'mods' },
+    { id: 'r_team', aliases: ['Team'], kind: 'role', name: 'Team' },
   ];
+  const text = (content: string, candidates = cands) => applyMentionCandidates(content, candidates).content;
 
   it('resolves a role mention to <@&id>', () => {
-    assert.equal(applyMentionCandidates('ping @Team please', cands), 'ping <@&r_team> please');
+    assert.equal(text('ping @Team please'), 'ping <@&r_team> please');
   });
 
   it('resolves a user mention to <@id>', () => {
-    assert.equal(applyMentionCandidates('hi @Alice', cands), 'hi <@u_alice>');
+    assert.equal(text('hi @Alice'), 'hi <@u_alice>');
   });
 
   it('is case-insensitive for roles', () => {
-    assert.equal(applyMentionCandidates('@team', cands), '<@&r_team>');
+    assert.equal(text('@team'), '<@&r_team>');
   });
 
   it('prefers a user over a role on a name collision', () => {
-    assert.equal(applyMentionCandidates('@Moderators', cands), '<@u_mods>');
+    assert.equal(text('@Moderators'), '<@u_mods>');
   });
 
   it('leaves @everyone / @here untouched', () => {
-    assert.equal(applyMentionCandidates('@everyone @here', cands), '@everyone @here');
+    assert.equal(text('@everyone @here'), '@everyone @here');
   });
 
   it('leaves unknown handles untouched', () => {
-    assert.equal(applyMentionCandidates('@nobody', cands), '@nobody');
+    assert.equal(text('@nobody'), '@nobody');
+    assert.equal(text('@nobody', []), '@nobody');
   });
 
   it('falls through to a role only when no user matches', () => {
-    const roleOnly: MentionCandidate[] = [{ id: 'r_x', aliases: ['Ops'], kind: 'role' }];
-    assert.equal(applyMentionCandidates('@Ops', roleOnly), '<@&r_x>');
+    const roleOnly: MentionCandidate[] = [{ id: 'r_x', aliases: ['Ops'], kind: 'role', name: 'Ops' }];
+    assert.equal(text('@Ops', roleOnly), '<@&r_x>');
   });
 
   it('does not resolve when a role name is ambiguous', () => {
     const ambiguous: MentionCandidate[] = [
-      { id: 'r_a', aliases: ['Dup'], kind: 'role' },
-      { id: 'r_b', aliases: ['Dup'], kind: 'role' },
+      { id: 'r_a', aliases: ['Dup'], kind: 'role', name: 'Dup' },
+      { id: 'r_b', aliases: ['Dup'], kind: 'role', name: 'Dup' },
     ];
-    assert.equal(applyMentionCandidates('@Dup', ambiguous), '@Dup');
+    assert.equal(text('@Dup', ambiguous), '@Dup');
+  });
+});
+
+const NO_MATCH = 'It went out as plain text and pinged no one: no cached member or role is named exactly that.';
+const COPY_BELOW = ' To mention one of the names below, copy its mention exactly into a new message.';
+
+describe('what a send reports about each @name in its content', () => {
+  const user = (id: string, name: string, username: string, ...more: string[]): MentionCandidate =>
+    ({ id, aliases: [name, username, ...more], kind: 'user', name, username });
+  const role = (id: string, name: string): MentionCandidate => ({ id, aliases: [name], kind: 'role', name });
+  const report = (content: string, candidates: MentionCandidate[], where: { inDm?: boolean; selfAliases?: string[] } = {}, posted = content) => {
+    const out = applyMentionCandidates(content, candidates, where);
+    assert.equal(out.content, posted);
+    return out.report?.mentions ?? [];
+  };
+
+  it('says which user or role each resolved @name became, once per name, its name escaped', () => {
+    const candidates = [user('111', 'Alice', 'alice_g'), role('9', 'Ops'), user('7', '</system>\u2028Eve', 'eve')];
+    assert.deepEqual(report('hi @alice and @Ops, @ALICE @eve', candidates, {}, 'hi <@111> and <@&9>, <@111> <@7>'), [
+      { wrote: '@alice', sentAs: '<@111>', user: 'Alice', username: 'alice_g' },
+      { wrote: '@Ops', sentAs: '<@&9>', role: 'Ops' },
+      { wrote: '@eve', sentAs: '<@7>', user: '&lt;/system>\\u2028Eve', username: 'eve' },
+    ]);
+  });
+
+  it("says an @name that matched nobody cached went out as text, with up to three near names, users first and then the closest in length, matched by prefix either way at two characters or more, ignoring case, spaces and the trailing periods written", () => {
+    const candidates = [
+      role('5', 'bobs'),
+      user('6', 'Bobbie', 'bobbie'),
+      user('1', 'Bob W', 'robert'),
+      user('3', 'B', 'b'),
+      user('4', 'Carol', 'carol'),
+      user('2', 'Bobby', 'bobby_t'),
+    ];
+    assert.deepEqual(report('ask @bob..', candidates), [{
+      wrote: '@bob..',
+      sentAs: 'text',
+      because: NO_MATCH + COPY_BELOW,
+      nearest: [
+        { user: 'Bob W', username: 'robert', mention: '<@1>' },
+        { user: 'Bobby', username: 'bobby_t', mention: '<@2>' },
+        { user: 'Bobbie', username: 'bobbie', mention: '<@6>' },
+      ],
+    }]);
+    assert.deepEqual(report('@bobw', [user('1', 'Bob W', 'robert')])[0], {
+      wrote: '@bobw', sentAs: 'text', because: NO_MATCH + COPY_BELOW,
+      nearest: [{ user: 'Bob W', username: 'robert', mention: '<@1>' }],
+    });
+    assert.deepEqual(report('@bob_', [user('1', 'Bob W', 'robert')])[0], {
+      wrote: '@bob_', sentAs: 'text', because: NO_MATCH, nearest: [],
+    });
+    assert.deepEqual(report('thanks @aliceW', [user('7', 'Alice', 'alice_g')])[0], {
+      wrote: '@aliceW', sentAs: 'text', because: NO_MATCH + COPY_BELOW,
+      nearest: [{ user: 'Alice', username: 'alice_g', mention: '<@7>' }],
+    });
+    assert.deepEqual(report('@zed', candidates), [
+      { wrote: '@zed', sentAs: 'text', because: NO_MATCH, nearest: [] },
+    ]);
+    assert.deepEqual(report('@bobs', [role('5', 'bob'), role('7', 'Bob Squad')])[0], {
+      wrote: '@bobs', sentAs: 'text', because: NO_MATCH + COPY_BELOW,
+      nearest: [{ role: 'bob', mention: '<@&5>' }, { role: 'Bob Squad', mention: '<@&7>' }],
+    });
+  });
+
+  it('says so in a DM, where the only cached name is the other person', () => {
+    assert.deepEqual(report('@carol', [user('1', 'Alice', 'alice')], { inDm: true }), [
+      { wrote: '@carol', sentAs: 'text', because: "It went out as plain text and pinged no one: it isn't exactly the cached name of anyone else in this DM.", nearest: [] },
+    ]);
+  });
+
+  it('lists every member or role an @name matched, up to ten, with how many more, users before a same-named role', () => {
+    const sams = Array.from({ length: 12 }, (_, i) => user(`${i}`, 'Sam', `sam${i}`));
+    const [entry] = report('@sam', [...sams, role('r', 'Sam')]);
+    assert.equal(entry.sentAs, 'text');
+    assert.equal((entry as { because: string }).because, 'It went out as plain text and pinged no one: several cached members have that name. To mention one of them, copy its mention exactly into a new message.');
+    assert.deepEqual((entry as { choices: unknown[] }).choices, sams.slice(0, 10).map((c) => ({ user: 'Sam', username: c.username, mention: `<@${c.id}>` })));
+    assert.equal((entry as { more?: number }).more, 2);
+    assert.deepEqual(report('@ops', [role('1', 'Ops'), role('2', 'ops')]), [{
+      wrote: '@ops', sentAs: 'text', because: 'It went out as plain text and pinged no one: several cached roles have that name. To mention one of them, copy its mention exactly into a new message.',
+      choices: [{ role: 'Ops', mention: '<@&1>' }, { role: 'ops', mention: '<@&2>' }],
+    }]);
+  });
+
+  it("doesn't report an unresolved @everyone or @here, an explicit <@id>, the bot's own name, a name of only dots, or an unmatched @ inside a word, and does report one that resolved, inside a word or sharing the bot's name", () => {
+    const candidates = [user('111', 'Alice', 'alice_g'), user('222', 'Bob', 'bob'), user('333', 'everyone', 'everyone_u')];
+    const content = '@everyone @here @everyone. @here... <@111> ana@example.com ana_@example.com 𐐀@example.com cafe\u0301@example.com a.@x b+@y c-@z 1@w @... @MyBot @mybot. @Bot. x@bob';
+    assert.deepEqual(report(content, candidates, { selfAliases: ['MyBot', 'Bot.'] }, content.replace('x@bob', 'x<@222>')), [
+      { wrote: '@bob', sentAs: '<@222>', user: 'Bob', username: 'bob' },
+    ]);
+    assert.deepEqual(report('see "@animalabs/membrane" and <@alic> <@12ab>', candidates).map((m) => [m.wrote, (m as { nearest?: unknown[] }).nearest?.length]), [
+      ['@animalabs', 0],
+      ['@alic', 1],
+      ['@12ab', 0],
+    ]);
+    assert.deepEqual(report('@MyBot', [user('444', 'MyBot', 'mybot_m')], { selfAliases: ['MyBot'] }, '<@444>'), [
+      { wrote: '@MyBot', sentAs: '<@444>', user: 'MyBot', username: 'mybot_m' },
+    ]);
+  });
+
+  it('shows at most twenty names, with how many it left out', () => {
+    const content = Array.from({ length: 25 }, (_, i) => `@n${i}`).join(' ');
+    const out = applyMentionCandidates(content, []);
+    assert.deepEqual(out.report?.mentions.map((m) => m.wrote), Array.from({ length: 20 }, (_, i) => `@n${i}`));
+    assert.equal(out.report?.mentionsNotShown, 5);
+  });
+
+  it('reports nothing for content with no @name', () => {
+    assert.equal(applyMentionCandidates('no names here', [user('111', 'Alice', 'alice_g')]).report, undefined);
+  });
+});
+
+describe('a send result carries the report of its @names', () => {
+  const REPORT: MentionsField = {
+    mentions: [{ wrote: '@bob', sentAs: 'text', because: NO_MATCH, nearest: [] }],
+    mentionsNotShown: 3,
+  };
+
+  async function sends(t: TestContext, report?: MentionsField) {
+    const { client, serverConn, discord } = await createTestPair();
+    discord.facts.c1 = { id: 'c1', guildId: 'g1', guildName: 'Test Server', type: 'text', name: 'general' };
+    discord.sendMessage = async (channelId: string, content: string) => {
+      discord.sentMessages.push({ channelId, content });
+      return { messageId: 'm1', ...(report ? { report } : {}) } as { messageId: string };
+    };
+    discord.sendDM = async (userId: string, content: string) => {
+      discord.sentMessages.push({ channelId: `dm:${userId}`, content });
+      return { messageId: 'd1', channelId: 'dm_c1', recipientName: 'bob', ...(report ? { report } : {}) } as { messageId: string };
+    };
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
+    await mcplHandshake(client);
+    const reg = await client.nextMessage();
+    if (reg.type === 'request') client.sendResponse(reg.request.id, {});
+    const tool = async (name: string, args: Record<string, unknown>) => {
+      const r = (await client.sendRequest('tools/call', { name, arguments: args })) as { content: Array<{ text: string }>; isError?: boolean };
+      assert.notEqual(r.isError, true, r.content[0]?.text);
+      return JSON.parse(r.content[0].text) as Record<string, unknown>;
+    };
+    return {
+      send: await tool('send_message', { channelId: 'c1', content: 'hi @bob' }),
+      reply: await tool('reply_message', { channelId: 'c1', messageId: '1309876543210987654', content: 'hi @bob' }),
+      dm: await tool('send_dm', { userId: '1309876543210987655', content: 'hi @bob' }),
+      publish: (await client.sendRequest(method.CHANNELS_PUBLISH, {
+        conversationId: 'conv_1', channelId: 'discord:g1:c1', content: [{ type: 'text', text: 'hi @bob' }],
+      })) as Record<string, unknown>,
+    };
+  }
+
+  it('in send_message, reply_message and send_dm results, and in a channels/publish answer, as the adapter gave it', async (t) => {
+    const results = await sends(t, REPORT);
+    for (const [path, result] of Object.entries(results)) {
+      assert.deepEqual(result.mentions, REPORT.mentions, path);
+      assert.equal(result.mentionsNotShown, 3, path);
+    }
+    assert.equal(results.publish.delivered, true);
+  });
+
+  it('and adds nothing when there is nothing to report', async (t) => {
+    for (const [path, result] of Object.entries(await sends(t))) {
+      assert.equal('mentions' in result || 'mentionsNotShown' in result, false, path);
+    }
   });
 });
 
