@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.5.2 — 2026-10-28
+
 ### Fixed
 
 - **A sender's words and chosen names can't take the shape of the server's
