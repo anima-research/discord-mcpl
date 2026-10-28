@@ -248,6 +248,16 @@ export interface DiscordChannelInfo {
   type: 'text' | 'announcement' | 'voice' | 'stage' | 'category' | 'thread' | 'forum' | 'unknown';
   parentId?: string;
   label: string;
+  topic?: string;
+}
+
+const TOPIC_LIMIT = 300;
+
+function channelTopic(channel: unknown): string | undefined {
+  const topic = (channel as { topic?: unknown }).topic;
+  if (typeof topic !== 'string' || !topic.trim()) return undefined;
+  const chars = Array.from(topic);
+  return chars.length > TOPIC_LIMIT ? `${chars.slice(0, TOPIC_LIMIT - 1).join('')}…` : topic;
 }
 
 export interface ChannelFacts {
@@ -1606,12 +1616,14 @@ export class DiscordAdapter {
         if (this.isStale(c.id)) return;
         if (!this.channelAllowed(guildId, c.id, c.parentId)) return;
         const facts = this.channelFacts(c, names);
+        const topic = channelTopic(c);
         result.push({
           id: c.id,
           name: c.name,
           type: mapChannelType(c.type),
           parentId: c.parentId ?? undefined,
           label: facts ? channelLabelFor(facts) : mcplChannelId(guildId, c.id),
+          ...(topic ? { topic } : {}),
         });
       }
     });
