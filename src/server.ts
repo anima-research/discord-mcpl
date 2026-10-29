@@ -40,7 +40,7 @@ import type {
   ChannelsOutgoingCompleteParams,
 } from '@animalabs/mcpl-core';
 
-import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, PostedParts, ThreadPlace } from './discord-adapter.js';
+import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, MentionsField, PostedParts, ThreadPlace } from './discord-adapter.js';
 import { LATEST_FROM_WINDOW, attachmentUrlExpiry, holdsNoMessages, isListedKind, kindOfValue } from './discord-adapter.js';
 import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, type DmNoticeDecision } from './dm-notices.js';
 
@@ -140,6 +140,9 @@ const holdsNumber = (value: unknown): boolean =>
 
 const listed = (items: string[]): string =>
   items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items.join('');
+
+const withMentions = <T extends object>(result: T, report: MentionsField | undefined): T | (T & MentionsField) =>
+  report ? { ...result, ...report } : result;
 
 type ChannelOpenRequest = ChannelsOpenParams & {
   channelId?: string;
@@ -554,7 +557,7 @@ function rememberedAttachments(blocks: ContentBlock[]): ContentBlock[] {
   return [textContent('[attachments as in the original message]')];
 }
 
-/** RFC-006 `coalesce` member (mcpl-core 0.2.x predates it). */
+/** RFC-006 `coalesce` member, which mcpl-core's PushEventParams doesn't type. */
 interface CoalesceMember {
   key: string;
   channelId?: string;
@@ -1337,17 +1340,11 @@ export class DiscordMcplServer {
     }
     this.policyGateUsed = true;
 
-    // The connection emits 'error' for a line that isn't JSON, and for an
-    // error on either stream. With no listener, EventEmitter throws it from
-    // the stream's own callback, where nothing here can catch it, and the
-    // process exits. Logged instead, so a bad line costs only itself and the
-    // loop reads on. The listener stays for the connection's whole life,
-    // after serve() returns too: mcpl-core 0.2 and 0.3 forward its streams'
-    // errors to it for as long as they exist. (mcpl-core-ts #11 stops at the
-    // close, so there the late listener costs nothing.) A read error, on a
-    // TCP socket or on stdin, also reaches mcpl-core's own readline
-    // interface, which listens for none, so it still ends the process. That
-    // is mcpl-core's to handle.
+    // The connection emits 'error' for a line that isn't JSON, for a
+    // listener's throw, and once for the stream error that closes it. With no
+    // listener, EventEmitter throws it from the stream's own callback, where
+    // nothing here can catch it, and the process exits. Logged instead, so a
+    // bad line costs only itself and the loop reads on.
     const onConnectionError = (err: unknown) => {
       console.error('[discord-mcpl] Connection error:', errorText(err));
       dbg('connection:error', { error: errorText(err) });
@@ -1616,8 +1613,8 @@ export class DiscordMcplServer {
 
         case 'context/afterInference': {
           // An older host may still call afterInference, so it's answered as a no-op.
-          // The literal wire string: mcpl-core 0.5 removed
-          // method.CONTEXT_AFTER_INFERENCE from its method map.
+          // The literal wire string: mcpl-core's method map no longer has
+          // method.CONTEXT_AFTER_INFERENCE.
           await this.handleAfterInference(params);
           conn.sendResponse(req.id, { featureSet: 'discord.messaging' });
           break;
@@ -1849,7 +1846,7 @@ export class DiscordMcplServer {
         const content = messageContent(name, args.content);
         const files = args.files as OutgoingFile[] | undefined;
         requireContentOrFiles(content, files);
-        let result: { messageId: string };
+        let result: Awaited<ReturnType<DiscordAdapter['sendMessage']>>;
         try {
           result = await this.discord.sendMessage(channelId, content, { files });
         } catch (err) {
@@ -1857,7 +1854,7 @@ export class DiscordMcplServer {
         }
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
-        return this.augmentSendResult(result.messageId, channelId, shifted);
+        return withMentions(await this.augmentSendResult(result.messageId, channelId, shifted), result.report);
       }
 
       case 'reply_message': {
@@ -1866,7 +1863,7 @@ export class DiscordMcplServer {
         const files = args.files as OutgoingFile[] | undefined;
         requireContentOrFiles(content, files);
         const { messageId: replyTo, target } = await this.resolveTargetMessage(channelId, args);
-        let result: { messageId: string };
+        let result: Awaited<ReturnType<DiscordAdapter['sendMessage']>>;
         try {
           result = await this.discord.sendMessage(
             channelId,
@@ -1879,7 +1876,7 @@ export class DiscordMcplServer {
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
         const receipt = await this.augmentSendResult(result.messageId, channelId, shifted);
-        return target ? { ...receipt, target } : receipt;
+        return withMentions(target ? { ...receipt, target } : receipt, result.report);
       }
 
       case 'send_dm': {
@@ -1887,7 +1884,7 @@ export class DiscordMcplServer {
         const content = messageContent(name, args.content);
         const files = args.files as OutgoingFile[] | undefined;
         requireContentOrFiles(content, files);
-        let result: { messageId: string; channelId: string; recipientName: string };
+        let result: Awaited<ReturnType<DiscordAdapter['sendDM']>>;
         try {
           result = await this.discord.sendDM(
             userId,
@@ -1903,7 +1900,10 @@ export class DiscordMcplServer {
           throw err;
         }
         const shifted = this.markOutboundSend(result.channelId);
-        return this.augmentSendResult(result.messageId, result.channelId, shifted, { recipientName: result.recipientName });
+        return withMentions(
+          await this.augmentSendResult(result.messageId, result.channelId, shifted, { recipientName: result.recipientName }),
+          result.report,
+        );
       }
 
       case 'add_reaction': {
@@ -3752,7 +3752,7 @@ export class DiscordMcplServer {
     }
   }
 
-  private async handlePublish(params: ChannelsPublishParams): Promise<ChannelsPublishResult> {
+  private async handlePublish(params: ChannelsPublishParams): Promise<ChannelsPublishResult & Partial<MentionsField>> {
     const parsed = parseMcplChannelId(params.channelId);
     if (!parsed) {
       throw new Error(`Invalid channel ID: ${params.channelId}`);
@@ -3773,7 +3773,7 @@ export class DiscordMcplServer {
     this.stateTracker.recordSent(result.messageId, parsed.channelId, text);
     dbg('handlePublish:sent', { channelId: params.channelId, messageId: result.messageId });
 
-    return { delivered: true, messageId: result.messageId };
+    return withMentions({ delivered: true, messageId: result.messageId }, result.report);
   }
 
   private async handleRollback(params: StateRollbackParams): Promise<StateRollbackResult> {
@@ -5064,15 +5064,12 @@ function sendErrorOutcome(err: unknown): SendOutcome {
   return { kind: 'failed', error: errorText(err), ...(hostAnsweredWithError(err) ? { hostError: true as const } : {}) };
 }
 
-/** Whether an error is the host's answer (a JSON-RPC error it sent), not
- *  mcpl-core's own timeout (an RpcError with -32000 in 0.2.1, "Request
- *  timed out after <n>ms: <method>"; ConnectionTimeoutError later) or a
- *  closed connection. */
+/** Whether an error is the host's answer (a JSON-RPC error it sent), not a
+ *  closed connection or mcpl-core's own timeout, a ConnectionTimeoutError,
+ *  which carries a code (-32000) as a host's answer does. */
 function hostAnsweredWithError(err: unknown): boolean {
-  const e = err as { code?: unknown; message?: unknown; name?: unknown } | null | undefined;
-  if (!e || typeof e.code !== 'number') return false;
-  if (e.name === 'ConnectionTimeoutError') return false;
-  return !(typeof e.message === 'string' && /Request timed out after \d+ms/.test(e.message));
+  const e = err as { code?: unknown; name?: unknown } | null | undefined;
+  return !!e && typeof e.code === 'number' && e.name !== 'ConnectionTimeoutError';
 }
 
 function snowflake(id: string): bigint | null {
@@ -5105,9 +5102,7 @@ export async function serveStdio(
 /**
  * mcpl-core's `acceptTcp` takes a single connection and leaves no listener
  * that logs the server's errors, so this owns the server's 'connection' and
- * 'error' events. Node's server keeps listening after an 'error'. A read
- * error on the served client's socket still ends the process: it also
- * reaches mcpl-core's readline interface, which listens for none.
+ * 'error' events. Node's server keeps listening after an 'error'.
  */
 export function serveTcp(
   tcpServer: net.Server,

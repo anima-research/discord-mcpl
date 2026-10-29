@@ -5,7 +5,67 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Added
+
+- **`list_channels` gives each channel's topic.** A channel whose topic
+  isn't blank carries it as `topic`, a forum or media channel's guidelines
+  included, cut at 300 code points with an ellipsis. The tool's description
+  doesn't change.
+
+- **A send's result says what each `@name` in it became.** The results of
+  `send_message`, `reply_message` and `send_dm`, and the answer to
+  `channels/publish`, now carry a `mentions` list when the content has an
+  `@name` to report, one entry per name: the user or role it became; or
+  that it went out as plain text and pinged no one, because no cached
+  member or role is named exactly that, with up to three near names; or
+  because several members or roles share the name, listing them, up to
+  ten. Each near name or choice comes with its mention, to copy exactly
+  into a new message. The list shows at most twenty names, and
+  `mentionsNotShown` counts the rest. `@everyone` and `@here` aren't
+  reported, nor is an `@name` that didn't become a mention when it's
+  `@everyone` or `@here` with trailing periods, an explicit `<@id>`,
+  inside a word such as an email address and naming no single member or
+  role, one of the bot's own names, or only periods. Names in the list,
+  usernames included, have the server's own tag openings neutralized and
+  U+0085, U+2028 and U+2029 written as escapes. What's posted doesn't
+  change, and no tool description changes.
+
 ### Fixed
+
+- **An `@name` in what the agent sends is read more exactly, so some pings
+  start and some stop.** These now ping:
+  - a name followed by a sentence's periods, such as "thanks @alice.",
+    with the periods kept after the mention;
+  - a name with letters outside ASCII, such as `@José` or `@太郎`, which is
+    now looked up whole, and reported like any other name when it matches
+    no one;
+  - `<@name>` with the name of a member or role, up to 100 characters,
+    spaces included but not `<`, `>`, `@` or a line break, which now posts
+    as that mention alone. A name without a space pinged inside stray
+    brackets before.
+
+  These stop:
+  - an `@name` inside a word that names a member, such as `me@ann_x` in
+    an email address, which pinged a member called ann_x; it's now left as
+    text, and the send's report names that member with their mention to
+    copy;
+  - `@José` pinging a member called Jos, from reading only "Jos";
+  - `<@Alice Smith>` pinging a member called Alice inside stray brackets,
+    from reading only "Alice";
+  - a name followed straight by a letter of another script, such as
+    "@aliceさん", which pinged Alice and is now read as "aliceさん": unless
+    someone is called exactly that, it goes as text, with the send's report
+    giving near names, such as Alice, with their mentions to copy;
+  - `<@digits>` the agent wrote pinging a member nicknamed those digits,
+    inside stray brackets; it now posts as written.
+
+  A long send that has no space or line break to split at no longer
+  splits through a mention or channel link that follows other text in
+  the part being cut: the cut moves to just before it, so it starts the
+  next message. Such a split posted as two halves of plain text, so the
+  mention pinged no one.
+
+- **This change requires sharp 0.35.5 or a later 0.35.x on install.** The dependency was `^0.33.5`, which can't install any version with the fixes for GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w (#124). If sharp uses system-installed image libraries, upgrading sharp alone does not update them; the operator must separately ensure that any libvips, libheif and librsvg libraries it uses include the relevant fixes.
 
 - **`filters_update` refuses an update that would empty the server list,
   or that it can't read as written.** A `removeGuilds` that removed the
@@ -95,6 +155,27 @@ in the git log and PR descriptions.
   carries only `dm="true"` and its count. A single-line message's own
   text, without those tag openings or a mentioned name that isn't plain,
   reads as it did before; a forward's attachment note moves, as above.
+
+- **A message holding U+2028 or U+2029 is no longer lost between
+  discord-mcpl and its host, and a TCP client's reset no longer ends the
+  process.** discord-mcpl now depends on `@animalabs/mcpl-core` `^0.4.0`.
+  It wrote U+2028 and U+2029 raw, so a host whose reader ends lines at
+  them, as `readline` does on Node 24 and later, lost a
+  `channels/incoming` message carrying either in its text, and any message
+  whose author's name holds either; it now writes them as `\u` escapes.
+  The reader discord-mcpl used, mcpl-core 0.2.1's, ended lines there too
+  on Node 24, so a host's call holding either raw was lost; it is now read
+  whole. A served TCP client whose connection was reset could raise an
+  uncaught error that ended the process, with the next client refused
+  meanwhile; now only that client's serving ends, and the next client is
+  served once any request it was handling has returned. Where a failed
+  host call's error is quoted, in the logs and in the replies of `/undo`,
+  `/marks`, `/hide`, `/unstick` and `/nudge`, it now reads in mcpl-core
+  0.4.0's words: without the `RPC error <code>: ` prefix; a timeout as
+  "<method> timed out: no reply came within <n> ms, so whether it ran is
+  unknown. Check its effect before retrying, since a retry may repeat
+  it."; and an error with no message, or with a message that isn't text,
+  as a sentence that says so.
 
 - **An id sent as a number is refused, not rounded.** A Discord id is past
   2^53, where a JSON number can lose its last digits, so a tool call that

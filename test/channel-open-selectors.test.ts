@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { ChannelType, type Client } from 'discord.js';
 import { DiscordAdapter, type ChannelFacts } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
-import { OPEN_CHOICES_SHOWN, resolveOpenTarget, toDescriptor, toDmDescriptor } from '../src/channels.js';
+import { resolveOpenTarget, toDescriptor, toDmDescriptor } from '../src/channels.js';
 
 const general = toDescriptor({ id: 'c1', guildId: 'g1', guildName: 'Guild', name: 'general', type: 'text' });
 const dev = toDescriptor({ id: 'c2', guildId: 'g1', guildName: 'Guild', name: 'dev', type: 'text' });
@@ -19,12 +19,12 @@ const INVALID_PARAMS = -32602;
 
 const STORE_ENV = ['DISCORD_SUBSCRIPTIONS_FILE', 'DISCORD_MUTED_CHANNELS_FILE', 'DISCORD_REACTION_CHANNELS_FILE', 'DISCORD_WATERMARK_FILE'];
 const savedEnv = new Map<string, string | undefined>();
-before(() => { for (const name of STORE_ENV) { savedEnv.set(name, process.env[name]); delete process.env[name]; } });
-after(() => {
+function clearStoreEnv(): void { for (const name of STORE_ENV) { savedEnv.set(name, process.env[name]); delete process.env[name]; } }
+function restoreStoreEnv(): void {
   for (const [name, value] of savedEnv) {
     if (value === undefined) delete process.env[name]; else process.env[name] = value;
   }
-});
+}
 
 type Served =
   | { kind: 'guild'; facts: ChannelFacts }
@@ -139,6 +139,8 @@ async function untilFetch(held: { atFetch: Promise<void> }, call: Promise<unknow
 }
 
 describe('channels/open: what selects', () => {
+  before(clearStoreEnv);
+  after(restoreStoreEnv);
   it('opens exactly the channel an id names, with its own history, and subscribes only it', async () => {
     const f = fixture();
     const res = await f.server.handleChannelOpen({ channelId: 'discord:g1:c2', type: 'discord', history: { limit: 5 } });
@@ -255,7 +257,6 @@ describe('channels/open: what selects', () => {
     await assert.rejects(g.server.handleChannelOpen({ type: 'discord' }), (err: Error) => err.message.includes('discord:dm:d1 ("DM: ra")'));
     const h = fixture([general, toDmDescriptor('d2', 'ra</system>')]);
     await assert.rejects(h.server.handleChannelOpen({ type: 'discord' }), (err: Error) => err.message.includes('discord:dm:d2 ("DM: \\"ra\\\\u003c/system\\\\u003e\\"")'));
-    assert.equal(toDmDescriptor('d3', 'ra</system>').label, 'DM: "ra\\u003c/system\\u003e"');
     assert.equal(toDmDescriptor('d4', 'Zoë').label, 'DM: Zoë');
     g.nothingOpened();
   });
@@ -269,7 +270,6 @@ describe('channels/open: what selects', () => {
   it('lists every choice up to ten, and past ten points to channels/list for the rest', () => {
     const rooms = (n: number) => Array.from({ length: n }, (_, i) =>
       toDescriptor({ id: `c${i}`, guildId: 'g1', guildName: 'Guild', name: `room${i}`, type: 'text' }));
-    assert.equal(OPEN_CHOICES_SHOWN, 10);
     const ten = resolveOpenTarget({ type: 'discord' }, rooms(10));
     assert.equal(ten.kind, 'refused');
     const tenReason = (ten as { reason: string }).reason;
@@ -293,6 +293,8 @@ describe('channels/open: what selects', () => {
 });
 
 describe("channels/open: an id the registry doesn't hold", () => {
+  before(clearStoreEnv);
+  after(restoreStoreEnv);
   it('opens and registers a DM no traffic has registered since a restart', async () => {
     const f = fixture([general], {
       served: (guild, channel) => (guild === 'dm' && channel === 'd9' ? { kind: 'dm', recipientId: 'u9', recipientName: 'ra' } : null),
@@ -436,6 +438,8 @@ describe("channels/open: an id the registry doesn't hold", () => {
 });
 
 describe("channels/open: the open registers a looked-up channel only when it commits", () => {
+  before(clearStoreEnv);
+  after(restoreStoreEnv);
   const late: ChannelFacts = { id: 'c9', guildId: 'g1', guildName: 'Guild', name: 'late', type: 'text' };
   const lateServed = (guild: string, channel: string): Served | null =>
     (guild === 'g1' && channel === 'c9' ? { kind: 'guild', facts: late } : null);
@@ -700,6 +704,8 @@ describe("channels/open: the open registers a looked-up channel only when it com
 });
 
 describe('channels/open: what arrives during the lookup or the history fetch stands', () => {
+  before(clearStoreEnv);
+  after(restoreStoreEnv);
   it('opens nothing when the channel is unregistered meanwhile', async () => {
     const held = heldHistory();
     const f = fixture([general], { history: held.history });
@@ -771,6 +777,8 @@ describe('channels/open: what arrives during the lookup or the history fetch sta
 });
 
 describe('channels/open over the wire', () => {
+  before(clearStoreEnv);
+  after(restoreStoreEnv);
   it('answers each refusal with its MCPL code and logs it as one line, and a fault as -32603 with its stack', async (t: TestContext) => {
     const logged: string[] = [];
     t.mock.method(console, 'error', (...args: unknown[]) => { logged.push(args.map(String).join(' ')); });
@@ -795,6 +803,8 @@ describe('channels/open over the wire', () => {
 });
 
 describe('the adapter: which channels an exact open may register', () => {
+  before(clearStoreEnv);
+  after(restoreStoreEnv);
   function adapterFixture(t: TestContext, config: Record<string, unknown>) {
     const adapter = new DiscordAdapter({ token: 'unused', ...config });
     const client = (adapter as unknown as { client: Client }).client;
@@ -1055,6 +1065,8 @@ describe('the adapter: which channels an exact open may register', () => {
 });
 
 describe('channels/open and a mute (#95)', () => {
+  before(clearStoreEnv);
+  after(restoreStoreEnv);
   const listed = async (f: ReturnType<typeof fixture>) =>
     ((await f.server.executeToolCall('list_subscriptions', {})) as { channels: string[] }).channels;
   const missed = async (f: ReturnType<typeof fixture>) =>

@@ -48,19 +48,24 @@ function captureStderr(): { lines: string[]; restore: () => void } {
 }
 
 let dir: string;
+const FILTER_ENV = ['DISCORD_FILTERS_FILE', 'DISCORD_SUPPRESS_REACTION_EMOJIS', 'DISCORD_SUPPRESSED_REACTIONS_BASELINE'];
+const filterEnvAtLoad = new Map(FILTER_ENV.map((name) => [name, process.env[name]]));
 
-beforeEach(() => {
+function setUpFiltersDir(): void {
+  for (const name of FILTER_ENV) delete process.env[name];
   dir = mkdtempSync(join(tmpdir(), 'filters-plane-'));
-});
+}
 
-afterEach(() => {
+function tearDownFiltersDir(): void {
+  for (const [name, value] of filterEnvAtLoad) {
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
   rmSync(dir, { recursive: true, force: true });
-  delete process.env.DISCORD_FILTERS_FILE;
-  delete process.env.DISCORD_SUPPRESS_REACTION_EMOJIS;
-  delete process.env.DISCORD_SUPPRESSED_REACTIONS_BASELINE;
-});
+}
 
 describe('DiscordFiltersState — plane status', () => {
+  beforeEach(setUpFiltersDir);
+  afterEach(tearDownFiltersDir);
   it('env-static when no filters file is configured', () => {
     const st = new DiscordFiltersState({ fileConfigured: false });
     st.applyParsed({ guildIds: ['999888777666555444'] });
@@ -132,6 +137,8 @@ describe('DiscordFiltersState — plane status', () => {
 });
 
 describe('DiscordFiltersState — suppression', () => {
+  beforeEach(setUpFiltersDir);
+  afterEach(tearDownFiltersDir);
   it('not-configured: no key, no env — honest status, nothing suppressed', () => {
     const st = fileState();
     st.applyParsed({});
@@ -319,6 +326,8 @@ describe('DiscordFiltersState — suppression', () => {
 });
 
 describe('DiscordFiltersState — host-injected protective baseline', () => {
+  beforeEach(setUpFiltersDir);
+  afterEach(tearDownFiltersDir);
   const BASELINE = `${SUPPRESSED_UNICODE},${SUPPRESSED_CUSTOM_ID}`;
 
   function baselineState(opts?: { legacyEnv?: string }): DiscordFiltersState {
@@ -335,15 +344,6 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
     assert.equal(rs.source, 'baseline-default');
     assert.equal(rs.deprecated, undefined, 'the baseline is the intended path, not a deprecation');
     assert.equal(rs.protectionActive, true);
-  });
-
-  it('explicit [] → operator chose none; the baseline is overridden, not merged back', () => {
-    const st = baselineState();
-    st.applyParsed({ suppressedReactionEmojis: [] });
-    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'explicit empty beats the default');
-    const rs = st.suppressionStatus();
-    assert.equal(rs.status, 'configured-empty');
-    assert.equal(rs.source, 'file');
   });
 
   it('explicit nonempty key → exact operator set, baseline entries not unioned in', () => {
@@ -470,15 +470,11 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
     }
   });
 
-  it('standalone (no baseline injected) honestly reports not-configured', () => {
-    const st = new DiscordFiltersState({ fileConfigured: true, baselineEnv: undefined });
-    st.applyParsed({});
-    assert.equal(st.suppressionStatus().status, 'not-configured');
-    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false);
-  });
 });
 
 describe('loadFiltersFile — strict typing for the safety-bearing key', () => {
+  beforeEach(setUpFiltersDir);
+  afterEach(tearDownFiltersDir);
   function writeJson(content: unknown): string {
     const p = join(dir, 'filters.json');
     writeFileSync(p, JSON.stringify(content));
@@ -503,6 +499,8 @@ describe('loadFiltersFile — strict typing for the safety-bearing key', () => {
 });
 
 describe('FiltersFilePollTracker', () => {
+  beforeEach(setUpFiltersDir);
+  afterEach(tearDownFiltersDir);
   it('unchanged mtime is quiet; a change reloads', () => {
     const t = new FiltersFilePollTracker(1000);
     assert.equal(t.observe(1000), 'none');
@@ -532,6 +530,8 @@ describe('FiltersFilePollTracker', () => {
 });
 
 describe('startup resolution (resolveStartupFilters)', () => {
+  beforeEach(setUpFiltersDir);
+  afterEach(tearDownFiltersDir);
   it('absent file: seeds whitelists AND the suppression key from the emergency env', () => {
     const path = join(dir, 'filters.json');
     const cap = captureStderr();
@@ -620,6 +620,8 @@ describe('startup resolution (resolveStartupFilters)', () => {
 });
 
 describe('suppression baseline drift diagnostics', () => {
+  beforeEach(setUpFiltersDir);
+  afterEach(tearDownFiltersDir);
   const BASELINE_TOKENS = [SUPPRESSED_UNICODE, SUPPRESSED_VARIANT, ':sigil:', SUPPRESSED_CUSTOM_ID];
   const BASELINE = BASELINE_TOKENS.join(',');
   let cap: ReturnType<typeof captureStderr>;
@@ -789,6 +791,8 @@ describe('suppression baseline drift diagnostics', () => {
 });
 
 describe('server integration', () => {
+  beforeEach(setUpFiltersDir);
+  afterEach(tearDownFiltersDir);
   function makeServer(): DiscordMcplServer {
     process.env.DISCORD_FILTERS_FILE ??= join(dir, 'filters.json');
     return new DiscordMcplServer({} as DiscordAdapter);

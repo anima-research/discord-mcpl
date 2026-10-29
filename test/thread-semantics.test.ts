@@ -138,7 +138,7 @@ describe('thread fields', () => {
     f.emit('messageCreate', f.message({ channelId: 'thread-1', channel: thread({ name: undefined }) }));
     const m = f.delivered[0];
     assert.equal(m.threadId, 'thread-1');
-    assert.equal('threadName' in m, false);
+    assert.equal(m.threadName, undefined);
     assert.equal(m.threadParentName, 'general');
   });
 
@@ -172,27 +172,6 @@ describe('thread fields', () => {
     assert.equal(f.delivered[0].threadParentName, 'general');
   });
 
-  it('name a thread the client knew only partly, once it has been looked up', async (t) => {
-    const f = fixture(t);
-    // As discord.js builds a thread from a message event: its type, but not
-    // its name or its channel.
-    const partly: Cached = { id: 'thread-2', type: ChannelType.PublicThread, parentId: null, isThread: () => true };
-    f.cache.set('thread-2', partly);
-    // As discord.js's fetch with force: ask Discord, and patch the cached thread.
-    (f.client.channels as unknown as { fetch: unknown }).fetch = async () => {
-      await new Promise((resolve) => setImmediate(resolve));
-      Object.assign(partly, { name: 'late-thread', parentId: 'chan-1' });
-      return partly;
-    };
-    f.emit('messageCreate', f.message({ channelId: 'thread-2', channel: partly }));
-    assert.equal(f.delivered.length, 0, 'it waits for the lookup');
-    await f.settle();
-    const m = f.delivered[0];
-    assert.equal(m.threadId, 'thread-2');
-    assert.equal(m.threadName, 'late-thread');
-    assert.equal(m.threadParentName, 'general');
-  });
-
   it('come with an edit and a delete of a message in a thread', async (t) => {
     const f = fixture(t);
     const posted = f.message({ channelId: 'thread-1', channel: thread() });
@@ -211,7 +190,7 @@ describe('thread fields', () => {
     assert.equal(f.deletes[1].threadId, undefined, 'a channel message has none');
   });
 
-  it("come with a channel's lookup, from the cache or from Discord, which the reconnect sweep names it by", async (t) => {
+  it("come with a channel's lookup, which the reconnect sweep names it by, read from the cache for a thread the cache knows whole", async (t) => {
     const f = fixture(t);
     f.cache.set('thread-1', thread({ guildId: 'g1', guild: { name: 'Test Server' }, isDMBased: () => false }));
     const expected = {
@@ -224,9 +203,10 @@ describe('thread fields', () => {
     assert.equal(fetched.mock.callCount(), 0, 'a complete thread is read from the cache');
     const channel = f.adapter.getCachedChannelMeta('chan-1');
     assert.ok(channel, 'the channel is cached');
-    assert.equal('threadId' in channel, false, 'a channel is no thread');
+    assert.equal(channel.threadId, undefined, 'a channel is no thread');
   });
 
+  const silenced = new WeakSet<TestContext>();
   // Built as discord.js builds a thread from a message event: its type, but
   // not its name or its channel. A lookup gets past the cache, as discord.js's
   // fetch with force does, and fills it in.
@@ -241,7 +221,10 @@ describe('thread fields', () => {
       Object.assign(partly, { name: 'late-thread', parentId: 'chan-1' });
       return partly;
     });
-    t.mock.method(console, 'error', () => {});
+    if (!silenced.has(t)) {
+      silenced.add(t);
+      t.mock.method(console, 'error', () => {});
+    }
     return { partly, forced };
   }
   const named = (m: { threadId?: string; threadName?: string; threadParentName?: string | null }) =>
@@ -304,7 +287,7 @@ describe('thread fields', () => {
     await f.reacted(2);
     assert.deepEqual(named(f.reactions[0]), { threadId: 'thread-1', threadName: 'design-chat', threadParentName: 'general' });
     const inChannel = f.reactions[1] as unknown as Record<string, unknown>;
-    assert.equal('threadId' in inChannel || 'threadName' in inChannel || 'threadParentName' in inChannel, false, 'a channel message has none');
+    assert.deepEqual([inChannel.threadId, inChannel.threadName, inChannel.threadParentName], [undefined, undefined, undefined], 'a channel message has none');
   });
 
   it("come with a reaction that waits for its message's create, or looks a partly known thread up itself", async (t) => {

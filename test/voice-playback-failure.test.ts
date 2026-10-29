@@ -88,16 +88,16 @@ test('after a refusal, a real AudioPlayer plays the next item: cleared, started,
     realPlay(resource);
   };
   const { sink, internals, events } = sinkWith(player);
-  // 200 ms of 48 kHz stereo s16le silence: ten 20 ms frames, all written
+  // 40 ms of 48 kHz stereo s16le silence: two 20 ms frames, both written
   // before the item plays.
   const pcm = new PassThrough();
-  pcm.end(Buffer.alloc(48_000 * 2 * 2 / 5));
+  pcm.end(Buffer.alloc(48_000 * 2 * 2 / 25));
   sink.play(item('u1'));
   sink.play({ id: 'u2', stream: pcm });
   await until(() => events.some((e) => e.type === 'finished'), 'the second item to finish');
   assert.deepEqual(summary(events), [`failed:u1:0:${PlaybackFailure.refused}`, 'cleared:u2', 'started:u2', 'finished:u2']);
   const finished = events[3] as Extract<SinkEvent, { type: 'finished' }>;
-  assert.equal(finished.playedMs, 200, 'all ten frames played');
+  assert.equal(finished.playedMs, 40, 'both frames played');
   assert.equal(internals.current, null);
   await until(() => internals.playing === false, 'the pump to finish');
 });
@@ -159,10 +159,10 @@ test('an accepted item that never gets audio fails when the wait for Playing run
   noUnhandledRejections(t);
   const player = realPlayer();
   const { sink, internals, events } = sinkWith(player);
-  (internals as PlayerInternals).playingTimeoutMs = 100;
+  (internals as PlayerInternals).playingTimeoutMs = 10;
   sink.play({ id: 'u1', stream: new PassThrough() });
   await until(() => events.some((e) => e.type === 'failed'), 'the item to fail');
-  assert.deepEqual(summary(events), ['cleared:u1', 'failed:u1:0:no audio reached the player within 0.1s']);
+  assert.deepEqual(summary(events), ['cleared:u1', 'failed:u1:0:no audio reached the player within 0.01s']);
   assert.equal(internals.current, null);
   await until(() => internals.playing === false, 'the pump to finish');
 });
@@ -189,7 +189,7 @@ test('a throw while an item plays settles it, with what was queued, and a barge-
   t.after(() => realStop(true));
   player.stop = () => { throw new Error('stop broke'); };
   const { sink, internals, events } = sinkWith(player);
-  (internals as PlayerInternals).playingTimeoutMs = 100;
+  (internals as PlayerInternals).playingTimeoutMs = 10;
   let requeued = false;
   sink.onEvent((ev) => {
     if (ev.type === 'failed' && ev.id === 'u1' && !requeued) { requeued = true; sink.play({ id: 'u1-again', stream: new PassThrough() }); }
@@ -204,9 +204,10 @@ test('a throw while an item plays settles it, with what was queued, and a barge-
   await until(() => internals.playing === false, 'the pump to stop');
 
   const by = { userId: 'h1', username: 'human', bot: false };
+  sink.onEvent((ev) => {
+    if (ev.type === 'cleared' && ev.id === 'u3') (internals as PlayerInternals).current!.interruptedBy = by;
+  });
   sink.play({ id: 'u3', stream: new PassThrough() });
-  await until(() => events.some((e) => e.type === 'cleared' && e.id === 'u3'), 'u3 to clear');
-  (internals as PlayerInternals).current!.interruptedBy = by;
   await until(() => events.length >= 7, 'u3 to settle');
   const settled = events.at(-1)!;
   assert.equal(settled.type, 'interrupted');
@@ -450,7 +451,7 @@ test("a stream the player can't take fails at once, uncleared, and the next item
   // createAudioResource throws for something that isn't a stream at all.
   sink.play({ id: 'u1', stream: {} as unknown as Readable });
   const pcm = new PassThrough();
-  pcm.end(Buffer.alloc(48_000 * 2 * 2 / 5));
+  pcm.end(Buffer.alloc(48_000 * 2 * 2 / 25));
   sink.play({ id: 'u2', stream: pcm });
   await until(() => events.some((e) => e.type === 'finished'), 'u2 to finish');
   assert.deepEqual(summary(events), [`failed:u1:0:${PlaybackFailure.refused}`, 'cleared:u2', 'started:u2', 'finished:u2']);

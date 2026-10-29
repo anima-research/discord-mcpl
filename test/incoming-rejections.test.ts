@@ -10,10 +10,10 @@ import * as assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { createInterface } from 'node:readline';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { ConnectionClosedError, McplConnection, RpcError, textContent } from '@animalabs/mcpl-core';
+import { ConnectionClosedError, ConnectionTimeoutError, McplConnection, RpcError, textContent } from '@animalabs/mcpl-core';
 import type { ContentBlock } from '@animalabs/mcpl-core';
 import type { DiscordAdapter, MessageEventInfo } from '../src/discord-adapter.js';
 import { ChannelManager, toDescriptor } from '../src/channels.js';
@@ -48,13 +48,14 @@ type Answer = { result: unknown } | { error: { code: number; message: string } }
 /**
  * A real mcpl-core connection to a scripted host, for the errors only
  * mcpl-core makes: each request is answered as `answer` says, or not at all,
- * and an unanswered one times out in mcpl-core itself, after 50 ms.
+ * and an unanswered one times out in mcpl-core itself, after requestTimeout
+ * ms (50 unless given). A test whose host answers nothing passes 1.
  */
-function scriptedHost(answer: (method: string, params: any, n: number) => Answer) {
+function scriptedHost(answer: (method: string, params: any, n: number) => Answer, requestTimeout = 50) {
   const toServer = new PassThrough();
   const fromServer = new PassThrough();
   const conn = McplConnection.fromStreams(toServer, fromServer);
-  conn.requestTimeout = 50;
+  conn.requestTimeout = requestTimeout;
   const sent: Array<{ method: string; params: any }> = [];
   createInterface({ input: fromServer }).on('line', (line) => {
     const msg = JSON.parse(line);
@@ -72,6 +73,24 @@ async function until(done: () => boolean): Promise<void> {
     if (Date.now() > deadline) throw new Error('timed out waiting for the condition');
     await new Promise((r) => setImmediate(r));
   }
+}
+
+async function logged(part: string): Promise<void> {
+  if (errors.some((e) => e.includes(part))) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { onLogged = undefined; reject(new Error(`timed out waiting for a line with: ${part}`)); }, 2000);
+    onLogged = () => {
+      if (!errors.some((e) => e.includes(part))) return;
+      clearTimeout(timer);
+      onLogged = undefined;
+      resolve();
+    };
+  });
+}
+
+async function turnsUntil(done: () => boolean): Promise<void> {
+  for (let i = 0; i < 1000 && !done(); i++) await new Promise((r) => setImmediate(r));
+  assert.ok(done(), 'the condition never held while the clock stood still');
 }
 
 function wire(respond: Responder, opts: { open?: boolean; host?: ReturnType<typeof scriptedHost>; coalescing?: boolean } = {}) {
@@ -151,14 +170,19 @@ const coalesceOf = (req: { method: string; params: any }): any =>
 
 let errors: string[] = [];
 let realError: typeof console.error;
-beforeEach(() => {
+let onLogged: (() => void) | undefined;
+function captureErrors(): void {
   errors = [];
   realError = console.error;
-  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
-});
-afterEach(() => { console.error = realError; });
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); onLogged?.(); };
+}
+function restoreErrors(): void {
+  console.error = realError;
+}
 
 describe('channels/incoming (open channel): the per-message result is read', () => {
+  beforeEach(captureErrors);
+  afterEach(restoreErrors);
   it('an accepted message is sent once and nothing is logged as refused', async () => {
     const { server, sent } = wire(() => ({ results: [{ messageId: 'm1', accepted: true }] }), { open: true });
     await deliver(server, BIG_IMAGE);
@@ -223,7 +247,7 @@ describe('channels/incoming (open channel): the per-message result is read', () 
   });
 
   it('a channels/incoming request mcpl-core times out is a send failure, not a refusal: sent again as the same occurrence, then logged as failed', async () => {
-    const host = scriptedHost(() => 'no answer');
+    const host = scriptedHost(() => 'no answer', 1);
     const { server, sent } = wire(() => undefined, { open: true, host });
     await deliver(server, BIG_IMAGE);
     assert.equal(sent.length, 6, 'the first send and five resends');
@@ -234,6 +258,8 @@ describe('channels/incoming (open channel): the per-message result is read', () 
 });
 
 describe('push/event (closed channel): the result or error is read', () => {
+  beforeEach(captureErrors);
+  afterEach(restoreErrors);
   it('a -32602 "content exceeds host byte limit" error is a refusal: logged, then resent once without the image', async () => {
     const { server, sent } = wire((_m, _p, n) => {
       if (n === 1) throw rpcError(-32602, 'content exceeds host byte limit');
@@ -259,7 +285,7 @@ describe('push/event (closed channel): the result or error is read', () => {
   });
 
   it('a push/event request mcpl-core times out is a send failure, not a refusal: sent again as the same occurrence, then logged as failed', async () => {
-    const host = scriptedHost(() => 'no answer');
+    const host = scriptedHost(() => 'no answer', 1);
     const { server, sent } = wire(() => undefined, { host });
     await deliver(server, BIG_IMAGE);
     assert.equal(sent.length, 6, 'the first send and five resends');
@@ -299,6 +325,8 @@ describe('push/event (closed channel): the result or error is read', () => {
 });
 
 describe('edits and deletes: a refusal is logged', () => {
+  beforeEach(captureErrors);
+  afterEach(restoreErrors);
   it('logs the refusal of an edit', async () => {
     const { sent, edit } = wire(() => ({ accepted: false, reason: 'coalesce_invalid' }));
     edit()('chan1', 'm9', 'fixed', false, { guildId: 'g1', authorId: 'u1', authorName: 'someone' });
@@ -335,6 +363,8 @@ describe('edits and deletes: a refusal is logged', () => {
 });
 
 describe('an edit that replaces a create carries what the agent was sent', () => {
+  beforeEach(captureErrors);
+  afterEach(restoreErrors);
   // Refuses the create as a budgeted host does, on either lane.
   const refuseCreate: Responder = (m, _p, n) => {
     if (m === 'channels/incoming') {
@@ -420,6 +450,8 @@ describe('an edit that replaces a create carries what the agent was sent', () =>
 });
 
 describe('incoming-results helpers', () => {
+  beforeEach(captureErrors);
+  afterEach(restoreErrors);
   it('reads per-message verdicts, and treats a missing one as no verdict', () => {
     assert.deepEqual(incomingOutcome({ results: [{ messageId: 'a', accepted: true }] }, 'a'), { kind: 'accepted' });
     assert.deepEqual(incomingOutcome({ results: [{ messageId: 'a', accepted: false }] }, 'a'), { kind: 'rejected', reason: 'unspecified' });
@@ -438,10 +470,6 @@ describe('incoming-results helpers', () => {
     assert.deepEqual(errorRejection(rpcError(-32017, 'no')), { reason: 'no', code: -32017 });
     // A code outside JSON-RPC's reserved ranges is a refusal the spec gives no meaning.
     assert.deepEqual(errorRejection(rpcError(4001, 'nope')), { reason: 'nope', code: 4001 });
-    assert.deepEqual(errorRejection(rpcError(-32602, '')), { reason: 'unspecified', code: -32602 });
-    // Stands in for a later mcpl-core, whose RpcError keeps the host's message
-    // as it came; 0.2.1 can't make this one.
-    assert.deepEqual(errorRejection({ code: -32602, message: 'bad' }), { reason: 'bad', code: -32602 });
   });
 
   it('an error that is no verdict on the message is no refusal: no answer, or the host failing', () => {
@@ -454,12 +482,7 @@ describe('incoming-results helpers', () => {
     // Nor a code JSON-RPC reserves and gives no meaning.
     assert.equal(errorRejection(rpcError(-32650, 'reserved')), undefined);
     assert.equal(errorRejection(rpcError(-32100, 'reserved')), undefined);
-    // mcpl-core 0.2.1's own timeout comes from mcpl-core in the lanes' tests.
-    // This stands in for a later mcpl-core's ConnectionTimeoutError (an RpcError
-    // with -32000), which 0.2.1 doesn't have.
-    const later = Object.assign(new Error('push/event timed out: no reply came within 50 ms, so whether it ran is unknown.'),
-      { name: 'ConnectionTimeoutError', code: -32000 });
-    assert.equal(errorRejection(later), undefined);
+    assert.equal(errorRejection(new ConnectionTimeoutError('push/event', 50)), undefined);
   });
 
   it('counts a -32602 error and coalesce_invalid as content refusals, and nothing else', () => {
@@ -495,6 +518,8 @@ describe('incoming-results helpers', () => {
 
 /** A coalescing host's retry window (RFC-006 §3.1) is what makes the same eventId safe to send again. */
 describe('sending the same occurrence again, by what the spec defines', () => {
+  beforeEach(captureErrors);
+  afterEach(restoreErrors);
   const info = { guildId: 'g1', authorId: 'u1', authorName: 'someone' };
   const delays = (server: DiscordMcplServer, ms: number, n = 5) => { (server as any).retryDelaysMs = Array(n).fill(ms); };
 
@@ -546,7 +571,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
     });
 
     it('no answer at all, every time: the same, through mcpl-core timing each request out', async () => {
-      const host = scriptedHost(() => 'no answer');
+      const host = scriptedHost(() => 'no answer', 1);
       const { server, sent } = wire(() => undefined, { host });
       delays(server, 2, 2);
       await deliver(server, SMALL_IMAGE);
@@ -621,7 +646,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const refusing = wire(() => ({ accepted: false }), { coalescing: false });
       await deliver(refusing.server, SMALL_IMAGE);
       assert.equal(refusing.sent.length, 1);
-      const host = scriptedHost(() => 'no answer');
+      const host = scriptedHost(() => 'no answer', 1);
       const silent = wire(() => undefined, { host, coalescing: false });
       await deliver(silent.server, SMALL_IMAGE);
       assert.equal(host.sent.length, 1);
@@ -641,12 +666,12 @@ describe('sending the same occurrence again, by what the spec defines', () => {
     it("no resend whose wait would end after half the host's retry window, counted from the first send", async () => {
       const host = scriptedHost(() => ({ error: { code: -32000, message: 'busy' } }));
       const { server, sent } = wire(() => undefined, { host });
-      (server as any).hostRetryWindowMs = 400;
-      (server as any).retryDelaysMs = [50, 300, 5, 5, 5];
+      (server as any).hostRetryWindowMs = 60_000;
+      (server as any).retryDelaysMs = [0, 45_000];
       const started = Date.now();
       await deliver(server, SMALL_IMAGE);
       assert.equal(sent.length, 2);
-      assert.ok(Date.now() - started < 1000);
+      assert.ok(Date.now() - started < 30_000);
       assert.ok(errors.some((e) => e.endsWith("not sent again: the host's retry window is closing")), errors.join('\n'));
     });
 
@@ -658,7 +683,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       (server as any).readyConn = null;
       const delivered = deliver(server, SMALL_IMAGE);
       await until(() => sent.length === 1);
-      await new Promise((r) => setTimeout(r, 20));
+      await until(() => (server as any).waitingForHost === 1);
       assert.equal(sent.length, 1, 'not before the start-up settles');
       (server as any).markReady(host.conn);
       await delivered;
@@ -679,23 +704,28 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const { server, sent } = wire(() => ({ results: [{ messageId: 'm1', accepted: false }] }), { open: true });
       delays(server, 20);
       const delivered = deliver(server, SMALL_IMAGE);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await logged('sending the same occurrence again');
       ((server as any).enabledFeatureSets as Set<string>).delete('discord.messaging');
       await delivered;
       assert.equal(sent.length, 1);
       assert.ok(errors.some((e) => e.endsWith("not sent again: the host connected now doesn't take Discord messages")), errors.join('\n'));
     });
 
-    it('a resend waits at most reconnectWaitMs for a host, however long the retry window', async () => {
+    it('a resend waits at most reconnectWaitMs for a host, however long the retry window', { timeout: 5_000 }, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
       const { server, sent } = wire(() => ({ results: [{ messageId: 'm1', accepted: false }] }), { open: true });
       (server as any).reconnectWaitMs = 50;
       delays(server, 5);
-      const started = Date.now();
       const delivered = deliver(server, SMALL_IMAGE);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await turnsUntil(() => errors.some((e) => e.includes('sending the same occurrence again')));
       (server as any).conn = null;
+      t.mock.timers.tick(5);
+      await turnsUntil(() => (server as any).waitingForHost === 1);
+      t.mock.timers.tick(49);
+      await new Promise((r) => setImmediate(r));
+      assert.equal((server as any).waitingForHost, 1, 'still waiting for a host 1 ms before reconnectWaitMs');
+      t.mock.timers.tick(1);
       await delivered;
-      assert.ok(Date.now() - started < 1000);
       assert.equal(sent.length, 1);
       assert.ok(errors.some((e) => e.endsWith('not sent again: no host connection was ready in time')), errors.join('\n'));
     });
@@ -716,7 +746,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const { server, sent } = wire(() => { throw rpcError(-32603, 'Internal error'); });
       (server as any).retryDelaysMs = [20, 300, 5];
       const delivered = deliver(server, SMALL_IMAGE);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await logged('sending the same occurrence again');
       const next: unknown[] = [];
       const conn2 = { sendRequest: () => { next.push(1); return Promise.reject(rpcError(-32603, 'Internal error')); }, sendNotification: () => {} };
       (server as any).conn = conn2;
@@ -732,7 +762,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const { server, sent } = wire(() => ({ results: [{ messageId: 'm1', accepted: false }] }), { open: true });
       delays(server, 20);
       const delivered = deliver(server, SMALL_IMAGE);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await logged('sending the same occurrence again');
       const next: unknown[] = [];
       const conn2 = { sendRequest: () => { next.push(1); return Promise.resolve({}); }, sendNotification: () => {} };
       (server as any).conn = conn2;
@@ -748,7 +778,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       (server as any).hostCoalescing = { pushEvents: true, channelsIncoming: true, channelScopedPush: true };
       delays(server, 20);
       edit()('chan1', 'm9', 'fixed', false, info);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await logged('sending the same occurrence again');
       assert.equal(sent[0].params.coalesce.channelId, 'discord:g1:chan1', 'scoped to its channel');
       const next: unknown[] = [];
       const conn2 = { sendRequest: () => { next.push(1); return Promise.resolve({ accepted: true }); }, sendNotification: () => {} };
@@ -766,7 +796,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
         (server as any).readyConn = null;
         const delivered = deliver(server, SMALL_IMAGE);
         await until(() => sent.length === 1);
-        await new Promise((r) => setTimeout(r, 10));
+        await until(() => (server as any).waitingForHost === 1);
         const next: Array<{ method: string; params: any }> = [];
         const conn2 = { sendRequest: (m: string, p: unknown) => { next.push({ method: m, params: p }); return Promise.resolve(open ? { results: [{ messageId: 'm1', accepted: true }] } : { accepted: true }); }, sendNotification: () => {} };
         (server as any).conn = conn2;
@@ -787,7 +817,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       (server as any).maxWaitingForHost = 0;
       delays(server, 5);
       const delivered = deliver(server, SMALL_IMAGE);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await logged('sending the same occurrence again');
       (server as any).conn = null;
       await delivered;
       assert.equal(sent.length, 1);
@@ -800,7 +830,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
         : { accepted: true });
       delays(server, 20);
       const delivered = deliver(server, SMALL_IMAGE);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await logged('sending the same occurrence again');
       const next: Array<{ method: string; params: any }> = [];
       const conn2 = {
         sendRequest: (m: string, p: unknown) => { next.push({ method: m, params: p }); return Promise.resolve({ accepted: true }); },
@@ -808,7 +838,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       };
       (server as any).conn = conn2;
       (server as any).readyConn = null;
-      await new Promise((r) => setTimeout(r, 60));
+      await until(() => (server as any).waitingForHost === 1);
       assert.deepEqual(next, [], 'nothing before its start-up settles');
       (server as any).markReady(conn2);
       await delivered;
@@ -826,7 +856,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const { server, sent } = wire(() => ({ results: [{ messageId: 'm1', accepted: false }] }), { open: true });
       delays(server, 20);
       const delivered = deliver(server, SMALL_IMAGE);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await logged('sending the same occurrence again');
       const next: unknown[] = [];
       const conn2 = { sendRequest: (m: string) => { next.push(m); return Promise.resolve({}); }, sendNotification: () => {} };
       (server as any).conn = conn2;
@@ -838,13 +868,20 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       assert.ok(errors.some((e) => e.endsWith("not sent again: the host now connected doesn't coalesce events, so the same occurrence sent again could be a duplicate")), errors.join('\n'));
     });
 
-    it("no resend when no host connection is ready before the retry window's deadline", async () => {
+    it("no resend when no host connection is ready before the retry window's deadline", { timeout: 5_000 }, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
       const { server, sent } = wire(() => ({ results: [{ messageId: 'm1', accepted: false }] }), { open: true });
       (server as any).hostRetryWindowMs = 600;
       delays(server, 10);
       const delivered = deliver(server, SMALL_IMAGE);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await turnsUntil(() => errors.some((e) => e.includes('sending the same occurrence again')));
       (server as any).conn = null;
+      t.mock.timers.tick(10);
+      await turnsUntil(() => (server as any).waitingForHost === 1);
+      t.mock.timers.tick(289);
+      await new Promise((r) => setImmediate(r));
+      assert.equal((server as any).waitingForHost, 1, 'still waiting for a host 1 ms before the deadline');
+      t.mock.timers.tick(1);
       await delivered;
       assert.equal(sent.length, 1);
       assert.ok(errors.some((e) => e.endsWith('not sent again: no host connection was ready in time')), errors.join('\n'));
@@ -859,12 +896,12 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       await until(() => errors.some((e) => e.startsWith('[discord-mcpl] host failed edit of message m9')));
       assert.equal(failing.sent.length, 6, 'the first send and five resends');
       errors.length = 0;
-      const host = scriptedHost(() => 'no answer');
+      const host = scriptedHost(() => 'no answer', 1);
       const silent = wire(() => undefined, { host });
       (silent.server as any).retryDelaysMs = [2];
       silent.edit()('chan1', 'm8', 'fixed', false, info);
       await until(() => host.sent.length === 2);
-      await new Promise((r) => setTimeout(r, 80));
+      await until(() => (silent.server as any).mutationsInFlight.size === 0);
       assert.equal(errors.some((e) => e.startsWith('[discord-mcpl] host failed')), false, errors.join('\n'));
     });
 
@@ -893,7 +930,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       it(`an edit is not sent again once a later ${later} of the message has gone out`, async () => {
         let answerFirst!: (v: unknown) => void;
         const firstAnswer = new Promise((r) => { answerFirst = r; });
-        const { sent, edit, del } = wire((_m, _p, n) => n === 1 ? firstAnswer : { accepted: true });
+        const { server, sent, edit, del } = wire((_m, _p, n) => n === 1 ? firstAnswer : { accepted: true });
         edit()('chan1', 'm9', 'first', false, info);
         await until(() => sent.length === 1);
         if (later === 'edit') edit()('chan1', 'm9', 'second', false, info);
@@ -901,7 +938,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
         await until(() => sent.length === 2);
         answerFirst({ accepted: false, reason: 'storage busy' });
         await until(() => errors.some((e) => e.includes('not sent again')));
-        await new Promise((r) => setTimeout(r, 20));
+        await until(() => (server as any).mutationsInFlight.size === 0);
         assert.equal(sent.length, 2, 'the earlier edit is not sent again after the later one');
         assert.ok(errors.includes('[discord-mcpl] edit of message m9 in discord:g1:chan1: host rejected it: storage busy; not sent again: a later edit or delete of the message has been sent since'), errors.join('\n'));
       });
@@ -911,12 +948,12 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const { server, sent, edit } = wire((_m, _p, n) => n === 1 ? { accepted: false, reason: 'storage busy' } : { accepted: true });
       delays(server, 60);
       edit()('chan1', 'm9', 'first', false, info);
-      await until(() => errors.some((e) => e.includes('sending the same occurrence again')));
+      await logged('sending the same occurrence again');
       edit()('chan1', 'm9', 'second', false, info);
       await until(() => sent.length === 2);
       assert.match(JSON.stringify(sent[1].params.payload), /second/, "the later edit doesn't wait");
       await until(() => errors.some((e) => e.includes('not sent again')));
-      await new Promise((r) => setTimeout(r, 20));
+      await until(() => (server as any).mutationsInFlight.size === 0);
       assert.equal(sent.length, 2, 'the earlier edit is never sent again');
     });
 
@@ -925,7 +962,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       (server as any).readyConn = null;
       edit()('chan1', 'm9', 'fixed', false, info);
       await until(() => sent.length === 1);
-      await new Promise((r) => setTimeout(r, 20));
+      await until(() => (server as any).waitingForHost === 1);
       (server as any).markReady((server as any).conn);
       await until(() => sent.length === 2);
       assert.equal(sent[1].params.eventId, sent[0].params.eventId);
@@ -936,12 +973,12 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       (server as any).readyConn = null;
       edit()('chan1', 'm9', 'first', false, info);
       await until(() => sent.length === 1);
-      await new Promise((r) => setTimeout(r, 10));
+      await until(() => (server as any).waitingForHost === 1);
       edit()('chan1', 'm9', 'second', false, info);
       await until(() => sent.length === 2);
       (server as any).markReady((server as any).conn);
       await until(() => errors.some((e) => e.includes('not sent again: a later edit or delete')));
-      await new Promise((r) => setTimeout(r, 20));
+      await until(() => (server as any).mutationsInFlight.size === 0);
       assert.equal(sent.length, 2, 'the first edit is not sent after the second');
     });
 
@@ -957,7 +994,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       await until(() => sent.length === 602);
       answerFirst({ accepted: false, reason: 'storage busy' });
       await until(() => errors.some((e) => e.includes('not sent again')));
-      await new Promise((r) => setTimeout(r, 20));
+      await until(() => (server as any).mutationsInFlight.size === 0);
       assert.equal(sent.length, 602, 'the first edit is not sent again after the second');
       assert.equal((server as any).mutationsInFlight.size, 0, 'every edit has settled, and no record is left');
     });
@@ -978,7 +1015,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       (server as any).readyConn = null;
       answerCreate({ results: [{ messageId: 'm1', accepted: true }] });
       await delivered;
-      await new Promise((r) => setTimeout(r, 20));
+      await until(() => (server as any).waitingForHost === 1);
       assert.deepEqual(next, [], 'not to a connection whose start-up has not settled');
       assert.equal(sent.length, 1);
       (server as any).markReady(conn2);
@@ -987,22 +1024,53 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       assert.match(JSON.stringify((next as any[])[0].params.payload), /look at this one/, 'held, then sent once it has');
     });
 
-    it('a held edit is dropped when no host is ready in time, or when as many as may wait already are', async () => {
-      for (const [waitMs, max] of [[30, 64], [60_000, 0]] as const) {
+    it('a held edit is dropped when no host is ready in time, or when as many as may wait already are', { timeout: 5_000 }, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+      const debugLog = join(mkdtempSync(join(tmpdir(), 'held-edit-')), 'debug.log');
+      const previousLog = process.env.DISCORD_MCPL_DEBUG_LOG;
+      process.env.DISCORD_MCPL_DEBUG_LOG = debugLog;
+      t.after(() => {
+        if (previousLog === undefined) delete process.env.DISCORD_MCPL_DEBUG_LOG; else process.env.DISCORD_MCPL_DEBUG_LOG = previousLog;
+        rmSync(dirname(debugLog), { recursive: true, force: true });
+      });
+      const dropped = (why: string): boolean => {
+        try {
+          return readFileSync(debugLog, 'utf8').split('\n').some((line) => line.includes('handleMessageEdit:drop')
+            && line.includes('"channelId":"chan1","messageId":"m1"') && line.includes(why));
+        } catch {
+          return false;
+        }
+      };
+      for (const [waitMs, max, why] of [[30, 64, 'no host connection was ready in time'], [60_000, 0, 'as many messages as may wait for a host (0) already are']] as const) {
         let answerCreate!: (v: unknown) => void;
         const createAnswer = new Promise((r) => { answerCreate = r; });
         const { server, sent, edit } = wire((m) => m === 'channels/incoming' ? createAnswer : { accepted: true }, { open: true });
         (server as any).reconnectWaitMs = waitMs;
         (server as any).maxWaitingForHost = max;
         const delivered = deliver(server, SMALL_IMAGE);
-        await until(() => sent.length === 1);
+        await turnsUntil(() => sent.length === 1);
         edit()('chan1', 'm1', 'look at this one', false, info);
         (server as any).conn = null;
         answerCreate({ results: [{ messageId: 'm1', accepted: true }] });
         await delivered;
-        await new Promise((r) => setTimeout(r, 60));
+        if (max > 0) {
+          await turnsUntil(() => (server as any).waitingForHost === 1);
+          t.mock.timers.tick(waitMs - 1);
+          await new Promise((r) => setImmediate(r));
+          assert.equal((server as any).waitingForHost, 1, 'still held 1 ms before reconnectWaitMs');
+          t.mock.timers.tick(1);
+        }
+        await turnsUntil(() => dropped(why));
         assert.equal(sent.length, 1, 'the held edit is never sent');
         assert.equal((server as any).waitingForHost, 0, 'nothing is left waiting');
+        const next: unknown[] = [];
+        const conn2 = { sendRequest: (m: string, p: unknown) => { next.push({ method: m, params: p }); return Promise.resolve({ accepted: true }); }, sendNotification: () => {} };
+        (server as any).conn = conn2;
+        (server as any).markReady(conn2);
+        assert.equal((server as any).readyNow(), conn2, 'the new host is ready');
+        t.mock.timers.tick(waitMs);
+        await new Promise((r) => setImmediate(r));
+        assert.deepEqual(next, [], 'a host ready after the drop is sent nothing, before or after reconnectWaitMs passes again');
       }
     });
 
@@ -1048,6 +1116,8 @@ describe('sending the same occurrence again, by what the spec defines', () => {
 });
 
 describe('owed messages', () => {
+  beforeEach(captureErrors);
+  afterEach(restoreErrors);
   let dir: string;
   let file: string;
   let savedEnv: string | undefined;

@@ -2,13 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { formatAgentDateTime, isValidTimeZone, resolveAgentTimeZone, resolveTimestampStyle } from '../src/timezone.js';
 
-test('formats Discord backscroll times in the configured zone', () => {
-  assert.equal(
-    formatAgentDateTime(new Date('2026-01-15T12:34:56Z'), 'America/Los_Angeles'),
-    '2026-01-15T04:34:56-08:00 [America/Los_Angeles]',
-  );
-});
-
 test('accepts a valid configured zone without warning', () => {
   const warnings: string[] = [];
   const original = console.error;
@@ -43,7 +36,7 @@ test('isValidTimeZone stays exported for hosts that want strictness', () => {
   assert.equal(isValidTimeZone('Not/A_Real_Zone'), false);
 });
 
-test('timestamp styles: compact and time render terse zone-converted forms', () => {
+test('timestamp styles: full by default, and compact and time render terse zone-converted forms', () => {
   const d = new Date('2026-01-15T12:34:56Z');
   assert.equal(
     formatAgentDateTime(d, 'America/Los_Angeles', 'compact'),
