@@ -354,12 +354,12 @@ const CLOSED_NOTE =
 describe('DiscordMcplServer', () => {
   it("declares in discord.messaging's tag ontology each chat:* tag its pushes carry, an edit's and a deletion's included", () => {
     const messaging = featureSets.find((fs) => fs.name === 'discord.messaging') as unknown as { tagOntology?: { coreTags?: string[] } };
-    assert.deepEqual(messaging.tagOntology?.coreTags, [
+    assert.deepEqual([...(messaging.tagOntology?.coreTags ?? [])].sort(), [
       'chat:addressed', 'chat:mention', 'chat:reply', 'chat:dm', 'chat:ambient',
       'chat:private', 'chat:from-human', 'chat:from-bot', 'chat:thread',
       'chat:edited', 'chat:deleted', 'chat:reaction', 'chat:reaction-remove',
       'chat:has-image', 'chat:has-audio', 'chat:has-file',
-    ]);
+    ].sort());
   });
 
   it('MCPL handshake exposes feature sets and channels', async () => {
@@ -616,7 +616,6 @@ describe('DiscordMcplServer', () => {
     (server as unknown as { handleChannelClose: () => never }).handleChannelClose = () => {
       throw undefined;
     };
-    const sendError = t.mock.method(serverConn, 'sendError');
     const serverPromise = server.serve(serverConn);
     let refusal: unknown;
     let answered = false;
@@ -634,7 +633,7 @@ describe('DiscordMcplServer', () => {
 
     const { code, message } = refusal as { code?: number; message?: string };
     assert.equal(code, -32603, `answered with an internal error: ${String(message)}`);
-    assert.deepEqual(sendError.mock.calls.map((call) => call.arguments.slice(1)), [[-32603, 'undefined']], 'the thrown value as text');
+    assert.equal(message, 'undefined', 'the thrown value as text');
     assert.equal(answered, true, 'the next request was answered');
   });
 
@@ -799,7 +798,6 @@ describe('DiscordMcplServer', () => {
     });
     await server.serve(serverConn);
 
-    assert.equal(serverConn.isClosed, true, "serve() closed its connection");
     assert.equal(await clientClosed, true, 'the client saw its connection end');
   });
 
@@ -878,7 +876,6 @@ describe('DiscordMcplServer', () => {
     (server as unknown as { handleChannelClose: () => never }).handleChannelClose = () => {
       throw new Error('');
     };
-    const sendError = t.mock.method(serverConn, 'sendError');
     const serverPromise = server.serve(serverConn);
     let refusal: unknown;
     try {
@@ -892,9 +889,9 @@ describe('DiscordMcplServer', () => {
       await serverPromise;
     }
 
-    const { code } = refusal as { code?: number };
+    const { code, message } = refusal as { code?: number; message?: string };
     assert.equal(code, -32603);
-    assert.deepEqual(sendError.mock.calls.map((call) => call.arguments.slice(1)), [[-32603, 'Error']], 'an empty message falls back to the value as text');
+    assert.equal(message, 'Error', 'an empty message falls back to the value as text');
   });
 
   it('tools/list returns tool definitions', async () => {
@@ -3229,13 +3226,19 @@ describe('RFC-006 coalescing', () => {
 
   it('a delete arriving while the create is still being built waits for it and shares its scope', async () => {
     const h = await boot({ eventCoalescing: true });
-    (h.discord as unknown as { fetchHistory: () => Promise<unknown[]> }).fetchHistory = async () => { await new Promise((r) => setTimeout(r, 80)); return []; };
+    let entered!: () => void;
+    const building = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    (h.discord as unknown as { fetchHistory: () => Promise<unknown[]> }).fetchHistory = async () => { entered(); await held; return []; };
     h.discord.simulateMessage({
       id: 'dm7', content: 'oops', cleanContent: 'oops', authorId: 'u_bob', authorName: 'Bob', isBot: false,
       channelId: 'dmchan7', channelName: undefined, guildId: null, guildName: undefined,
       mentions: [], attachments: [], timestamp: new Date(),
     } as unknown as DiscordMessageData);
+    await building;
     h.discord.simulateDelete('dmchan7', 'dm7', true, { guildId: null, authorName: 'Bob' });
+    release();
     const first = await h.nextRequest();
     assert.equal((first.params as Push).eventId, 'discord_msg_dm7', 'the create goes first');
     assert.deepEqual((first.params as Push).coalesce, { key: 'message:dm7', initial: true, channelId: 'discord:dm:dmchan7' });

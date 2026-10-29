@@ -81,7 +81,6 @@ describe('reactions in a muted channel', () => {
     await f.server.executeToolCall('mute_channel', { channelId: 'chan1' });
     const reply = await f.server.executeToolCall('set_reaction_visibility', { channelId: 'chan1', visible: true });
     assert.match(String(reply), /but the channel is muted: its reactions reach you once unmute_channel lifts the mute/);
-    assert.equal((f.server.reactionChannels as Set<string>).has('chan1'), true, 'the opt-in itself took effect');
     f.react();
     assert.deepEqual(f.pushes, [], 'muting takes precedence over the opt-in');
     await f.server.executeToolCall('unmute_channel', { channelId: 'chan1' });

@@ -48,13 +48,14 @@ type Answer = { result: unknown } | { error: { code: number; message: string } }
 /**
  * A real mcpl-core connection to a scripted host, for the errors only
  * mcpl-core makes: each request is answered as `answer` says, or not at all,
- * and an unanswered one times out in mcpl-core itself, after 50 ms.
+ * and an unanswered one times out in mcpl-core itself, after requestTimeout
+ * ms (50 unless given). A test whose host answers nothing passes 1.
  */
-function scriptedHost(answer: (method: string, params: any, n: number) => Answer) {
+function scriptedHost(answer: (method: string, params: any, n: number) => Answer, requestTimeout = 50) {
   const toServer = new PassThrough();
   const fromServer = new PassThrough();
   const conn = McplConnection.fromStreams(toServer, fromServer);
-  conn.requestTimeout = 50;
+  conn.requestTimeout = requestTimeout;
   const sent: Array<{ method: string; params: any }> = [];
   createInterface({ input: fromServer }).on('line', (line) => {
     const msg = JSON.parse(line);
@@ -246,7 +247,7 @@ describe('channels/incoming (open channel): the per-message result is read', () 
   });
 
   it('a channels/incoming request mcpl-core times out is a send failure, not a refusal: sent again as the same occurrence, then logged as failed', async () => {
-    const host = scriptedHost(() => 'no answer');
+    const host = scriptedHost(() => 'no answer', 1);
     const { server, sent } = wire(() => undefined, { open: true, host });
     await deliver(server, BIG_IMAGE);
     assert.equal(sent.length, 6, 'the first send and five resends');
@@ -284,7 +285,7 @@ describe('push/event (closed channel): the result or error is read', () => {
   });
 
   it('a push/event request mcpl-core times out is a send failure, not a refusal: sent again as the same occurrence, then logged as failed', async () => {
-    const host = scriptedHost(() => 'no answer');
+    const host = scriptedHost(() => 'no answer', 1);
     const { server, sent } = wire(() => undefined, { host });
     await deliver(server, BIG_IMAGE);
     assert.equal(sent.length, 6, 'the first send and five resends');
@@ -570,7 +571,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
     });
 
     it('no answer at all, every time: the same, through mcpl-core timing each request out', async () => {
-      const host = scriptedHost(() => 'no answer');
+      const host = scriptedHost(() => 'no answer', 1);
       const { server, sent } = wire(() => undefined, { host });
       delays(server, 2, 2);
       await deliver(server, SMALL_IMAGE);
@@ -645,7 +646,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       const refusing = wire(() => ({ accepted: false }), { coalescing: false });
       await deliver(refusing.server, SMALL_IMAGE);
       assert.equal(refusing.sent.length, 1);
-      const host = scriptedHost(() => 'no answer');
+      const host = scriptedHost(() => 'no answer', 1);
       const silent = wire(() => undefined, { host, coalescing: false });
       await deliver(silent.server, SMALL_IMAGE);
       assert.equal(host.sent.length, 1);
@@ -895,7 +896,7 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       await until(() => errors.some((e) => e.startsWith('[discord-mcpl] host failed edit of message m9')));
       assert.equal(failing.sent.length, 6, 'the first send and five resends');
       errors.length = 0;
-      const host = scriptedHost(() => 'no answer');
+      const host = scriptedHost(() => 'no answer', 1);
       const silent = wire(() => undefined, { host });
       (silent.server as any).retryDelaysMs = [2];
       silent.edit()('chan1', 'm8', 'fixed', false, info);

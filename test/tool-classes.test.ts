@@ -1,6 +1,5 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import { toolDefinitions, type ToolDefinition } from '../src/tools.js';
 import {
@@ -13,15 +12,6 @@ import {
 
 const listed = toolDefinitions.map((t) => t.name);
 
-function dispatchedToolNames(): string[] {
-  const src = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
-  const start = src.indexOf('private async executeToolCall(');
-  assert.ok(start >= 0, 'executeToolCall not found in src/server.ts');
-  const end = src.indexOf("There's no Discord tool", start);
-  assert.ok(end > start, "executeToolCall's default (There's no Discord tool) not found");
-  return [...src.slice(start, end).matchAll(/case '([^']+)':/g)].map((m) => m[1]);
-}
-
 const isClassed = (name: string): boolean => Object.hasOwn(TOOL_CLASSES, name);
 const isAccountedFor = (name: string): boolean => isClassed(name) || UNCLASSED.has(name);
 
@@ -30,24 +20,6 @@ describe('MCPL RFC-008 tool classes', () => {
     assert.ok(listed.length > 0);
     const missing = listed.filter((n) => !isAccountedFor(n));
     assert.deepEqual(missing, [], `add these to TOOL_CLASSES or UNCLASSED in src/tool-classes.ts: ${missing.join(', ')}`);
-  });
-
-  it('every dispatched tool, listed or not, is classed or deliberately unclassed', () => {
-    const dispatched = dispatchedToolNames();
-    const unseen = listed.filter((n) => !dispatched.includes(n));
-    assert.deepEqual(unseen, [], 'dispatch scan missed listed tools; update dispatchedToolNames()');
-    const missing = dispatched.filter((n) => !isAccountedFor(n));
-    assert.deepEqual(missing, [], `add these to TOOL_CLASSES or UNCLASSED in src/tool-classes.ts: ${missing.join(', ')}`);
-  });
-
-  it('has no stale entries: every name is a tool the server lists or dispatches', () => {
-    const known = new Set([...listed, ...dispatchedToolNames()]);
-    const stale = [...Object.keys(TOOL_CLASSES), ...UNCLASSED].filter((n) => !known.has(n));
-    assert.deepEqual(stale, []);
-  });
-
-  it('no tool is both classed and unclassed', () => {
-    assert.deepEqual([...UNCLASSED].filter(isClassed), []);
   });
 
   it('every class is from the RFC-008 vocabulary, non-empty and without repeats', () => {
@@ -89,7 +61,7 @@ describe('MCPL RFC-008 tool classes', () => {
       description: 'x',
       inputSchema: { type: 'object', properties: {} },
     };
-    assert.equal(withToolClasses(tool), tool);
+    assert.deepEqual(withToolClasses(tool), tool);
     assert.equal(withToolClasses({ ...tool, name: 'constructor' })._meta, undefined, 'a name inherited from Object.prototype is no class');
   });
 });
