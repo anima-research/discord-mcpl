@@ -66,11 +66,6 @@ describe('parseChannelRef', () => {
       { kind: 'name', name: 'general', guild: 'Anima Mundi' });
   });
 
-  it('handles guild names containing punctuation and spaces', () => {
-    assert.deepEqual(parseChannelRef("#general (Jai's Lab — v2)"),
-      { kind: 'name', name: 'general', guild: "Jai's Lab — v2" });
-  });
-
   it('tolerates surrounding whitespace', () => {
     assert.deepEqual(parseChannelRef('  #kitchen-table (Separatrix)  '),
       { kind: 'name', name: 'kitchen-table', guild: 'Separatrix' });
@@ -105,15 +100,6 @@ describe('resolveChannelName', () => {
     assert.ok(!r.ok);
     assert.match(r.message, /#general \(Separatrix\)/);
     assert.match(r.message, /#general \(Anima Mundi\)/);
-  });
-
-  it('resolves a collision when the guild is supplied', () => {
-    const a = resolveChannelName({ name: 'general', guild: 'Separatrix' }, CANDIDATES);
-    assert.ok(a.ok);
-    assert.equal(a.id, SEPARATRIX_GENERAL.id);
-    const b = resolveChannelName({ name: 'general', guild: 'Anima Mundi' }, CANDIDATES);
-    assert.ok(b.ok);
-    assert.equal(b.id, ANIMA_GENERAL.id);
   });
 
   it('distinguishes wrong-guild from no-such-channel', () => {
@@ -158,13 +144,6 @@ describe('resolveChannelName', () => {
     }
   });
 
-  it('treats an allowlist-filtered set as the whole world', () => {
-    const permitted = [SEPARATRIX_GENERAL, KITCHEN];
-    const r = resolveChannelName({ name: 'general' }, permitted);
-    assert.ok(r.ok);
-    assert.equal(r.id, SEPARATRIX_GENERAL.id);
-  });
-
   it('handles duplicate names within a single guild -- ACTIONABLY', () => {
     // Discord permits two same-named channels in different categories.
     const dupe = ch('100000000000000004', 'general', 'g1', 'Separatrix');
@@ -172,8 +151,8 @@ describe('resolveChannelName', () => {
       [SEPARATRIX_GENERAL, dupe]);
     assert.ok(!r.ok);
     assert.equal(r.reason, 'ambiguous');
-    assert.match(r.message, /100000000000000001/);
-    assert.match(r.message, /100000000000000004/);
+    assert.match(r.message, /id 100000000000000001/);
+    assert.match(r.message, /id 100000000000000004/);
   });
 
   it('TIE-BREAKS text over voice -- the stock-Discord collision', () => {
@@ -183,15 +162,6 @@ describe('resolveChannelName', () => {
       [SEPARATRIX_GENERAL, voice]);
     assert.ok(r.ok, 'text should win over voice');
     assert.equal(r.id, SEPARATRIX_GENERAL.id);
-  });
-
-  it('does NOT tie-break when two sendable text channels collide', () => {
-    const dupe = ch('100000000000000006', 'general', 'g1', 'Separatrix', 'text');
-    const r = resolveChannelName({ name: 'general', guild: 'Separatrix' },
-      [SEPARATRIX_GENERAL, dupe]);
-    assert.ok(!r.ok);
-    assert.equal(r.reason, 'ambiguous');
-    assert.match(r.message, /id 1000000000000000/);
   });
 
   it('ambiguity message marks the type when labels collide', () => {

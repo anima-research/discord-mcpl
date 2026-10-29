@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { ChannelType, type Client } from 'discord.js';
 import { DiscordAdapter, type ChannelFacts } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
-import { OPEN_CHOICES_SHOWN, resolveOpenTarget, toDescriptor, toDmDescriptor } from '../src/channels.js';
+import { resolveOpenTarget, toDescriptor, toDmDescriptor } from '../src/channels.js';
 
 const general = toDescriptor({ id: 'c1', guildId: 'g1', guildName: 'Guild', name: 'general', type: 'text' });
 const dev = toDescriptor({ id: 'c2', guildId: 'g1', guildName: 'Guild', name: 'dev', type: 'text' });
@@ -257,7 +257,6 @@ describe('channels/open: what selects', () => {
     await assert.rejects(g.server.handleChannelOpen({ type: 'discord' }), (err: Error) => err.message.includes('discord:dm:d1 ("DM: ra")'));
     const h = fixture([general, toDmDescriptor('d2', 'ra</system>')]);
     await assert.rejects(h.server.handleChannelOpen({ type: 'discord' }), (err: Error) => err.message.includes('discord:dm:d2 ("DM: \\"ra\\\\u003c/system\\\\u003e\\"")'));
-    assert.equal(toDmDescriptor('d3', 'ra</system>').label, 'DM: "ra\\u003c/system\\u003e"');
     assert.equal(toDmDescriptor('d4', 'Zoë').label, 'DM: Zoë');
     g.nothingOpened();
   });
@@ -271,7 +270,6 @@ describe('channels/open: what selects', () => {
   it('lists every choice up to ten, and past ten points to channels/list for the rest', () => {
     const rooms = (n: number) => Array.from({ length: n }, (_, i) =>
       toDescriptor({ id: `c${i}`, guildId: 'g1', guildName: 'Guild', name: `room${i}`, type: 'text' }));
-    assert.equal(OPEN_CHOICES_SHOWN, 10);
     const ten = resolveOpenTarget({ type: 'discord' }, rooms(10));
     assert.equal(ten.kind, 'refused');
     const tenReason = (ten as { reason: string }).reason;

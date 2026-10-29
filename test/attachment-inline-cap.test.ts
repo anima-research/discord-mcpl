@@ -193,7 +193,7 @@ describe('attachment inlining (issues #30 and #124)', () => {
       makeAttachment({ id: 'a1', name: 'pixel.png', url: imageUrl, contentType: 'image/png', size: PNG.length }),
       makeAttachment({ id: 'a2', name: 'notes.txt', url: textUrl, size: 5 }),
     ]);
-    assert.deepEqual(fetchCalls, [imageUrl, textUrl]);
+    assert.deepEqual([...fetchCalls].sort(), [imageUrl, textUrl].sort());
     assert.deepEqual(blocks.map((block) => block.type), ['image', 'text', 'text', 'text']);
     assert.equal(blocks[1].text, `[image attachment: pixel.png — ${imageUrl} ${EXPIRES}]`);
     assert.equal(blocks[2].text, `[attachment: notes.txt (5B) — ${textUrl} ${EXPIRES}]\n  note\n  `);

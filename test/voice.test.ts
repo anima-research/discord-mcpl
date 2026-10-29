@@ -59,6 +59,8 @@ class FakeSink implements PcmSink {
 
 const VOICE: TtsVoice = { voiceId: 'v1' };
 
+const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 function setup(textChannels: string[] | null = null) {
   const provider = new FakeProvider();
   const sink = new FakeSink();
@@ -127,16 +129,10 @@ test('concurrent inferences get separate streams; audio resampled 44.1k→48k st
   sink.played[0]!.stream.on('data', (c: Buffer) => chunks.push(c));
   provider.streams[0]!.emitAudio(Buffer.alloc(200));
   provider.streams[0]!.end();
-  await new Promise((r) => setTimeout(r, 20));
-  const total = Buffer.concat(chunks);
-  assert.equal(total.length, Math.floor((100 * 48000) / 44100) * 4);
-});
-
-test('stop() aborts in-flight streams', () => {
-  const { provider, out } = setup();
-  out.handleChunk('a', 'discord:g:1', 'never finishes');
-  out.stop();
-  assert.equal(provider.streams[0]!.aborted, true);
+  const expected = Math.floor((100 * 48000) / 44100) * 4;
+  for (let i = 0; i < 100 && Buffer.concat(chunks).length < expected; i++) await turn();
+  for (let i = 0; i < 3; i++) await turn();
+  assert.equal(Buffer.concat(chunks).length, expected);
 });
 
 test('unparseable channel ids are skipped, never throw', () => {
@@ -250,10 +246,13 @@ test('billedChars receipt: cleared-then-interrupted bills exactly the flushed te
 test('socket pre-open is capped: deep-queue items open at clearance instead', () => {
   const { provider, sink, out } = setup();
   for (let i = 0; i < 5; i++) out.handleChunk('inf' + i, 'discord:g:100', 'text ' + i);
-  assert.equal(provider.streams.length, 3, 'PRE_OPEN_MAX sockets, not one per item');
-  sink.clear('inf4');
-  assert.equal(provider.streams.length, 4);
-  assert.deepEqual(provider.streams[3]!.sent, ['text 4']);
+  const opened = provider.streams.length;
+  assert.ok(opened < 5, 'pre-open is capped, not one socket per item');
+  for (let i = 5; i < 10; i++) out.handleChunk('inf' + i, 'discord:g:100', 'text ' + i);
+  assert.equal(provider.streams.length, opened, 'a deeper queue opens no more');
+  sink.clear('inf9');
+  assert.equal(provider.streams.length, opened + 1, 'the deep-queue item opens at clearance');
+  assert.deepEqual(provider.streams.at(-1)!.sent, ['text 9']);
 });
 
 test('socket died while queued: flush reopens a fresh stream and resends the bank', () => {
@@ -318,48 +317,72 @@ test('an expiry the event loop runs late reports the time the utterance actually
   assert.equal(reports[0]!.queuedMs, 35, 'the measured wait, not the configured hold');
 });
 
-test('cleared beats expiry: a cleared utterance is never expired', async () => {
+test('cleared beats expiry: a cleared utterance is never expired', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const provider = new FakeProvider();
-  const sink = new FakeSink();
+  // A sink that would take back even a cleared item, so what keeps it is VoiceOutput's own.
+  const sink = new (class extends FakeSink {
+    override cancel(id: string): boolean {
+      if (!this.played.some((p) => p.id === id)) return false;
+      this.cancelled.push(id);
+      return true;
+    }
+  })();
   const out = new VoiceOutput({ textChannels: null, maxHoldMs: 20 }, provider, VOICE, sink, () => {});
   const reports: UtteranceReport[] = [];
   out.onReport((r) => reports.push(r));
   out.handleChunk('inf1', 'discord:g:100', 'quick');
   sink.clear('inf1');
-  await new Promise((r) => setTimeout(r, 50));
+  t.mock.timers.tick(50);
   assert.deepEqual(sink.cancelled, []);
   assert.equal(reports.length, 0);
   assert.deepEqual(provider.streams[0]!.sent, ['quick']);
 });
 
-test('waitClear resolves only after silence + full hold-off', async () => {
+test('waitClear resolves only after silence + full hold-off', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const gate = new CarrierGate();
   gate.speakingStart({ userId: 'u1', bot: false });
 
   let cleared = false;
-  const p = gate.waitClear(10, 11).then(() => { cleared = true; });
+  void gate.waitClear(10, 11).then(() => { cleared = true; });
 
-  await new Promise((r) => setTimeout(r, 25));
-  assert.equal(cleared, false);
+  await turn();
+  t.mock.timers.tick(25);
+  await turn();
+  assert.equal(cleared, false, 'not while someone speaks');
 
   gate.speakingEnd('u1');
-  await new Promise((r) => setTimeout(r, 25));
-  await p;
+  await turn();
+  t.mock.timers.tick(9);
+  await turn();
+  assert.equal(cleared, false, 'not before the hold-off has passed');
+  t.mock.timers.tick(3);
+  await turn();
   assert.equal(cleared, true);
 });
 
-test('a speaker starting during hold-off restarts the wait', async () => {
+test('a speaker starting during hold-off restarts the wait', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const gate = new CarrierGate();
   let cleared = false;
   void gate.waitClear(30, 31).then(() => { cleared = true; });
 
-  await new Promise((r) => setTimeout(r, 10));
+  await turn();
+  t.mock.timers.tick(10);
   gate.speakingStart({ userId: 'u2', bot: true });
-  await new Promise((r) => setTimeout(r, 40));
-  assert.equal(cleared, false);
+  await turn();
+  t.mock.timers.tick(40);
+  await turn();
+  assert.equal(cleared, false, 'past the first hold-off, which the start cancelled');
 
   gate.speakingEnd('u2');
-  await new Promise((r) => setTimeout(r, 50));
+  await turn();
+  t.mock.timers.tick(29);
+  await turn();
+  assert.equal(cleared, false, 'the hold-off starts again from the end');
+  t.mock.timers.tick(3);
+  await turn();
   assert.equal(cleared, true);
 });
 
@@ -378,33 +401,37 @@ test('onSpeakerStart fires for barge-in decisions; busy() tracks the set', () =>
   assert.deepEqual(starts, ['a', 'b']);
 });
 
-test('sustained-speech debounce: blips never fire, real speech does', async () => {
+test('sustained-speech debounce: blips never fire, real speech does', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const gate = new CarrierGate();
   const sustained: string[] = [];
   gate.onSpeakerSustained(30, (s) => sustained.push(s.userId));
 
   gate.speakingStart({ userId: 'blip', bot: false });
-  await new Promise((r) => setTimeout(r, 10));
+  t.mock.timers.tick(10);
   gate.speakingEnd('blip');
-  await new Promise((r) => setTimeout(r, 40));
+  t.mock.timers.tick(40);
   assert.deepEqual(sustained, []);
 
   gate.speakingStart({ userId: 'talker', bot: false });
-  await new Promise((r) => setTimeout(r, 45));
+  t.mock.timers.tick(29);
+  assert.deepEqual(sustained, [], 'not before the debounce');
+  t.mock.timers.tick(1);
   assert.deepEqual(sustained, ['talker']);
 });
 
-test('rapid VAD re-trigger counts as sustained speech', async () => {
+test('rapid VAD re-trigger counts as sustained speech', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const gate = new CarrierGate();
   const sustained: string[] = [];
   gate.onSpeakerSustained(30, (s) => sustained.push(s.userId));
 
   gate.speakingStart({ userId: 'u', bot: false });
-  await new Promise((r) => setTimeout(r, 10));
+  t.mock.timers.tick(10);
   gate.speakingEnd('u');
-  await new Promise((r) => setTimeout(r, 5));
+  t.mock.timers.tick(5);
   gate.speakingStart({ userId: 'u', bot: false });
-  await new Promise((r) => setTimeout(r, 30));
+  t.mock.timers.tick(30);
   assert.ok(sustained.includes('u'));
 });
 

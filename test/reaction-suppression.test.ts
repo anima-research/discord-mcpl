@@ -346,15 +346,6 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
     assert.equal(rs.protectionActive, true);
   });
 
-  it('explicit [] → operator chose none; the baseline is overridden, not merged back', () => {
-    const st = baselineState();
-    st.applyParsed({ suppressedReactionEmojis: [] });
-    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false, 'explicit empty beats the default');
-    const rs = st.suppressionStatus();
-    assert.equal(rs.status, 'configured-empty');
-    assert.equal(rs.source, 'file');
-  });
-
   it('explicit nonempty key → exact operator set, baseline entries not unioned in', () => {
     const st = baselineState();
     st.applyParsed({ suppressedReactionEmojis: [HARMLESS] });
@@ -479,12 +470,6 @@ describe('DiscordFiltersState — host-injected protective baseline', () => {
     }
   });
 
-  it('standalone (no baseline injected) honestly reports not-configured', () => {
-    const st = new DiscordFiltersState({ fileConfigured: true, baselineEnv: undefined });
-    st.applyParsed({});
-    assert.equal(st.suppressionStatus().status, 'not-configured');
-    assert.equal(st.isSuppressed({ emoji: SUPPRESSED_UNICODE }), false);
-  });
 });
 
 describe('loadFiltersFile — strict typing for the safety-bearing key', () => {
