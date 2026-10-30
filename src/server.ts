@@ -40,7 +40,7 @@ import type {
   ChannelsOutgoingCompleteParams,
 } from '@animalabs/mcpl-core';
 
-import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, MentionsField, PostedParts, ThreadPlace } from './discord-adapter.js';
+import type { ChannelFacts, ChannelMeta, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, MentionsField, PostedParts, ThreadPlace } from './discord-adapter.js';
 import { LATEST_FROM_WINDOW, attachmentUrlExpiry, holdsNoMessages, isListedKind, kindOfValue } from './discord-adapter.js';
 import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, type DmNoticeDecision } from './dm-notices.js';
 
@@ -232,6 +232,14 @@ function knowsLessThan(d: ChannelDescriptor, known: ChannelDescriptor): boolean 
 }
 
 type GuildDelivery = { id: string; registered: true } | { id: string | undefined; registered: false };
+
+interface LeftOut {
+  settled: Promise<void>;
+  kept: { messages: HistoryMessage[]; meta: ChannelMeta | null; guildId: string | null } | null;
+  shown: Set<string>;
+  keep(messages: HistoryMessage[], meta: ChannelMeta | null, guildId: string | null): void;
+  settle(): void;
+}
 
 interface SavedTally {
   anchorId: string;
@@ -446,6 +454,9 @@ const CLOSED_CHANNEL_NOTE =
   'role Discord created for you, or replies to one of your messages. Opening it brings its other messages as they ' +
   'arrive.</system>\n';
 
+const LEFT_OUT_NOTE =
+  '<system>The rest of the messages posted here while you were away, now that this channel is open.</system>\n';
+
 const AGENT_TIME_ZONE = resolveAgentTimeZone();
 const AGENT_TIMESTAMP_STYLE = resolveTimestampStyle();
 
@@ -612,6 +623,8 @@ export class DiscordMcplServer {
   private watermarkLoaded = false;
   private watermarkSaveFailure: string | null = null;
   private sweepDone = false;
+  private leftOut = new Map<string, LeftOut>();
+  private lifecycleSaid = new Set<string>();
 
   private get catchupLimit(): number {
     const raw = process.env.DISCORD_CATCHUP_LIMIT;
@@ -1560,6 +1573,8 @@ export class DiscordMcplServer {
           const openP = params as unknown as ChannelOpenRequest;
           const result = await this.handleChannelOpen(openP);
           conn.sendResponse(req.id, result);
+          const opened = parseMcplChannelId(result.channel.id);
+          if (opened) this.leftOutOpened(conn, opened.channelId, result.history);
           break;
         }
 
@@ -1567,6 +1582,11 @@ export class DiscordMcplServer {
           const closeP = params as unknown as ChannelsCloseParams;
           const result = this.handleChannelClose(closeP);
           conn.sendResponse(req.id, result);
+          const closed = parseMcplChannelId(closeP.channelId);
+          if (closed) {
+            this.lifecycleSaid.add(closed.channelId);
+            this.leftOut.delete(closed.channelId);
+          }
           break;
         }
 
@@ -1994,6 +2014,8 @@ export class DiscordMcplServer {
         const unsaved = wasNew || this.mutedUnsaved ? this.saveMuted() : null;
         this.ensureSubscriptionsLoaded();
         this.subscribedChannels.delete(channelId);
+        this.leftOut.delete(channelId);
+        this.lifecycleSaid.add(channelId);
         this.ensureReactionChannelsLoaded();
         const reactionsUnsaved = this.reactionChannels.delete(channelId) ? this.saveReactionChannels() : null;
         for (const channel of this.channelManager.getOpen()) {
@@ -2992,6 +3014,95 @@ export class DiscordMcplServer {
   }
 
   private async runReconnectSweep(): Promise<void> {
+    const claims: LeftOut[] = [];
+    try {
+      await this.sweepMissed(claims);
+    } finally {
+      for (const claim of claims) claim.settle();
+    }
+  }
+
+  private claimLeftOut(channelId: string, claims: LeftOut[]): LeftOut {
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => { settle = resolve; });
+    const claim: LeftOut = {
+      settled,
+      settle,
+      kept: null,
+      shown: new Set(),
+      keep: (messages, meta, guildId) => {
+        if (messages.length > 0) claim.kept = { messages, meta, guildId };
+        settle();
+      },
+    };
+    this.leftOut.set(channelId, claim);
+    claims.push(claim);
+    return claim;
+  }
+
+  private leftOutOpened(conn: McplConnection, channelId: string, answered: ChannelOpenResponse['history']): void {
+    this.lifecycleSaid.add(channelId);
+    const claim = this.leftOut.get(channelId);
+    if (!claim) return;
+    for (const m of answered ?? []) claim.shown.add(m.messageId);
+    void this.deliverLeftOut(conn, channelId, claim).catch((err) => {
+      console.error('[discord-mcpl] Delivering the rest of a missed catch-up failed:', errorText(err));
+    });
+  }
+
+  private async deliverLeftOut(conn: McplConnection, channelId: string, claim: LeftOut): Promise<void> {
+    await claim.settled;
+    if (this.leftOut.get(channelId) !== claim) return;
+    this.leftOut.delete(channelId);
+    if (!claim.kept || !isEnabled('discord.messaging', this.enabledFeatureSets)) return;
+    const { meta, guildId } = claim.kept;
+    const rest = claim.kept.messages.filter(
+      (m) => !claim.shown.has(m.id) && this.discord.historyIngressReason(channelId, guildId, m.authorId) === null,
+    );
+    if (rest.length === 0) return;
+    const attrs = [...this.missedPlaceAttrs(meta, channelId, false), `count="${rest.length}"`, 'reason="backscroll"'];
+    const block = [`<missed ${attrs.join(' ')}>`, ...rest.map((m) => this.missedLine(m, '')), '</missed>'].join('\n');
+    const mcplChannelId = guildId ? this.registerGuildDelivery(guildId, channelId).id : undefined;
+    try {
+      await conn.sendRequest(method.PUSH_EVENT, this.missedPush(
+        channelId, meta, mcplChannelId, `discord_missed_${channelId}_${rest[rest.length - 1].id}_opened`,
+        { isMention: false, isDM: false }, `${LEFT_OUT_NOTE}${block}`,
+      ));
+    } catch (err) {
+      dbg('left-out:send-failed', { channelId, error: errorText(err) });
+    }
+  }
+
+  private missedPush(
+    channelId: string,
+    meta: ChannelMeta | null,
+    mcplChannelId: string | undefined,
+    eventId: string,
+    flags: { isMention: boolean; isDM: boolean },
+    text: string,
+  ): PushEventParams {
+    const thread: ThreadPlace = meta ?? {};
+    return {
+      featureSet: 'discord.messaging',
+      eventId,
+      timestamp: new Date().toISOString(),
+      origin: {
+        source: 'discord',
+        channelId,
+        guildId: meta?.guildId ?? null,
+        guildName: meta?.guildName ?? undefined,
+        ...(mcplChannelId ? { mcplChannelId } : {}),
+        channelName: meta?.name ?? undefined,
+        ...threadFields(thread),
+        isMention: flags.isMention,
+        isDM: flags.isDM,
+      } as Record<string, unknown>,
+      ...(threadTags(thread).length > 0 ? { tags: threadTags(thread) } : {}),
+      payload: { content: [textContent(text)] },
+    } satisfies PushEventParams;
+  }
+
+  private async sweepMissed(claims: LeftOut[]): Promise<void> {
     if (this.sweepDone) return;
     this.sweepDone = true;
     const conn = this.conn;
@@ -3020,6 +3131,7 @@ export class DiscordMcplServer {
       const watermark = this.forwardedWatermark.get(channelId);
       if (!watermark) continue;
       const isSubscribed = this.subscribedChannels.has(channelId);
+      const claim = isSubscribed || this.lifecycleSaid.has(channelId) ? undefined : this.claimLeftOut(channelId, claims);
 
       let msgs: Awaited<ReturnType<typeof this.discord.fetchHistory>>;
       try {
@@ -3140,11 +3252,11 @@ export class DiscordMcplServer {
       }
       if (kept.length === 0) {
         await advance();
+        claim?.keep(msgs, meta, guildId);
         continue;
       }
       const hadMention = isDM || mentionCount > 0;
 
-      const thread: ThreadPlace = meta ?? {};
       const attrs = this.missedPlaceAttrs(meta, channelId, isDM);
       attrs.push(`count="${keepAll ? kept.length : mentionCount}"`);
       if (!keepAll) attrs.push(`lines="${kept.length}"`);
@@ -3164,29 +3276,16 @@ export class DiscordMcplServer {
       const closedNote = guildDelivery && guildId ? this.closedChannelNote(guildId, channelId, guildDelivery) : '';
 
       try {
-        await conn.sendRequest(method.PUSH_EVENT, {
-          featureSet: 'discord.messaging',
-          eventId: `discord_missed_${channelId}_${newestId}`,
-          timestamp: new Date().toISOString(),
-          origin: {
-            source: 'discord',
-            channelId,
-            guildId: meta?.guildId ?? null,
-            guildName: meta?.guildName ?? undefined,
-            ...(sweptMcplId ? { mcplChannelId: sweptMcplId } : {}),
-            channelName: meta?.name ?? undefined,
-            ...threadFields(thread),
-            isMention: hadMention,
-            isDM,
-          } as Record<string, unknown>,
-          ...(threadTags(thread).length > 0 ? { tags: threadTags(thread) } : {}),
-          payload: { content: [textContent(`${closedNote}${block}`)] },
-        } satisfies PushEventParams);
+        await conn.sendRequest(method.PUSH_EVENT, this.missedPush(
+          channelId, meta, sweptMcplId, `discord_missed_${channelId}_${newestId}`,
+          { isMention: hadMention, isDM }, `${closedNote}${block}`,
+        ));
       } catch (err) {
         dbg('sweep:send-failed', { channelId, error: errorText(err) });
         continue;
       }
       await advance();
+      claim?.keep(msgs.filter((m) => !kept.includes(m)), meta, guildId);
       delivered++;
     }
 
@@ -3477,6 +3576,7 @@ export class DiscordMcplServer {
       if (this.missedTally.delete(id)) pruned = true;
       if (this.owed.delete(id)) pruned = true;
       this.owedTried.delete(id);
+      this.leftOut.delete(id);
     }
     if (pruned) this.saveWatermark();
     this.forgetChannels(ids.map((id) => mcplChannelId(guildId, id)));

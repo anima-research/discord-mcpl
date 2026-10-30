@@ -3752,3 +3752,389 @@ describe('U+2028, U+2029 and a reset on the wire', () => {
     assert.ok(answer.serverInfo, 'the next client is answered');
   });
 });
+
+describe('the messages a closed catch-up sweep left out', () => {
+  let watermarkFiles = 0;
+  const base = Date.now() - 600_000;
+  type Missed = MockDiscordAdapter['historyToReturn'][number];
+  const missed = (n: number, mentionAt?: number, authorOf: (id: number) => string = () => 'u2'): Missed[] =>
+    Array.from({ length: n }, (_, i) => {
+      const id = 101 + i;
+      const mentionsBot = id === mentionAt;
+      return {
+        id: String(id), authorId: authorOf(id), authorName: 'Bob', isBot: false,
+        content: mentionsBot ? `<@bot_123> m${id}` : `m${id}`, cleanContent: mentionsBot ? `@bot m${id}` : `m${id}`,
+        attachments: [], mentionsBot, timestamp: new Date(base + i * 1000), reactions: [],
+      };
+    });
+
+  async function restarted(t: TestContext, history: Missed[], channels: string[] = ['c1']) {
+    const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-left-out-${++watermarkFiles}.json`);
+    writeFileSync(wmPath, JSON.stringify({ watermarks: Object.fromEntries(channels.map((c) => [c, '100'])), dmChannels: [] }));
+    process.env.DISCORD_WATERMARK_FILE = wmPath;
+    const { client, clientSocket, serverConn, discord } = await createTestPair();
+    const wire: Array<{ id?: unknown; method?: unknown; result?: unknown; params?: unknown }> = [];
+    let unread = '';
+    clientSocket.on('data', (chunk: string | Buffer) => {
+      unread += chunk.toString();
+      const lines = unread.split('\n');
+      unread = lines.pop()!;
+      for (const line of lines) if (line.trim()) wire.push(JSON.parse(line));
+    });
+    discord.historyToReturn = history;
+    for (const [c, name] of channels.map((c, i) => [c, i === 0 ? 'general' : `other-${i}`])) {
+      discord.cachedChannelMeta[c] = { name, guildId: 'g1', guildName: 'Test Guild', isDM: false };
+      discord.facts[c] = { id: c, guildId: 'g1', guildName: 'Test Guild', type: 'text', name };
+    }
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+      delete process.env.DISCORD_WATERMARK_FILE;
+      if (existsSync(wmPath)) unlinkSync(wmPath);
+    });
+    await mcplHandshake(client);
+    const reg = await nextWithin(client);
+    if (reg.type !== 'request' || reg.request.method !== method.CHANNELS_REGISTER) assert.fail('expected the registration');
+    const savedPosition = () => (JSON.parse(readFileSync(wmPath, 'utf8')) as { watermarks: Record<string, string> }).watermarks.c1;
+    return { client, discord, registration: reg.request, savedPosition, wire };
+  }
+
+  async function positionSaved(savedPosition: () => string, id: string): Promise<void> {
+    for (let i = 0; i < 250 && savedPosition() !== id; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(savedPosition(), id, 'the sweep saved its position past what it read');
+  }
+
+  async function nextPushRequest(client: McplConnection) {
+    let next = await nextWithin(client, 5000);
+    while (next.type === 'notification') next = await nextWithin(client, 5000);
+    if (next.type !== 'request') assert.fail('expected a push');
+    assert.equal(next.request.method, method.PUSH_EVENT);
+    return { id: next.request.id, params: next.request.params as PushEventParams };
+  }
+  const pushText = (params: PushEventParams) => (params.payload.content[0] as { text: string }).text;
+
+  async function nextPush(client: McplConnection): Promise<string> {
+    const push = await nextPushRequest(client);
+    client.sendResponse(push.id, {});
+    return pushText(push.params);
+  }
+
+  async function nothingMissedBefore(client: McplConnection, discord: MockDiscordAdapter, channelId = 'c1'): Promise<void> {
+    discord.simulateMessage({
+      id: '900', content: 'posted live', cleanContent: 'posted live', authorId: 'u2', authorName: 'Bob', isBot: false,
+      channelId, channelName: 'general', guildId: 'g1', guildName: 'Test Guild', mentions: [], attachments: [],
+      timestamp: new Date(),
+    });
+    for (;;) {
+      const next = await nextWithin(client, 5000);
+      if (next.type === 'request') client.sendResponse(next.request.id, {});
+      const seen = JSON.stringify(next.type === 'request' ? next.request.params : next.notification.params);
+      assert.ok(!seen.includes('<missed'), `nothing missed comes after the open, got ${seen.slice(0, 300)}`);
+      if (seen.includes('posted live')) return;
+    }
+  }
+
+  function holdTheSweepsRead(discord: MockDiscordAdapter, history: Missed[]) {
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    (discord as unknown as { fetchHistory: (channelId: string, options?: { limit?: number }) => Promise<Missed[]> })
+      .fetchHistory = async (_channelId, options) => {
+        if (++calls === 1) {
+          entered();
+          await released;
+        }
+        return options?.limit !== undefined && options.limit < history.length ? history.slice(-options.limit) : history;
+      };
+    return { reading, release };
+  }
+
+  const open = (client: McplConnection, history?: { limit: number }) =>
+    client.sendRequest(method.CHANNELS_OPEN, { channelId: 'discord:g1:c1', type: 'discord', ...(history ? { history } : {}) });
+  const close = (client: McplConnection) => client.sendRequest(method.CHANNELS_CLOSE, { channelId: 'discord:g1:c1' });
+  const restLine = /now that this channel is open/;
+  const missedHeader = (count: number) => new RegExp(`<missed [^>]*channelId="c1"[^>]*count="${count}"[^>]*reason="backscroll">`);
+
+  it("delivers the rest of a closed channel's missed messages once the host opens it, after its answer, none of them twice, and only on the first open", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition, wire } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    const mentions = await nextPush(client);
+    assert.match(mentions, /reason="mention"/, mentions);
+    for (let id = 101; id <= 108; id++) assert.match(mentions, new RegExp(`m${id}\\b`), mentions);
+    assert.doesNotMatch(mentions, /m109\b|m110\b/, mentions);
+
+    await open(client);
+    const restPush = await nextPushRequest(client);
+    client.sendResponse(restPush.id, {});
+    const rest = pushText(restPush.params);
+    const origin = restPush.params.origin as Record<string, unknown>;
+    assert.equal(origin.mcplChannelId, 'discord:g1:c1');
+    assert.equal(origin.isMention, false);
+    assert.equal(origin.isDM, false);
+    assert.match(rest, missedHeader(2), rest);
+    assert.match(rest, /channel="#general"/, rest);
+    assert.match(rest, restLine, rest);
+    assert.match(rest, /m109\b/, rest);
+    assert.match(rest, /m110\b/, rest);
+    for (let id = 101; id <= 108; id++) assert.doesNotMatch(rest, new RegExp(`m${id}\\b`), rest);
+    assert.equal(savedPosition(), '110', 'the position is saved past them at the sweep, as before');
+    const openAnswer = wire.findIndex((m) => m.method === undefined && (m.result as { channel?: { id?: string } } | undefined)?.channel?.id === 'discord:g1:c1');
+    const restLineAt = wire.findIndex((m) => m.method === method.PUSH_EVENT && JSON.stringify(m.params).includes('now that this channel is open'));
+    assert.ok(openAnswer >= 0 && restLineAt > openAnswer, `the rest comes after the open's answer (answer at ${openAnswer}, rest at ${restLineAt})`);
+
+    await open(client);
+    await close(client);
+    await open(client);
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('delivers them when the open takes effect while the sweep is still reading that channel', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(3));
+    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    t.after(() => release());
+    client.sendResponse(registration.id, {});
+    await reading;
+    await open(client);
+    release();
+
+    const rest = await nextPush(client);
+    assert.match(rest, missedHeader(3), rest);
+    assert.match(rest, restLine, rest);
+    for (const id of [101, 102, 103]) assert.match(rest, new RegExp(`m${id}\\b`), rest);
+  });
+
+  it('drops them when the host closes the channel before any open', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    await positionSaved(savedPosition, '110');
+    await close(client);
+    await open(client);
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('keeps nothing for a channel the host had already closed when the sweep read it', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(10, 101));
+    await close(client);
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    await positionSaved(savedPosition, '110');
+    await open(client);
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('keeps nothing for a channel the host opened before the sweep read it, which it sweeps whole', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(10, 101));
+    await open(client);
+    client.sendResponse(registration.id, {});
+    const whole = await nextPush(client);
+    assert.match(whole, /<missed [^>]*channelId="c1"[^>]*count="10"/, whole);
+    assert.match(whole, /m110\b/, whole);
+    await positionSaved(savedPosition, '110');
+    await close(client);
+    await open(client);
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('delivers nothing on an open of a channel muted since the sweep, nor on a later open after unmuting', { timeout: 15_000 }, async (t) => {
+    const mutedPath = join(tmpdir(), `discord-mcpl-muted-${process.pid}-left-out.json`);
+    process.env.DISCORD_MUTED_CHANNELS_FILE = mutedPath;
+    t.after(() => {
+      delete process.env.DISCORD_MUTED_CHANNELS_FILE;
+      if (existsSync(mutedPath)) unlinkSync(mutedPath);
+    });
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(10, 101));
+    const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c1' } });
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    await positionSaved(savedPosition, '110');
+    await tool('mute_channel');
+    await open(client);
+    await tool('unmute_channel');
+    await close(client);
+    await open(client);
+    await nothingMissedBefore(client, discord);
+  });
+
+  it("leaves out of them what an open's history answer carries, a later open's included", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(3));
+    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    t.after(() => release());
+    client.sendResponse(registration.id, {});
+    await reading;
+    await open(client);
+    const answer = (await open(client, { limit: 2 })) as { history?: Array<{ messageId: string }> };
+    assert.deepEqual(answer.history?.map((m) => m.messageId), ['102', '103']);
+    release();
+
+    const rest = await nextPush(client);
+    assert.match(rest, missedHeader(1), rest);
+    assert.match(rest, /m101\b/, rest);
+    assert.doesNotMatch(rest, /m10[23]\b/, rest);
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('delivers none of them once the filters stop admitting the channel', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    const mentions = await nextPushRequest(client);
+    await open(client);
+    (discord as unknown as { historyIngressReason: (channelId: string) => string | null })
+      .historyIngressReason = (channelId) => (channelId === 'c1' ? 'channel-not-allowed' : null);
+    client.sendResponse(mentions.id, {});
+    await positionSaved(savedPosition, '110');
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('drops them when the host closes the channel before the sweep is done with it, though it opens it again', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
+    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    t.after(() => release());
+    client.sendResponse(registration.id, {});
+    await reading;
+    await open(client);
+    await close(client);
+    await open(client);
+    release();
+    await positionSaved(savedPosition, '103');
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('drops them on an open while the channel is muted, though it is unmuted before the sweep is done with it', { timeout: 15_000 }, async (t) => {
+    const mutedPath = join(tmpdir(), `discord-mcpl-muted-${process.pid}-left-out-pending.json`);
+    process.env.DISCORD_MUTED_CHANNELS_FILE = mutedPath;
+    t.after(() => {
+      delete process.env.DISCORD_MUTED_CHANNELS_FILE;
+      if (existsSync(mutedPath)) unlinkSync(mutedPath);
+    });
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
+    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    t.after(() => release());
+    const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c1' } });
+    client.sendResponse(registration.id, {});
+    await reading;
+    await tool('mute_channel');
+    await open(client);
+    await tool('unmute_channel');
+    release();
+    await positionSaved(savedPosition, '103');
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('delivers nothing when the channel is muted after its open, before the sweep is done with it', { timeout: 15_000 }, async (t) => {
+    const mutedPath = join(tmpdir(), `discord-mcpl-muted-${process.pid}-left-out-after-open.json`);
+    process.env.DISCORD_MUTED_CHANNELS_FILE = mutedPath;
+    t.after(() => {
+      delete process.env.DISCORD_MUTED_CHANNELS_FILE;
+      if (existsSync(mutedPath)) unlinkSync(mutedPath);
+    });
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
+    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    t.after(() => release());
+    const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c1' } });
+    client.sendResponse(registration.id, {});
+    await reading;
+    await open(client);
+    await tool('mute_channel');
+    release();
+    await positionSaved(savedPosition, '103');
+    await tool('unmute_channel');
+    await open(client);
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('drops them on a mute after the open, though the channel is unmuted and opened again before the sweep is done with it', { timeout: 15_000 }, async (t) => {
+    const mutedPath = join(tmpdir(), `discord-mcpl-muted-${process.pid}-left-out-remute.json`);
+    process.env.DISCORD_MUTED_CHANNELS_FILE = mutedPath;
+    t.after(() => {
+      delete process.env.DISCORD_MUTED_CHANNELS_FILE;
+      if (existsSync(mutedPath)) unlinkSync(mutedPath);
+    });
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
+    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    t.after(() => release());
+    const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c1' } });
+    client.sendResponse(registration.id, {});
+    await reading;
+    await open(client);
+    await tool('mute_channel');
+    await tool('unmute_channel');
+    await open(client);
+    release();
+    await positionSaved(savedPosition, '103');
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('keeps nothing for a channel muted and unmuted before the sweep read it', { timeout: 15_000 }, async (t) => {
+    const mutedPath = join(tmpdir(), `discord-mcpl-muted-${process.pid}-left-out-before-read.json`);
+    process.env.DISCORD_MUTED_CHANNELS_FILE = mutedPath;
+    t.after(() => {
+      delete process.env.DISCORD_MUTED_CHANNELS_FILE;
+      if (existsSync(mutedPath)) unlinkSync(mutedPath);
+    });
+    const { client, discord, registration } = await restarted(t, missed(10, 101), ['c1', 'c2']);
+    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    t.after(() => release());
+    const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c2' } });
+    client.sendResponse(registration.id, {});
+    await reading;
+    await tool('mute_channel');
+    await tool('unmute_channel');
+    release();
+    assert.match(await nextPush(client), /channelId="c1"/);
+    assert.match(await nextPush(client), /channelId="c2"/);
+    await client.sendRequest(method.CHANNELS_OPEN, { channelId: 'discord:g1:c2', type: 'discord' });
+    await nothingMissedBefore(client, discord, 'c2');
+  });
+
+  it('delivers nothing once the host has turned discord.messaging off', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
+    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    t.after(() => release());
+    client.sendResponse(registration.id, {});
+    await reading;
+    await open(client);
+    await client.sendRequest('featureSets/update', { disabled: ['discord.messaging'] });
+    release();
+    await positionSaved(savedPosition, '103');
+    await client.sendRequest('featureSets/update', { enabled: ['discord.messaging'] });
+    await nothingMissedBefore(client, discord);
+  });
+
+  it('delivers nothing from a channel deleted before the sweep is done with it', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(10, 101), ['c1', 'c2']);
+    client.sendResponse(registration.id, {});
+    const first = await nextPushRequest(client);
+    assert.match(pushText(first.params), /channelId="c1"/);
+    await open(client);
+    discord.simulateChannelDelete('g1', 'c1');
+    client.sendResponse(first.id, {});
+    for (;;) {
+      const next = await nextWithin(client, 5000);
+      if (next.type === 'notification') continue;
+      client.sendResponse(next.request.id, {});
+      const text = JSON.stringify(next.request.params);
+      assert.ok(!text.includes('now that this channel is open'), `nothing from the deleted channel, got ${text.slice(0, 300)}`);
+      if (text.includes('channelId=\\"c2\\"')) return;
+    }
+  });
+
+  it("delivers nothing for a channel whose read failed, whose position stays for the next start's sweep", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    discord.fetchHistory = async () => {
+      entered();
+      throw new Error('Discord is unavailable');
+    };
+    client.sendResponse(registration.id, {});
+    await reading;
+    await open(client);
+    assert.equal(savedPosition(), '100');
+    await nothingMissedBefore(client, discord);
+  });
+});

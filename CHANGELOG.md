@@ -5,6 +5,24 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Fixed
+
+- **After a restart, a channel the host re-opens gets the rest of what it
+  missed.** When the catch-up sweep reads a channel as closed that the
+  host hasn't yet opened or closed, and that hasn't been muted since the
+  server started, it delivers its mentions with their nearby messages, as
+  before, and now keeps the other messages it read there that the filters
+  admitted until the host first opens or closes the channel. An open
+  delivers them, after its answer, as a second `<missed>` block that says
+  they're the rest, leaving out any that an open's history answer carried.
+  A close, a mute or the channel's deletion drops them at once. The
+  filters, and whether `discord.messaging` is on, are checked when the
+  block goes out. Until now, when the sweep read a channel before the
+  host's open of it was handled, as can happen with a host that re-opens
+  its channels after `channels/register` is answered, such as
+  agent-framework, those messages were lost: the sweep had moved the
+  catch-up position past them.
+
 ## 0.6.0 — 2026-10-30
 
 ### Added
