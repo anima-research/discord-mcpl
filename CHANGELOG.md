@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.6.0 — 2026-10-30
+
 ### Added
 
 - **`list_channels` gives each channel's topic.** A channel whose topic
@@ -65,31 +67,6 @@ in the git log and PR descriptions.
   next message. Such a split posted as two halves of plain text, so the
   mention pinged no one.
 
-- **This change requires sharp 0.35.5 or a later 0.35.x on install.** The dependency was `^0.33.5`, which can't install any version with the fixes for GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w (#124). If sharp uses system-installed image libraries, upgrading sharp alone does not update them; the operator must separately ensure that any libvips, libheif and librsvg libraries it uses include the relevant fixes.
-
-- **`filters_update` refuses an update that would empty the server list,
-  or that it can't read as written.** A `removeGuilds` that removed the
-  last listed server left the list empty, and an empty list admits every
-  server the bot is in, so the agent heard every server, though the tool
-  says a removed server's events stop being delivered. Such a call is now
-  refused, and nothing changes; the refusal says to keep another server
-  listed, by adding one in the same call. Refused the same way, naming
-  the value it can't read:
-  - an `addGuilds` entry that isn't a server id, or a server id, a colon
-    and channel ids joined by `+` (`"111:"` and `"111::222"` were read as
-    the whole server, and `"111:+"` as an empty channel list);
-  - an id, in any of `addGuilds`, `removeGuilds` and `setDmUsers`, that
-    isn't a string or is empty, or has whitespace, a colon, a comma or a
-    plus sign inside it (a numeric id in `removeGuilds` lifted that
-    server's channel list instead of removing the server, and a
-    `setDmUsers` of empty strings admitted DMs from anyone).
-
-  Whitespace around an id is ignored, as it already was for channel ids,
-  and an argument given as `null` is read as left out. A call that sets
-  only the DM notice needs no filters file when the lists beside it are
-  `null` or an empty `addGuilds` or `removeGuilds`. A filters file with an
-  empty `guildIds` still means every server.
-
 - **A mute survives an open of its channel, a host's reconcile open
   included (#95).** Opening a muted channel lifted the mute and saved the
   muted list without it, and a host's reconcile `channels/open` (after a
@@ -108,6 +85,41 @@ in the git log and PR descriptions.
   owed to a channel that is opened while muted are now given up, as they
   are for any muted channel; before, the open lifted the mute and they
   were delivered.
+
+## 0.5.4 — 2026-10-28
+
+### Fixed
+
+- **This change requires sharp 0.35.5 or a later 0.35.x on install.** The dependency was `^0.33.5`, which can't install any version with the fixes for GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w (#124). If sharp uses system-installed image libraries, upgrading sharp alone does not update them; the operator must separately ensure that any libvips, libheif and librsvg libraries it uses include the relevant fixes.
+
+## 0.5.3 — 2026-10-28
+
+### Fixed
+
+- **A message holding U+2028 or U+2029 is no longer lost between
+  discord-mcpl and its host, and a TCP client's reset no longer ends the
+  process.** discord-mcpl now depends on `@animalabs/mcpl-core` `^0.4.0`.
+  It wrote U+2028 and U+2029 raw, so a host whose reader ends lines at
+  them, as `readline` does on Node 24 and later, lost a
+  `channels/incoming` message carrying either in its text, and any message
+  whose author's name holds either; it now writes them as `\u` escapes.
+  The reader discord-mcpl used, mcpl-core 0.2.1's, ended lines there too
+  on Node 24, so a host's call holding either raw was lost; it is now read
+  whole. A served TCP client whose connection was reset could raise an
+  uncaught error that ended the process, with the next client refused
+  meanwhile; now only that client's serving ends, and the next client is
+  served once any request it was handling has returned. Where a failed
+  host call's error is quoted, in the logs and in the replies of `/undo`,
+  `/marks`, `/hide`, `/unstick` and `/nudge`, it now reads in mcpl-core
+  0.4.0's words: without the `RPC error <code>: ` prefix; a timeout as
+  "<method> timed out: no reply came within <n> ms, so whether it ran is
+  unknown. Check its effect before retrying, since a retry may repeat
+  it."; and an error with no message, or with a message that isn't text,
+  as a sentence that says so.
+
+## 0.5.2 — 2026-10-28
+
+### Fixed
 
 - **A sender's words and chosen names can't take the shape of the server's
   own framing (#122).** Each line break in a message's text, an edit's, an
@@ -156,26 +168,32 @@ in the git log and PR descriptions.
   text, without those tag openings or a mentioned name that isn't plain,
   reads as it did before; a forward's attachment note moves, as above.
 
-- **A message holding U+2028 or U+2029 is no longer lost between
-  discord-mcpl and its host, and a TCP client's reset no longer ends the
-  process.** discord-mcpl now depends on `@animalabs/mcpl-core` `^0.4.0`.
-  It wrote U+2028 and U+2029 raw, so a host whose reader ends lines at
-  them, as `readline` does on Node 24 and later, lost a
-  `channels/incoming` message carrying either in its text, and any message
-  whose author's name holds either; it now writes them as `\u` escapes.
-  The reader discord-mcpl used, mcpl-core 0.2.1's, ended lines there too
-  on Node 24, so a host's call holding either raw was lost; it is now read
-  whole. A served TCP client whose connection was reset could raise an
-  uncaught error that ended the process, with the next client refused
-  meanwhile; now only that client's serving ends, and the next client is
-  served once any request it was handling has returned. Where a failed
-  host call's error is quoted, in the logs and in the replies of `/undo`,
-  `/marks`, `/hide`, `/unstick` and `/nudge`, it now reads in mcpl-core
-  0.4.0's words: without the `RPC error <code>: ` prefix; a timeout as
-  "<method> timed out: no reply came within <n> ms, so whether it ran is
-  unknown. Check its effect before retrying, since a retry may repeat
-  it."; and an error with no message, or with a message that isn't text,
-  as a sentence that says so.
+## 0.5.1 — 2026-10-27
+
+### Fixed
+
+- **`filters_update` refuses an update that would empty the server list,
+  or that it can't read as written.** A `removeGuilds` that removed the
+  last listed server left the list empty, and an empty list admits every
+  server the bot is in, so the agent heard every server, though the tool
+  says a removed server's events stop being delivered. Such a call is now
+  refused, and nothing changes; the refusal says to keep another server
+  listed, by adding one in the same call. Refused the same way, naming
+  the value it can't read:
+  - an `addGuilds` entry that isn't a server id, or a server id, a colon
+    and channel ids joined by `+` (`"111:"` and `"111::222"` were read as
+    the whole server, and `"111:+"` as an empty channel list);
+  - an id, in any of `addGuilds`, `removeGuilds` and `setDmUsers`, that
+    isn't a string or is empty, or has whitespace, a colon, a comma or a
+    plus sign inside it (a numeric id in `removeGuilds` lifted that
+    server's channel list instead of removing the server, and a
+    `setDmUsers` of empty strings admitted DMs from anyone).
+
+  Whitespace around an id is ignored, as it already was for channel ids,
+  and an argument given as `null` is read as left out. A call that sets
+  only the DM notice needs no filters file when the lists beside it are
+  `null` or an empty `addGuilds` or `removeGuilds`. A filters file with an
+  empty `guildIds` still means every server.
 
 ## 0.5.0 — 2026-10-26
 
