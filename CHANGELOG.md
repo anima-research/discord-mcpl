@@ -5,6 +5,32 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Fixed
+
+- **A catch-up that leaves older messages out says so (#53).** After a
+  restart, a channel's catch-up takes the newest `DISCORD_CATCHUP_LIMIT`
+  messages after its saved position, and when more had been sent, nothing
+  said the older ones were left out. Now the channel's `<missed>` tag
+  carries `older="left out"` and `after`, the id of the message the saved
+  position was at, so the messages left out were sent after that one. A
+  channel that isn't open gets that `<missed>` even when none of the
+  newest messages mentions the bot, since one left out may have, as
+  `count="0" lines="0" older="left out" after="…" reason="backscroll"`
+  with no lines. When the filters withhold every one of the newest
+  messages, or they're all the bot's own or start with `m continue`,
+  nothing is delivered for that channel, as before, and nothing says older
+  ones were left out. The older messages themselves still aren't
+  delivered, and nothing says how many there were. When the catch-up took
+  every message after its position, exactly as many as the limit included,
+  its delivery is as before. The log's count of channels the catch-up
+  delivered from leaves out a channel that got only that notice. No tool
+  description changes.
+- **A catch-up's saved position no longer stops short of messages sent in
+  the same millisecond (#53).** The catch-up ordered what it read by time,
+  so of two messages sent in one millisecond it could save the older as
+  the position and deliver the newer again at the next start. It now
+  orders them by their ids.
+
 ## 0.6.0 — 2026-10-30
 
 ### Added
