@@ -435,7 +435,7 @@ describe('reply and reaction tools', () => {
     assert.ok(blankId.isError && /messageId is blank, so it names no message; nothing was done\./.test(blankId.content[0].text), blankId.content[0].text);
     const blankBeside = await f.call('add_reaction', { messageId: '', latestFrom: 'Ra', emoji: '👍' });
     assert.ok(blankBeside.isError && /not both/.test(blankBeside.content[0].text), blankBeside.content[0].text);
-    const wrong = await f.call('add_reaction', { latestFrom: 42, emoji: '👍' });
+    const wrong = await f.call('add_reaction', { latestFrom: true, emoji: '👍' });
     assert.ok(wrong.isError && /latestFrom must be a string or null/.test(wrong.content[0].text), wrong.content[0].text);
     assert.deepEqual(f.calls, []);
   });
@@ -849,7 +849,7 @@ describe('reply and reaction tools after the second review (sw-dm64)', () => {
       ['both', { messageId: '200000000000000030', latestFrom: 'Ra' }, /not both/],
       ['neither', {}, /Give exactly one of messageId or latestFrom/],
       ['null on both', { messageId: null, latestFrom: null }, /Give exactly one of messageId or latestFrom/],
-      ['a non-string', { latestFrom: 42 }, /latestFrom must be a string or null/],
+      ['a non-string', { latestFrom: true }, /latestFrom must be a string or null/],
       ['blank', { latestFrom: '   ' }, /latestFrom is blank, so it names no one/],
       ['a blank beside a real one', { messageId: '', latestFrom: 'Ra' }, /not both/],
       ['@ alone', { latestFrom: '@' }, /latestFrom names no one/],
