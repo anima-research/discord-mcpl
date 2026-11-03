@@ -5,6 +5,31 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Added
+
+- **Late deliveries say when they were sent and when they arrived.** A
+  message delivered as it arrives, outside a `<missed>` block, that
+  discord-mcpl hands to the host more than two minutes after Discord's
+  timestamp now carries `[delayed delivery · sent <time> · received <time>]`
+  on a line of its own just before the message and its `[replying to …]`
+  line if it has one, after any notice or backscroll that comes with it, and
+  a `chat:late` tag and `sentAt`/`receivedAt` metadata, on
+  `channels/incoming` and `push/event` alike, so it can't read as
+  just-arrived and gates can route on it. "Received" is when discord-mcpl
+  first handed the message on, after fetching its attachments, and a resend
+  of the same delivery carries the same line. On a host that coalesces
+  events, an edit that replaces the message keeps the line in its text while
+  discord-mcpl still remembers the message, which it does for a bounded
+  number of recent messages and not across a restart. The edit's own tags
+  and metadata describe the edit. Both `<missed>` blocks, the reconnect
+  catch-up's and the undelivered one, gain `received="…"` in their lines'
+  time zone and style, and none under `AGENT_TIMESTAMP_STYLE=none`, where
+  their lines carry no times either. The late line's times are in the
+  agent's time zone and style, with the date added for the `time` style, and
+  in UTC ISO for `none`. They compare Discord's time with the clock of the
+  machine discord-mcpl runs on, so a clock running more than two minutes
+  fast marks every message late.
+
 ## 0.6.0 — 2026-10-30
 
 ### Added
