@@ -27,6 +27,7 @@ import type {
 } from '@animalabs/mcpl-core';
 
 import { DiscordMcplServer, serveStdio, serveTcp } from '../src/server.js';
+import { formatAgentDateTime, resolveAgentTimeZone, resolveTimestampStyle } from '../src/timezone.js';
 import { agentJson, senderText } from '../src/source-header.js';
 import { parseChannelRef } from '../src/channel-names.js';
 import { applyMentionCandidates } from '../src/discord-adapter.js';
@@ -2345,6 +2346,7 @@ describe('DiscordMcplServer', () => {
         ] },
       ];
       const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+      const before = Date.now();
       const serverPromise = server.serve(serverConn);
 
       await mcplHandshake(client);
@@ -2354,6 +2356,7 @@ describe('DiscordMcplServer', () => {
       if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
 
       const missed = await client.nextMessage();
+      const after = Date.now();
       assert.equal(missed.type, 'request');
       if (missed.type === 'request') {
         assert.equal(missed.request.method, method.PUSH_EVENT);
@@ -2366,6 +2369,15 @@ describe('DiscordMcplServer', () => {
         assert.ok(text.includes('count="1"'), 'only one delivered line is a mention');
         assert.ok(text.includes('lines="2"'), 'the nearby context line is included');
         assert.ok(text.includes('reason="mention"'));
+        const style = resolveTimestampStyle();
+        const shown = new Set<string>();
+        for (let ms = before - (before % 1000); ms <= after; ms += 1000) {
+          shown.add(formatAgentDateTime(new Date(ms), resolveAgentTimeZone(), style));
+        }
+        const received = /^<missed [^>]*reason="mention"(?: received="([^"]+)")?>/m.exec(text);
+        assert.ok(received, text);
+        if (formatAgentDateTime(new Date(), resolveAgentTimeZone(), style)) assert.ok(shown.has(received[1] ?? ''), `received ${received[1]} not within the sweep: ${[...shown].join(', ')}`);
+        else assert.equal(received[1], undefined);
         assert.ok(text.includes('Bob'), 'mention author present');
         assert.ok(text.includes('just chatting'), 'nearby non-mention context included');
         assert.ok(text.includes('[reactions: 👍 x2 (incl. me), :blob: x1]'), 'current reaction state on the mention line');

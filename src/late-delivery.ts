@@ -4,6 +4,15 @@ import { formatAgentDateTime, type TimestampStyle } from './timezone.js';
  *  late delivery (reconnect catch-up, a restored range, a delayed queue). */
 export const LATE_DELIVERY_THRESHOLD_MS = 2 * 60 * 1000;
 
+export function deliveryTime(d: Date, timeZone: string, style: TimestampStyle): string {
+  return formatAgentDateTime(d, timeZone, style === 'time' ? 'compact' : style) || d.toISOString();
+}
+
+export function receivedAttribute(d: Date, timeZone: string, style: TimestampStyle): string {
+  const shown = formatAgentDateTime(d, timeZone, style);
+  return shown ? `received="${shown}"` : '';
+}
+
 /** The line shown above a late message so it can't read as just-arrived:
  *  `[delayed delivery · sent <t> · received <t>]`, or '' when on time. */
 export function lateDeliveryLine(
@@ -14,6 +23,5 @@ export function lateDeliveryLine(
   thresholdMs: number = LATE_DELIVERY_THRESHOLD_MS,
 ): string {
   if (received.getTime() - sent.getTime() <= thresholdMs) return '';
-  const fmt = (d: Date) => formatAgentDateTime(d, timeZone, style) || d.toISOString();
-  return `[delayed delivery · sent ${fmt(sent)} · received ${fmt(received)}]\n`;
+  return `[delayed delivery · sent ${deliveryTime(sent, timeZone, style)} · received ${deliveryTime(received, timeZone, style)}]\n`;
 }

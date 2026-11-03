@@ -18,6 +18,7 @@ import type { ContentBlock } from '@animalabs/mcpl-core';
 import type { DiscordAdapter, MessageEventInfo } from '../src/discord-adapter.js';
 import { ChannelManager, toDescriptor } from '../src/channels.js';
 import { DiscordMcplServer } from '../src/server.js';
+import { formatAgentDateTime, resolveAgentTimeZone, resolveTimestampStyle } from '../src/timezone.js';
 import {
   advertisedRetryWindowMs,
   answerClass,
@@ -160,6 +161,16 @@ async function deliver(server: DiscordMcplServer, image: string | null, extra: C
     attachments: image === null ? [] : [{ name: 'shot.png', contentType: 'image/png', size: 900_000, url: 'https://cdn.example/shot.png' }],
   });
 }
+
+const receivedShown = formatAgentDateTime(new Date(), resolveAgentTimeZone(), resolveTimestampStyle()) !== '';
+const receivedPart = receivedShown ? ' received="[^"]+"' : '';
+
+const blockTime = (d: Date): string => formatAgentDateTime(d, resolveAgentTimeZone(), resolveTimestampStyle());
+
+const shownTime = (d: Date): string => {
+  const style = resolveTimestampStyle();
+  return formatAgentDateTime(d, resolveAgentTimeZone(), style === 'time' ? 'compact' : style) || d.toISOString();
+};
 
 const contentOf = (req: { method: string; params: any }): ContentBlock[] =>
   req.method === 'channels/incoming' ? req.params.messages[0].content : req.params.payload.content;
@@ -1226,7 +1237,7 @@ describe('owed messages', () => {
     assert.equal(pushes[0].params.origin.mcplChannelId, 'discord:g1:chan1');
     assert.equal(pushes[0].params.origin.isMention, true);
     const block = blockOf(pushes[0]);
-    assert.match(block, /^<missed channel="#general" channelId="chan1" guild="Guild" count="2" reason="undelivered">/m);
+    assert.match(block, new RegExp(`^<missed channel="#general" channelId="chan1" guild="Guild" count="2" reason="undelivered"${receivedPart}>`, 'm'));
     assert.match(block, /\[The host didn't take these messages when they were sent; this is how Discord has them now\.\]/);
     assert.match(block, /id=m1\] someone: first$/m);
     assert.match(block, /id=m2\] someone \(mention\) \(edited\) \(may have arrived already\): second, edited since$/m);
@@ -1481,7 +1492,7 @@ describe('owed messages', () => {
     (server as any).owe('chan1', 'm1', { uncertain: false });
     await (server as any).deliverOwed((server as any).conn);
     const push = owedPushes(sent)[0];
-    assert.match(blockOf(push), /<missed channelId="chan1" dm="true" count="1" reason="undelivered">/);
+    assert.match(blockOf(push), new RegExp(`<missed channelId="chan1" dm="true" count="1" reason="undelivered"${receivedPart}>`));
     assert.equal(push.params.origin.isDM, true);
     assert.equal(push.params.origin.isMention, true);
   });
@@ -1747,5 +1758,136 @@ describe('owed messages', () => {
     const ids = (server as any).owed.get('chan1').map((o: { id: string }) => o.id);
     assert.equal(ids.length, 50);
     assert.equal(ids[0], 'm2');
+  });
+  it('an undelivered block says when it was handed on, and the same owed messages sent again later are the same occurrence', async (t) => {
+    const first = Date.parse('2026-11-03T07:00:00Z');
+    t.mock.timers.enable({ apis: ['Date'], now: first });
+    const { server, sent } = wire(() => ({ accepted: false, reason: 'busy' }));
+    onDiscord(server, [history('m1', 'first')]);
+    (server as any).owe('chan1', 'm1', { uncertain: false });
+    await (server as any).deliverOwed((server as any).conn);
+    t.mock.timers.tick(10 * 60_000);
+    await (server as any).deliverOwed((server as any).conn);
+    const pushes = owedPushes(sent);
+    assert.equal(pushes.length, 2);
+    assert.equal(pushes[0].params.eventId, pushes[1].params.eventId);
+    const receivedOf = (req: { params: any }) => /^<missed [^>]*received="([^"]+)">/m.exec(blockOf(req))?.[1];
+    assert.equal(receivedOf(pushes[0]), receivedShown ? blockTime(new Date(first)) : undefined);
+    assert.equal(receivedOf(pushes[1]), receivedShown ? blockTime(new Date(first + 10 * 60_000)) : undefined);
+  });
+});
+
+describe('late deliveries', () => {
+  beforeEach(captureErrors);
+  afterEach(restoreErrors);
+  const SENT = Date.parse('2026-11-03T07:00:00Z');
+  const message = (over: Record<string, unknown> = {}) => ({
+    id: 'm1', content: 'hello', cleanContent: 'hello', authorId: 'u1', authorName: 'someone',
+    isBot: false, channelId: 'chan1', guildId: 'g1', guildName: 'Guild', channelName: 'general',
+    mentions: [], timestamp: new Date(SENT), attachments: [], ...over,
+  });
+  const accept: Responder = (m) => (m === 'channels/incoming' ? { results: [{ messageId: 'm1', accepted: true }] } : { accepted: true });
+  const textOf = (req: { method: string; params: any }): string => contentOf(req).map((b: any) => b.text ?? '').join('\n');
+  const timesOf = (req: { method: string; params: any }): any =>
+    req.method === 'channels/incoming' ? req.params.messages[0].metadata : req.params.origin;
+  const tagsOf = (req: { method: string; params: any }): string[] =>
+    req.method === 'channels/incoming' ? req.params.messages[0].tags : req.params.tags;
+
+  for (const lane of ['channels/incoming', 'push/event'] as const) {
+    it(`a ${lane} message handed on more than 2 minutes after it was sent opens with when it was sent and received, tagged chat:late`, async (t) => {
+      const received = SENT + 2 * 60_000 + 1;
+      t.mock.timers.enable({ apis: ['Date'], now: received });
+      const { server, sent } = wire(accept, { open: lane === 'channels/incoming' });
+      await (server as any).handleDiscordMessage(message());
+      assert.equal(sent[0].method, lane);
+      const line = `[delayed delivery · sent ${shownTime(new Date(SENT))} · received ${shownTime(new Date(received))}]\n`;
+      assert.ok(textOf(sent[0]).startsWith(line), textOf(sent[0]));
+      assert.ok(tagsOf(sent[0]).includes('chat:late'), tagsOf(sent[0]).join(', '));
+      assert.equal(timesOf(sent[0]).sentAt, new Date(SENT).toISOString());
+      assert.equal(timesOf(sent[0]).receivedAt, new Date(received).toISOString());
+    });
+
+    it(`a ${lane} message handed on 2 minutes after it was sent has no line, tag or times`, async (t) => {
+      t.mock.timers.enable({ apis: ['Date'], now: SENT + 2 * 60_000 });
+      const { server, sent } = wire(accept, { open: lane === 'channels/incoming' });
+      await (server as any).handleDiscordMessage(message());
+      assert.equal(sent[0].method, lane);
+      assert.doesNotMatch(textOf(sent[0]), /delayed delivery/);
+      assert.ok(!tagsOf(sent[0]).includes('chat:late'));
+      assert.equal(timesOf(sent[0]).sentAt, undefined);
+      assert.equal(timesOf(sent[0]).receivedAt, undefined);
+    });
+  }
+
+  it("the received time is read once the message's attachments are fetched", async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: SENT + 90_000 });
+    const { server, sent } = wire(accept);
+    (server as any).buildAttachmentBlocks = async (): Promise<ContentBlock[]> => {
+      await new Promise((r) => setImmediate(r));
+      t.mock.timers.tick(60_000);
+      return [textContent('[file attachment: notes.txt — https://cdn.example/notes.txt]')];
+    };
+    await (server as any).handleDiscordMessage(message({
+      attachments: [{ name: 'notes.txt', contentType: 'text/plain', size: 10, url: 'https://cdn.example/notes.txt' }],
+    }));
+    assert.match(textOf(sent[0]), /^\[delayed delivery · sent /);
+    assert.equal(timesOf(sent[0]).receivedAt, new Date(SENT + 150_000).toISOString());
+  });
+
+  it('a resend of the same delivery carries the text of its first hand-off', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: SENT + 90_000 });
+    const { server, sent } = wire((_m, _p, n) => {
+      if (n === 1) {
+        t.mock.timers.tick(3 * 60_000);
+        throw rpcError(-32603, 'Internal error');
+      }
+      return { accepted: true };
+    });
+    await (server as any).handleDiscordMessage(message());
+    assert.equal(sent.length, 2);
+    assert.equal(eventIdOf(sent[1]), eventIdOf(sent[0]));
+    assert.equal(textOf(sent[1]), textOf(sent[0]));
+    assert.doesNotMatch(textOf(sent[1]), /delayed delivery/);
+  });
+
+  it('a resend of a late delivery carries the line and times of its first hand-off', async (t) => {
+    const first = SENT + 5 * 60_000;
+    t.mock.timers.enable({ apis: ['Date'], now: first });
+    const { server, sent } = wire((_m, _p, n) => {
+      if (n === 1) {
+        t.mock.timers.tick(3 * 60_000);
+        throw rpcError(-32603, 'Internal error');
+      }
+      return { accepted: true };
+    });
+    await (server as any).handleDiscordMessage(message());
+    assert.equal(sent.length, 2);
+    assert.equal(textOf(sent[1]), textOf(sent[0]));
+    assert.ok(textOf(sent[1]).startsWith(`[delayed delivery · sent ${shownTime(new Date(SENT))} · received ${shownTime(new Date(first))}]\n`), textOf(sent[1]));
+    assert.equal(timesOf(sent[1]).receivedAt, new Date(first).toISOString());
+  });
+
+  it('an edit that replaces a late create keeps its line', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: SENT + 5 * 60_000 });
+    const { server, sent, edit } = wire(accept);
+    await (server as any).handleDiscordMessage(message());
+    edit()('chan1', 'm1', 'hello again', false, { guildId: 'g1', authorId: 'u1', authorName: 'someone' });
+    await turnsUntil(() => sent.length === 2);
+    const createLine = textOf(sent[0]).split('\n')[0];
+    assert.match(createLine, /^\[delayed delivery · sent .+\]$/);
+    assert.match(textOf(sent[1]), /^[^\n]+\n[^\n]*someone \[edited\]: hello again$/);
+    assert.equal(textOf(sent[1]).split('\n')[0], createLine);
+  });
+
+  it("a first DM's line sits directly above the message, after the DM notice", async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: SENT + 5 * 60_000 });
+    const { server, sent } = wire(accept);
+    (server as any).discord.fetchHistory = async () => [];
+    await (server as any).handleDiscordMessage(message({ guildId: null, guildName: null, channelId: 'dm1', channelName: null }));
+    const lines = textOf(sent[0]).split('\n');
+    const at = lines.findIndex((l) => l.startsWith('[delayed delivery · '));
+    assert.ok(at > 0, textOf(sent[0]));
+    assert.match(lines[at - 1], /<\/system>$/);
+    assert.match(lines[at + 1], /someone: hello$/);
   });
 });
