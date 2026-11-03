@@ -4,12 +4,10 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Client } from 'discord.js';
+import { DiscordAdapter } from '../src/discord-adapter.js';
 
 const tempDir = mkdtempSync(join(tmpdir(), 'discord-mcpl-gateway-log-'));
 const debugLog = join(tempDir, 'debug.log');
-process.env.DISCORD_MCPL_DEBUG_LOG = debugLog;
-
-const { DiscordAdapter } = await import('../src/discord-adapter.js');
 
 interface LogEntry {
   tag: string;
@@ -32,8 +30,11 @@ describe('Discord gateway diagnostics', () => {
   let adapter: InstanceType<typeof DiscordAdapter>;
   let client: Client;
   let emit: (event: string, ...args: unknown[]) => boolean;
+  let previousLog: string | undefined;
 
   before(() => {
+    previousLog = process.env.DISCORD_MCPL_DEBUG_LOG;
+    process.env.DISCORD_MCPL_DEBUG_LOG = debugLog;
     adapter = new DiscordAdapter({ token: 'not-used', guildIds: ['allowed-guild'] });
     client = (adapter as unknown as { client: Client }).client;
     emit = client.emit.bind(client) as unknown as (event: string, ...args: unknown[]) => boolean;
@@ -41,6 +42,7 @@ describe('Discord gateway diagnostics', () => {
 
   after(() => {
     client.destroy();
+    if (previousLog === undefined) delete process.env.DISCORD_MCPL_DEBUG_LOG; else process.env.DISCORD_MCPL_DEBUG_LOG = previousLog;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
