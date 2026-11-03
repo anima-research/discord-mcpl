@@ -40,7 +40,7 @@ import type {
   ChannelsOutgoingCompleteParams,
 } from '@animalabs/mcpl-core';
 
-import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, MentionsField, PostedParts, ThreadPlace } from './discord-adapter.js';
+import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, ForwardOrigin, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, MentionsField, PostedParts, ThreadPlace } from './discord-adapter.js';
 import { LATEST_FROM_WINDOW, attachmentUrlExpiry, holdsNoMessages, isListedKind, kindOfValue } from './discord-adapter.js';
 import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, type DmNoticeDecision } from './dm-notices.js';
 
@@ -183,6 +183,13 @@ function messagePlace(channelName: string | null | undefined, thread: ThreadPlac
   return thread.threadId
     ? { channel: thread.threadParentName ?? null, thread: thread.threadName ?? thread.threadId }
     : { channel: channelName ?? null, thread: null };
+}
+
+function forwardedFrom(origin: ForwardOrigin | undefined): string {
+  if (!origin) return '';
+  if (origin.channel === undefined) return ` [forwarded from another ${origin.otherServer ? 'server' : 'channel'}]`;
+  const channel = /\s/.test(origin.channel) ? quotedLabel(origin.channel) : nameValue(origin.channel);
+  return ` [forwarded from #${channel}${origin.server === undefined ? '' : ` in ${nameValue(origin.server)}`}]`;
 }
 
 /** No MCPL threadId: that names a thread within a channel, and a Discord
@@ -531,7 +538,7 @@ interface CreateMemory {
   done: boolean;
   /** Coalescing scope the create used (RFC-006): a channel id, or null for feature-set scope. */
   scope?: string | null;
-  render?: { prefix: string; replyMarker: string; location: string; authorName: string; attachments: ContentBlock[] };
+  render?: { prefix: string; replyMarker: string; location: string; authorName: string; forwarded: string; attachments: ContentBlock[] };
   edits: number;
 }
 const RECENT_CREATES_MAX = 512;
@@ -2736,7 +2743,7 @@ export class DiscordMcplServer {
       m.attachments && m.attachments.length > 0
         ? ` [attachments: ${m.attachments.map((a) => nameValue(a.name)).join(', ')}]`
         : '';
-    return `[${ts ? `${ts} ` : ''}id=${m.id}] ${nameValue(m.authorName)}${mark}${att}${this.renderReactionState(m.reactions)}: ${senderText(m.cleanContent)}`;
+    return `[${ts ? `${ts} ` : ''}id=${m.id}] ${nameValue(m.authorName)}${forwardedFrom(m.forwardedFrom)}${mark}${att}${this.renderReactionState(m.reactions)}: ${senderText(m.cleanContent)}`;
   }
 
   private owe(channelId: string, messageId: string, how: { uncertain: boolean; edit?: boolean }): void {
@@ -3602,7 +3609,7 @@ export class DiscordMcplServer {
         messageId: message.id,
         author: { id: message.authorId, name: message.authorName },
         timestamp: message.timestamp.toISOString(),
-        content: [textContent(`${nameValue(message.authorName)}: ${senderText(message.cleanContent)}`)],
+        content: [textContent(`${nameValue(message.authorName)}${forwardedFrom(message.forwardedFrom)}: ${senderText(message.cleanContent)}`)],
         metadata: {
           isBot: message.isBot,
           attachments: message.attachments,
@@ -3880,7 +3887,7 @@ export class DiscordMcplServer {
     // An edit may replace the unread create (RFC-006 §4.1), so it must be as self-contained as the create was.
     const render = this.hostCoalescing?.pushEvents ? mem?.render : undefined;
     const content: ContentBlock[] = render
-      ? [textContent(`${render.prefix}${render.replyMarker}${render.location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
+      ? [textContent(`${render.prefix}${render.replyMarker}${render.location}${nameValue(render.authorName)}${render.forwarded} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
       : [textContent(`[message edited] ${who}${senderText(newContent)}`)];
     const params: CoalescedPushEventParams = {
       featureSet: 'discord.messaging',
@@ -4468,7 +4475,7 @@ export class DiscordMcplServer {
           const att = m.attachments && m.attachments.length > 0
             ? ` [attachments: ${m.attachments.map((a) => nameValue(a.name)).join(', ')}]`
             : '';
-          return `${ts ? `[${ts}] ` : ''}${nameValue(m.authorName)}${att}${this.renderReactionState(m.reactions)}: ${senderText(m.cleanContent)}`;
+          return `${ts ? `[${ts}] ` : ''}${nameValue(m.authorName)}${forwardedFrom(m.forwardedFrom)}${att}${this.renderReactionState(m.reactions)}: ${senderText(m.cleanContent)}`;
         });
         blocks.push([open, ...lines, '</backscroll>'].join('\n'));
       }
@@ -4504,7 +4511,7 @@ export class DiscordMcplServer {
     const replyMarker = msg.replyToId
       ? `[replying to ${msg.replyToUserName ? `@${nameValue(msg.replyToUserName)}` : 'unknown author'}]\n`
       : '';
-    const renderedContent = `${prefixBlock}${replyMarker}${location}${nameValue(msg.authorName)}: ${senderText(msg.cleanContent)}`;
+    const renderedContent = `${prefixBlock}${replyMarker}${location}${nameValue(msg.authorName)}${forwardedFrom(msg.forwardedFrom)}: ${senderText(msg.cleanContent)}`;
     if (isDM || !this.deletedLately(guildId, msg.channelId)) this.forwardedWatermark.set(msg.channelId, msg.id);
     if (isDM) this.dmChannelIds.add(msg.channelId);
     this.saveWatermark();
@@ -4543,7 +4550,7 @@ export class DiscordMcplServer {
     })();
 
     mem.render = {
-      prefix: prefixBlock, replyMarker, location, authorName: msg.authorName,
+      prefix: prefixBlock, replyMarker, location, authorName: msg.authorName, forwarded: forwardedFrom(msg.forwardedFrom),
       attachments: rememberedAttachments(attachmentBlocks),
     };
 
