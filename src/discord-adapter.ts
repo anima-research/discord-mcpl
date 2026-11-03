@@ -243,6 +243,14 @@ export interface DiscordMessageData extends ThreadPlace {
   attachments: DiscordAttachment[];
   reactions?: ReactionSummary[];
   timestamp: Date;
+  forwardedFrom?: ForwardOrigin;
+}
+
+/** Where a forward came from. `channel`, and `server` when that channel is in another server than the forward's, are set only when the client's cache holds them with facts not marked stale and the configured filters allow that channel. */
+export interface ForwardOrigin {
+  channel?: string;
+  server?: string;
+  otherServer: boolean;
 }
 
 export interface DiscordGuildInfo {
@@ -337,6 +345,7 @@ export interface HistoryMessage {
   mentionsBot: boolean;
   reactions?: ReactionSummary[];
   timestamp: Date;
+  forwardedFrom?: ForwardOrigin;
 }
 
 export interface ReactionSummary {
@@ -400,29 +409,19 @@ interface ForwardSnapshot {
   content?: string | null;
   attachments?: { size: number; values?(): IterableIterator<unknown> } | null;
   embeds?: { length: number } | null;
-  /** Users the snapshot payload says it mentions (discord.js Collection). */
-  mentions?: { users?: { get(id: string): { username: string; globalName?: string | null } | undefined } } | null;
-}
-
-/** How to present forwarded snapshots: resolve raw mention tokens, and say
- *  where the forward came from when that isn't the channel it landed in. */
-export interface ForwardRenderOptions {
-  renderMentions?: (text: string, snap: ForwardSnapshot) => string;
-  origin?: string;
 }
 
 /** Discord forwards carry their body in `messageSnapshots` (discord.js ≥14.16), not `content`. */
 export function buildForwardedContent(
   baseContent: string,
   snapshots: Iterable<ForwardSnapshot>,
-  opts: ForwardRenderOptions = {},
+  nameMentions: (text: string) => string = (text) => text,
 ): string {
   const parts: string[] = [];
-  const label = opts.origin ? `[forwarded message from ${opts.origin}]` : '[forwarded message]';
   for (const snap of snapshots) {
     const text =
       typeof snap.content === 'string' && snap.content.trim().length > 0
-        ? renderCustomEmojis(opts.renderMentions ? opts.renderMentions(snap.content, snap) : snap.content)
+        ? renderCustomEmojis(nameMentions(snap.content))
         : null;
     const attachmentCount = snap.attachments?.size ?? 0;
     const notes: string[] = [];
@@ -431,7 +430,7 @@ export function buildForwardedContent(
     }
     if (!text && (snap.embeds?.length ?? 0) > 0) notes.push('[embed]');
     const body = [...notes, text].filter(Boolean).join(' ');
-    parts.push(`${label} ${body || '[no text content]'}`);
+    parts.push(`[forwarded message] ${body || '[no text content]'}`);
   }
   if (parts.length === 0) return baseContent;
   const forwarded = parts.join('\n');
@@ -526,7 +525,7 @@ export function resolveVisibleContent(m: {
   channel?: unknown;
   messageSnapshots?: { size: number; values(): Iterable<ForwardSnapshot> } | null;
   type?: MessageType;
-}, forward?: ForwardRenderOptions): string {
+}): string {
   const cleaned = mentionNamedContent(m);
   let base =
     typeof cleaned === 'string' && cleaned.length > 0
@@ -536,7 +535,7 @@ export function resolveVisibleContent(m: {
     base = systemMessageText(m.type);
   }
   return m.messageSnapshots && m.messageSnapshots.size > 0
-    ? buildForwardedContent(base, m.messageSnapshots.values(), forward)
+    ? buildForwardedContent(base, m.messageSnapshots.values(), (text) => mentionNamedContent({ content: text, channel: m.channel }) ?? text)
     : base;
 }
 
@@ -762,42 +761,17 @@ export class DiscordAdapter {
     this.setupEvents();
   }
 
-  /** Forwarded snapshots have no `cleanContent`, so their mentions arrive as
-   *  raw `<@id>` / `<@&id>` / `<#id>` tokens, and nothing says where the
-   *  forward came from. Resolve what the snapshot payload and the gateway
-   *  cache already know — no extra API calls — and leave unknown ids raw. */
-  private forwardRendering(m: Message): ForwardRenderOptions {
-    const guild = m.guild;
-    const renderMentions = (text: string, snap: ForwardSnapshot): string =>
-      text.replace(/<(@!?|@&|#)(\d{15,25})>/g, (token, kind: string, id: string) => {
-        if (kind === '@&') {
-          const role = guild?.roles.cache.get(id);
-          return role ? `@${role.name}` : token;
-        }
-        if (kind === '#') {
-          const channel = this.client.channels.cache.get(id) as { name?: string } | undefined;
-          return channel?.name ? `#${channel.name}` : token;
-        }
-        const member = guild?.members.cache.get(id);
-        const user = snap.mentions?.users?.get(id) ?? this.client.users.cache.get(id);
-        const name = member?.displayName ?? user?.globalName ?? user?.username;
-        return name ? `@${name}` : token;
-      });
-
-    let origin: string | undefined;
+  private forwardOrigin(m: Message): ForwardOrigin | undefined {
     const ref = m.reference;
-    if (ref?.channelId && ref.channelId !== m.channelId) {
-      const source = this.client.channels.cache.get(ref.channelId) as
-        | { name?: string; guild?: { id: string; name: string } }
-        | undefined;
-      if (source?.name) {
-        const otherGuild = source.guild && source.guild.id !== m.guildId ? ` (${source.guild.name})` : '';
-        origin = `#${source.name}${otherGuild}`;
-      } else if (ref.guildId && ref.guildId !== m.guildId) {
-        origin = 'another server';
-      }
+    if (!m.messageSnapshots?.size || !ref?.channelId || ref.channelId === m.channelId || !ref.guildId) return undefined;
+    const otherServer = ref.guildId !== m.guildId;
+    const source = this.client.channels.cache.get(ref.channelId) as { name?: string | null; parentId?: string | null } | undefined;
+    const server = otherServer ? this.client.guilds.cache.get(ref.guildId)?.name : undefined;
+    if (!source?.name || (otherServer && !server) || this.isStale(ref.channelId)
+      || !this.channelAdmitted(ref.guildId, ref.channelId, source.parentId ?? null)) {
+      return { otherServer };
     }
-    return { renderMentions, origin };
+    return { channel: source.name, ...(server ? { server } : {}), otherServer };
   }
 
   async connect(): Promise<void> {
@@ -1426,7 +1400,8 @@ export class DiscordAdapter {
           hitWatermark = true;
           break;
         }
-        const cleanContent = renderCustomEmojis(resolveVisibleContent(m, this.forwardRendering(m)));
+        const cleanContent = renderCustomEmojis(resolveVisibleContent(m));
+        const forwardedFrom = this.forwardOrigin(m);
         collected.push({
           id: m.id,
           authorId: m.author.id,
@@ -1440,6 +1415,7 @@ export class DiscordAdapter {
           reactions: extractReactions(m),
           mentionsBot: this.messageMentionsBot(m),
           timestamp: m.createdAt,
+          ...(forwardedFrom ? { forwardedFrom } : {}),
         });
         if (collected.length >= requested) break;
       }
@@ -1470,7 +1446,8 @@ export class DiscordAdapter {
       limit: pageLimit,
     });
     const collected: HistoryMessage[] = [...page.values()].map((m) => {
-      const cleanContent = renderCustomEmojis(resolveVisibleContent(m, this.forwardRendering(m)));
+      const cleanContent = renderCustomEmojis(resolveVisibleContent(m));
+      const forwardedFrom = this.forwardOrigin(m);
       return {
         id: m.id,
         authorId: m.author.id,
@@ -1484,6 +1461,7 @@ export class DiscordAdapter {
         reactions: extractReactions(m),
         mentionsBot: this.messageMentionsBot(m),
         timestamp: m.createdAt,
+        ...(forwardedFrom ? { forwardedFrom } : {}),
       };
     });
     // discord.js returns the `around` window unsorted; present oldest → newest.
@@ -2904,7 +2882,8 @@ export class DiscordAdapter {
     const channel = message.channel as { name?: string } | null;
     const channelName = this.knownName(message.channelId, channel?.name);
     const guildName = message.guild?.name ?? null;
-    const content = resolveVisibleContent(message, this.forwardRendering(message));
+    const content = resolveVisibleContent(message);
+    const forwardedFrom = this.forwardOrigin(message);
     // A forward's reference points at its origin message, with reference type Forward.
     const refType = (message.reference as { type?: number } | null)?.type ?? 0;
     return {
@@ -2924,6 +2903,7 @@ export class DiscordAdapter {
       ...this.addressFacts(message),
       attachments: mapAllAttachments(message),
       timestamp: message.createdAt,
+      ...(forwardedFrom ? { forwardedFrom } : {}),
     };
   }
 
