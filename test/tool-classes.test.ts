@@ -1,0 +1,67 @@
+import { describe, it } from 'node:test';
+import * as assert from 'node:assert/strict';
+
+import { toolDefinitions, type ToolDefinition } from '../src/tools.js';
+import {
+  TOOL_CLASSES,
+  TOOL_CLASS_META_KEY,
+  TOOL_CLASS_VOCABULARY,
+  UNCLASSED,
+  withToolClasses,
+} from '../src/tool-classes.js';
+
+const listed = toolDefinitions.map((t) => t.name);
+
+const isClassed = (name: string): boolean => Object.hasOwn(TOOL_CLASSES, name);
+const isAccountedFor = (name: string): boolean => isClassed(name) || UNCLASSED.has(name);
+
+describe('MCPL RFC-008 tool classes', () => {
+  it('every listed tool is classed or deliberately unclassed', () => {
+    assert.ok(listed.length > 0);
+    const missing = listed.filter((n) => !isAccountedFor(n));
+    assert.deepEqual(missing, [], `add these to TOOL_CLASSES or UNCLASSED in src/tool-classes.ts: ${missing.join(', ')}`);
+  });
+
+  it('every class is from the RFC-008 vocabulary, non-empty and without repeats', () => {
+    const vocabulary = new Set<string>(TOOL_CLASS_VOCABULARY);
+    for (const [name, classes] of Object.entries(TOOL_CLASSES)) {
+      assert.ok(classes.length > 0, `${name}: empty class list (use UNCLASSED instead)`);
+      assert.equal(new Set(classes).size, classes.length, `${name}: repeated class`);
+      for (const c of classes) assert.ok(vocabulary.has(c), `${name}: '${c}' is not an RFC-008 class`);
+    }
+  });
+
+  it("tools that carry or read people's messages are comms", () => {
+    for (const name of [
+      'send_message', 'reply_message', 'send_dm', 'edit_message', 'delete_message',
+      'fetch_history', 'fetch_around',
+    ]) {
+      assert.ok(TOOL_CLASSES[name]?.includes('comms'), `${name} must be comms`);
+    }
+  });
+
+  it('merges into existing _meta without overwriting or mutating it', () => {
+    const tool: ToolDefinition = {
+      name: 'send_message',
+      description: 'x',
+      inputSchema: { type: 'object', properties: {} },
+      _meta: { featureSet: 'discord.messaging' },
+    };
+    const out = withToolClasses(tool);
+    assert.deepEqual(out._meta, {
+      featureSet: 'discord.messaging',
+      [TOOL_CLASS_META_KEY]: ['comms', 'files'],
+    });
+    assert.deepEqual(tool._meta, { featureSet: 'discord.messaging' }, 'input untouched');
+  });
+
+  it('an unclassed tool carries no mcpl/class key', () => {
+    const tool: ToolDefinition = {
+      name: 'not_a_real_tool',
+      description: 'x',
+      inputSchema: { type: 'object', properties: {} },
+    };
+    assert.deepEqual(withToolClasses(tool), tool);
+    assert.equal(withToolClasses({ ...tool, name: 'constructor' })._meta, undefined, 'a name inherited from Object.prototype is no class');
+  });
+});

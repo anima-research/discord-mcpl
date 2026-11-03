@@ -1,8 +1,3 @@
-/**
- * Unit tests for forwarded-message rendering and reaction snippets
- * (pure helpers in discord-adapter.ts — no Discord connection).
- */
-
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 
@@ -14,7 +9,6 @@ import {
   resolveVisibleContent,
 } from '../src/discord-adapter.js';
 
-/** Fake discord.js attachment Collection over raw attachment records. */
 function attachmentColl(
   atts: Array<{ id: string; name?: string | null; url?: string; contentType?: string | null; size?: number }>,
 ) {
@@ -33,7 +27,6 @@ function attachmentColl(
   };
 }
 
-/** Minimal stand-in for a discord.js Message with forwarded snapshots. */
 function fakeMessage(opts: {
   content?: string;
   cleanContent?: string | null;
@@ -124,7 +117,7 @@ describe('buildForwardedContent', () => {
   it('keeps text AND attachment note when a forward has both', () => {
     assert.equal(
       buildForwardedContent('', [{ content: 'caption', attachments: { size: 1 } }]),
-      '[forwarded message] caption [1 attachment]',
+      '[forwarded message] [1 attachment] caption',
     );
   });
 
@@ -152,9 +145,6 @@ describe('buildForwardedContent', () => {
 
 describe('resolveVisibleContent (shared by live + history paths)', () => {
   it('renders a bare forward from its snapshot — the history-path regression', () => {
-    // fetchHistory/fetchAround build HistoryMessages through this helper; a
-    // bare forward must not come back as an empty message on backscroll or
-    // the reconnect catch-up sweep.
     const m = fakeMessage({ content: '', cleanContent: '', snapshots: [{ content: 'origin text' }] });
     assert.equal(resolveVisibleContent(m), '[forwarded message] origin text');
   });
@@ -185,7 +175,7 @@ describe('resolveVisibleContent (shared by live + history paths)', () => {
     });
     assert.equal(
       resolveVisibleContent(m),
-      'check this\n[forwarded message] forwarded body [1 attachment]',
+      'check this\n[forwarded message] [1 attachment] forwarded body',
     );
   });
 
@@ -256,7 +246,7 @@ describe('mapAllAttachments (forwarded media rides the normal delivery path)', (
     const m = { attachments: attachmentColl([{ id: '9', size: 5 }]) };
     const mapped = mapAllAttachments(m);
     assert.equal(mapped.length, 1);
-    assert.equal(mapped[0].name, '9'); // name falls back to id
+    assert.equal(mapped[0].name, '9');
     assert.equal(mapAllAttachments({ content: 'no attachments at all' } as never).length, 0);
   });
 
@@ -313,6 +303,7 @@ describe('mapAllAttachments (forwarded media rides the normal delivery path)', (
     const mapped = mapAllAttachments(m as never);
     assert.equal(mapped.length, 1);
     assert.equal(mapped[0].name, 'real.png');
+    assert.equal(mapped[0].url, 'https://cdn.discordapp.example/real.png', "the snapshot attachment's own URL");
     assert.equal(mapped[0].contentType, 'image/png');
     assert.equal(mapped[0].forwardedSnapshotIndex, 1);
   });
