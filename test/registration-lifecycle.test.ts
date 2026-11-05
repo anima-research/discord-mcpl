@@ -13,6 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 import { ChannelType, MessageType, PermissionFlagsBits } from 'discord.js';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
+import { countEveryMessageAsSent } from './every-message-sent.js';
 
 const require = createRequire(import.meta.url);
 const discordJs = dirname(require.resolve('discord.js'));
@@ -80,6 +81,7 @@ function fixture(t: TestContext, opts: {
   guild.members._add({ user: bot, roles: [] });
   const thread = client.channels._add(opts.sparse ? { id: TH, guild_id: G, type: ChannelType.PublicThread } : threadData);
   const server = new DiscordMcplServer(adapter) as any;
+  countEveryMessageAsSent(server);
   const sent: Array<{ method: string; params: any }> = [];
   server.conn = {
     isClosed: false,

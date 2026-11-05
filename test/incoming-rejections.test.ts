@@ -18,6 +18,7 @@ import type { ContentBlock } from '@animalabs/mcpl-core';
 import type { DiscordAdapter, MessageEventInfo } from '../src/discord-adapter.js';
 import { ChannelManager, toDescriptor } from '../src/channels.js';
 import { DiscordMcplServer } from '../src/server.js';
+import { countEveryMessageAsSent } from './every-message-sent.js';
 import {
   advertisedRetryWindowMs,
   answerClass,
@@ -95,6 +96,7 @@ async function turnsUntil(done: () => boolean): Promise<void> {
 
 function wire(respond: Responder, opts: { open?: boolean; host?: ReturnType<typeof scriptedHost>; coalescing?: boolean } = {}) {
   const server = new DiscordMcplServer({} as DiscordAdapter);
+  countEveryMessageAsSent(server);
   const s = server as unknown as Record<string, unknown>;
   let edit: EditHandler | undefined;
   let del: DeleteHandler | undefined;
@@ -115,6 +117,7 @@ function wire(respond: Responder, opts: { open?: boolean; host?: ReturnType<type
     channelAdmitted: () => true,
     onMessageEdit: (h: EditHandler) => { edit = h; },
     onMessageDelete: (h: DeleteHandler) => { del = h; },
+    onOwnMessage: () => {},
   };
   const sent: Array<{ method: string; params: any }> = opts.host?.sent ?? [];
   s.conn = opts.host?.conn ?? {
@@ -292,6 +295,14 @@ describe('push/event (closed channel): the result or error is read', () => {
     assert.equal(new Set(sent.map(eventIdOf)).size, 1);
     assert.ok(errors.some((e) => e.startsWith('[discord-mcpl] push/event failed:')), errors.join('\n'));
     assert.equal(errors.some((e) => e.includes('host rejected') || e.includes("didn't take")), false);
+  });
+
+  it('a create whose send failed may have arrived, so it counts as sent, with nothing for a deletion to quote', async () => {
+    const host = scriptedHost(() => 'no answer', 1);
+    const { server } = wire(() => undefined, { host });
+    await deliver(server, null);
+    const { sentMessages } = server as unknown as { sentMessages: Map<string, string | undefined> };
+    assert.deepEqual([...sentMessages], [['m1', undefined]]);
   });
 
   it('a resend mcpl-core times out is logged as a failed resend, not as sent', async () => {

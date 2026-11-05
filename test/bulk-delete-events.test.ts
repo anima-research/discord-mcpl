@@ -4,6 +4,7 @@ import { Collection } from 'discord.js';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
 import { toDescriptor } from '../src/channels.js';
+import { countEveryMessageAsSent } from './every-message-sent.js';
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -15,6 +16,7 @@ function fixture(t: TestContext) {
   t.after(() => client.destroy());
   (client.guilds as any)._add({ id: 'g1', name: 'Guild' });
   const server = new DiscordMcplServer(adapter);
+  countEveryMessageAsSent(server);
   const s = server as any;
   const sent: Array<{ method: string; params: any }> = [];
   s.conn = {
@@ -58,8 +60,8 @@ describe('bulk deletion delivery', () => {
       method, id: withoutOccurrenceSuffix(params.eventId), channel: params.origin.mcplChannelId,
       text: params.payload.content[0].text,
     })), [
-      { method: 'push/event', id: 'discord_delete_m1', channel: 'discord:g1:chan1', text: '[message deleted] m1' },
-      { method: 'push/event', id: 'discord_delete_m2', channel: 'discord:g1:chan1', text: '[message deleted] m2' },
+      { method: 'push/event', id: 'discord_delete_m1', channel: 'discord:g1:chan1', text: '[message deleted] [#chan1 in Guild] m1' },
+      { method: 'push/event', id: 'discord_delete_m2', channel: 'discord:g1:chan1', text: '[message deleted] [#chan1 in Guild] m2' },
     ]);
   });
 
@@ -75,6 +77,41 @@ describe('bulk deletion delivery', () => {
     f.bulk([f.message('closed1'), f.message('closed2')]);
     await settle();
     assert.deepEqual(f.sent, []);
+  });
+
+  it('names the channel or thread a deletion happened in', async (t) => {
+    const f = fixture(t);
+    f.open('thread1');
+    (f.client.channels.cache as any).set('parent', { id: 'parent', name: 'forum' });
+    const place = (id: string, name: string, thread: boolean) => ({
+      id, guildId: 'g1', name, parentId: thread ? 'parent' : null, isThread: () => thread, isDMBased: () => false,
+    });
+    f.emit('messageDelete', f.message('m1', { channel: place('chan1', 'general', false) }));
+    f.emit('messageDelete', f.message('m2', { channelId: 'thread1', channel: place('thread1', 'a topic', true) }));
+    await settle();
+    assert.deepEqual(f.sent.map((e) => e.params.payload.content[0].text), [
+      '[message deleted] [#general in Guild] m1',
+      '[message deleted] [#forum thread "a topic" in Guild] m2',
+    ]);
+  });
+
+  it("quotes the bot's own message from what the gateway sent back, by its latest text, and reports no one else's it never sent", async (t) => {
+    const f = fixture(t);
+    f.server.sentMessages = new Map();
+    (f.client as any).user = { id: 'the-bot' };
+    const whole = (id: string, author: { id: string; username: string }, content: string) => f.message(id, {
+      partial: false, author, content, editedTimestamp: 1790000000000,
+      attachments: new Collection(), mentions: { users: new Collection(), roles: new Collection(), repliedUser: null },
+    });
+    const me = { id: 'the-bot', username: 'me' };
+    f.emit('messageCreate', whole('m1', me, 'as first written'));
+    f.emit('messageUpdate', whole('m1', me, 'as first written'), whole('m1', me, 'as rewritten'));
+    f.emit('messageDelete', whole('m1', me, 'as rewritten'));
+    f.emit('messageDelete', whole('m2', { id: 'u1', username: 'bob' }, 'cached words'));
+    await settle();
+    assert.deepEqual(f.sent.map((e) => e.params.payload.content[0].text), [
+      '[message deleted] [#chan1 in Guild] m1 by @me — as rewritten',
+    ]);
   });
 
   it('resolves uncached thread parents and retains the thread namespace for each member', async (t) => {
