@@ -4425,11 +4425,12 @@ export class DiscordMcplServer {
     return messages;
   }
 
-  /** What a send carried, by how it went. One the host refused never arrived.
-   *  One with no answer may have, so a deletion is reported, but quotes nothing
-   *  it didn't already know, as this text may be unread. */
+  /** What a send carried, by how it went. One the host refused never arrived,
+   *  and for a superseded one the send that superseded it decides. One with no
+   *  answer may have arrived, so a deletion is reported, but quotes nothing it
+   *  didn't already know, as this text may be unread. */
   private noteSendOutcome(outcome: { kind: SendOutcome['kind'] | 'superseded' }, messages: readonly SentMessage[]): void {
-    if (outcome.kind === 'rejected') return;
+    if (outcome.kind === 'rejected' || outcome.kind === 'superseded') return;
     const arrived = outcome.kind === 'accepted' || outcome.kind === 'no-result';
     for (const m of messages) this.rememberSent(m.id, arrived ? deletionPreview(m) : undefined);
   }

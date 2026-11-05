@@ -17,7 +17,7 @@ in the git log and PR descriptions.
   when it has no text:
   `[message deleted] [#general in Server] <id> by @name — how it began…`. The
   reaction snippet shares the helper, and is now cut by code point rather
-  than UTF-16 unit, so it can't split an emoji.
+  than UTF-16 unit, so a cut can't leave invalid text.
 
 - **A deletion is reported only if the agent was sent the message.** A message
   counts as sent when it reached the host by any route: live, in a catch-up or

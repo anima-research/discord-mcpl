@@ -953,6 +953,20 @@ describe('sending the same occurrence again, by what the spec defines', () => {
       });
     }
 
+    it('a superseded edit leaves the record to the edit after it, so two refused edits count as nothing', async () => {
+      let answerFirst!: (v: unknown) => void;
+      const firstAnswer = new Promise((r) => { answerFirst = r; });
+      const { server, sent, edit } = wire((_m, _p, n) => n === 1 ? firstAnswer : { accepted: false, reason: 'coalesce_invalid' });
+      (server as any).sentMessages = new Map();
+      edit()('chan1', 'm9', 'first', false, info);
+      await until(() => sent.length === 1);
+      edit()('chan1', 'm9', 'second', false, info);
+      await until(() => sent.length >= 2);
+      answerFirst({ accepted: false, reason: 'storage busy' });
+      await until(() => (server as any).mutationsInFlight.size === 0);
+      assert.equal((server as any).sentMessages.has('m9'), false);
+    });
+
     for (const later of ['edit', 'delete'] as const) {
       it(`an edit is not sent again once a later ${later} of the message has gone out`, async () => {
         let answerFirst!: (v: unknown) => void;
