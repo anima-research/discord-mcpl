@@ -106,11 +106,14 @@ describe('bulk deletion delivery', () => {
     const me = { id: 'the-bot', username: 'me' };
     f.emit('messageCreate', whole('m1', me, 'as first written'));
     f.emit('messageUpdate', whole('m1', me, 'as first written'), whole('m1', me, 'as rewritten'));
+    f.emit('messageCreate', whole('m3', me, 'never edited'));
     f.emit('messageDelete', whole('m1', me, 'as rewritten'));
     f.emit('messageDelete', whole('m2', { id: 'u1', username: 'bob' }, 'cached words'));
+    f.emit('messageDelete', whole('m3', me, 'never edited'));
     await settle();
     assert.deepEqual(f.sent.map((e) => e.params.payload.content[0].text), [
       '[message deleted] [#chan1 in Guild] m1 by @me — as rewritten',
+      '[message deleted] [#chan1 in Guild] m3 by @me — never edited',
     ]);
   });
 

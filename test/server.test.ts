@@ -3554,7 +3554,30 @@ describe("a sender's words and names can't take the server's place in what the a
       assert.equal(s.sentMessages.size, 4096);
       assert.equal(s.sentMessages.has('m0'), false);
       assert.equal(s.sentMessages.has('m1'), true);
+
+      s.rememberSent('m1', 'sent again');
+      s.rememberSent('new', 'words');
+      assert.equal(s.sentMessages.has('m1'), true, 'sent again, so it counts as the newest');
+      assert.equal(s.sentMessages.has('m2'), false);
     });
+
+    it('keeps a quote it knows when a later send may not have arrived', () => {
+      const s = new DiscordMcplServer({} as DiscordAdapter) as unknown as {
+        rememberSent(id: string, preview: string | undefined): void;
+        sentMessages: Map<string, string | undefined>;
+      };
+      s.rememberSent('m1', 'already read');
+      s.rememberSent('m1', undefined);
+      assert.equal(s.sentMessages.get('m1'), 'already read');
+    });
+
+    const until = async (done: () => boolean): Promise<void> => {
+      const deadline = Date.now() + 5000;
+      while (!done()) {
+        if (Date.now() > deadline) throw new Error('timed out waiting for the host answer to be read');
+        await new Promise<void>((r) => setImmediate(r));
+      }
+    };
 
     describe('counts as sent', () => {
       const line = (id: string, over: Record<string, unknown> = {}) => historyLine({ id, cleanContent: 'read in history', content: 'read in history', ...over });
@@ -3589,7 +3612,7 @@ describe("a sender's words and names can't take the server's place in what the a
         h.discord.simulateMessage(posted(dm, 'hi', { authorId: 'u_bob', mentions: [], channelId: 'dm9', channelName: null, guildId: null, guildName: null }));
         await h.delivered();
         const { sentMessages } = h.server as unknown as { sentMessages: Map<string, string | undefined> };
-        for (let i = 0; i < 50 && !sentMessages.has(old); i++) await new Promise<void>((r) => setImmediate(r));
+        await until(() => sentMessages.has(old));
         h.discord.simulateDelete('dm9', old, true, { guildId: null, authorName: 'Bob', dmRecipientId: 'u_bob' });
         assert.equal((await h.delivered()).text, `[message deleted] [DM] ${old} by @Bob — read in history`);
       });
@@ -3611,7 +3634,29 @@ describe("a sender's words and names can't take the server's place in what the a
           token: '😀', onOwnMessage: false, messageSnippet: 'the reacted message', timestamp: new Date(),
         });
         assert.match((await h.delivered()).text, /^\[reaction\]/);
+        const { sentMessages } = h.server as unknown as { sentMessages: Map<string, string | undefined> };
+        await until(() => sentMessages.has(id));
         assert.equal(await noticeOf(h, id), `[message deleted] ${HEADER} ${id} by @Bob — the reacted message`);
+      });
+
+      it("not a message only a reaction told the agent of, when the host refused the reaction", async (t) => {
+        const h = await boot(t);
+        await h.open();
+        const noted = t.mock.method(h.server as unknown as { noteSendOutcome(o: unknown, m: unknown): void }, 'noteSendOutcome');
+        const id = '200000000000000001';
+        h.discord.simulateReaction({
+          channelId: 'c1', messageId: id, guildId: 'g1', userId: 'u9', userName: 'Ann', action: 'add', emoji: '😀', emojiId: null,
+          token: '😀', onOwnMessage: false, messageSnippet: 'the reacted message', timestamp: new Date(),
+        });
+        for (;;) {
+          const m = await nextWithin(h.client);
+          if (m.type !== 'request') continue;
+          const isPush = m.request.method === method.PUSH_EVENT;
+          h.client.sendResponse(m.request.id, isPush ? { accepted: false, reason: 'unspecified' } : {});
+          if (isPush) break;
+        }
+        await until(() => noted.mock.callCount() > 0);
+        assert.equal((h.server as unknown as { sentMessages: Map<string, string | undefined> }).sentMessages.has(id), false);
       });
 
       it('a message first delivered by an edit', async (t) => {
@@ -3649,9 +3694,42 @@ describe("a sender's words and names can't take the server's place in what the a
           client.sendResponse(m.request.id, isMissed ? { accepted: true } : {});
           if (isMissed) break;
         }
-        for (let i = 0; i < 50 && !sentMessages.has(id); i++) await new Promise<void>((r) => setImmediate(r));
+        await until(() => sentMessages.has(id));
         assert.equal(sentMessages.get(id), 'read in history');
       });
+
+      for (const [what, answer, expected] of [
+        ['nothing, when the host refused it', { accepted: false, reason: 'unspecified' }, undefined],
+        ['the block, when the host took it', { accepted: true }, 'read in history'],
+      ] as const) {
+        it(`a catch-up block records ${what}`, async (t) => {
+          const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-deleted-sweep-answer.json`);
+          writeFileSync(wmPath, JSON.stringify({ watermarks: { c9: '100' }, dmChannels: ['c9'] }));
+          process.env.DISCORD_WATERMARK_FILE = wmPath;
+          t.after(() => {
+            delete process.env.DISCORD_WATERMARK_FILE;
+            if (existsSync(wmPath)) unlinkSync(wmPath);
+          });
+          const { client, serverConn, discord } = await createTestPair();
+          const id = '200000000000000001';
+          discord.historyToReturn = [line(id)];
+          discord.cachedChannelMeta = { c9: { name: null, guildId: null, guildName: null, isDM: true } };
+          const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+          const noted = t.mock.method(server as unknown as { noteSendOutcome(o: unknown, m: unknown): void }, 'noteSendOutcome');
+          const serverPromise = server.serve(serverConn);
+          t.after(async () => { client.close(); await serverPromise; });
+          await mcplHandshake(client);
+          for (;;) {
+            const m = await nextWithin(client);
+            if (m.type !== 'request') continue;
+            const isMissed = m.request.method === method.PUSH_EVENT;
+            client.sendResponse(m.request.id, isMissed ? answer : {});
+            if (isMissed) break;
+          }
+          await until(() => noted.mock.callCount() > 0);
+          assert.equal((server as unknown as { sentMessages: Map<string, string | undefined> }).sentMessages.get(id), expected);
+        });
+      }
 
       it('an owed block, once the host has it', async (t) => {
         const { client, serverConn, discord } = await createTestPair();
@@ -3672,7 +3750,7 @@ describe("a sender's words and names can't take the server's place in what the a
           client.sendResponse(m.request.id, m.request.method === method.PUSH_EVENT ? { accepted: true } : {});
           if (eventId?.startsWith('discord_owed_')) break;
         }
-        for (let i = 0; i < 50 && !s.sentMessages.has(id); i++) await new Promise<void>((r) => setImmediate(r));
+        await until(() => s.sentMessages.has(id));
         assert.equal(s.sentMessages.get(id), 'read in history');
       });
     });

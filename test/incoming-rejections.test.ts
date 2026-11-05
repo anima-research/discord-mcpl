@@ -299,10 +299,14 @@ describe('push/event (closed channel): the result or error is read', () => {
 
   it('a create whose send failed may have arrived, so it counts as sent, with nothing for a deletion to quote', async () => {
     const host = scriptedHost(() => 'no answer', 1);
-    const { server } = wire(() => undefined, { host });
+    const { server, sent, del } = wire(() => undefined, { host });
+    (server as any).sentMessages = new Map();
     await deliver(server, null);
-    const { sentMessages } = server as unknown as { sentMessages: Map<string, string | undefined> };
-    assert.deepEqual([...sentMessages], [['m1', undefined]]);
+    const before = sent.length;
+    del()('chan1', 'm1', false, { guildId: 'g1', channelName: 'general', guildName: 'Guild', authorName: 'someone' });
+    await until(() => sent.length > before);
+    await until(() => (server as any).mutationsInFlight.size === 0);
+    assert.equal(sent[before].params.payload.content[0].text, '[message deleted] [#general in Guild] m1 by @someone');
   });
 
   it('a resend mcpl-core times out is logged as a failed resend, not as sent', async () => {

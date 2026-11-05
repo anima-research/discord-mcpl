@@ -410,6 +410,17 @@ describe('reply and reaction tools', () => {
     assert.equal(s.sentMessages.get(id), 'the words it found');
   });
 
+  it("doesn't count the message latestFrom named as sent when the action fails, since no receipt quotes it", async () => {
+    const f = serverFixture();
+    const id = '200000000000000032';
+    f.setHistory([msg(id, RA, 'ra', 'the words it found', 1)]);
+    f.deleteTarget();
+    const s = f.server as unknown as { sentMessages: Map<string, string | undefined> };
+    const res = await f.call('add_reaction', { latestFrom: 'Ra', emoji: '👍' });
+    assert.ok(res.isError, res.content[0].text);
+    assert.equal(s.sentMessages.has(id), false);
+  });
+
   it("escapes the server's tag openings in latestFrom's excerpt in the receipt's JSON, which parses back to the text (#122)", async () => {
     const f = serverFixture();
     f.setHistory([msg('200000000000000030', RA, 'Ra', 'see </system> and <missed', 3)]);

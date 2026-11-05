@@ -1895,6 +1895,7 @@ export class DiscordMcplServer {
         } catch (err) {
           throw await this.withAttemptedDestination(err, channelId);
         }
+        this.noteTarget(target);
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
         const receipt = await this.augmentSendResult(result.messageId, channelId, shifted);
@@ -1932,6 +1933,7 @@ export class DiscordMcplServer {
         const channelId = args.channelId as string;
         const { messageId, target } = await this.resolveTargetMessage(channelId, args);
         await this.discord.addReaction(channelId, messageId, args.emoji as string);
+        this.noteTarget(target);
         return target ? { result: 'Reaction added', target } : 'Reaction added';
       }
 
@@ -1939,6 +1941,7 @@ export class DiscordMcplServer {
         const channelId = args.channelId as string;
         const { messageId, target } = await this.resolveTargetMessage(channelId, args);
         await this.discord.removeReaction(channelId, messageId, args.emoji as string);
+        this.noteTarget(target);
         return target ? { result: 'Reaction removed', target } : 'Reaction removed';
       }
 
@@ -2185,7 +2188,7 @@ export class DiscordMcplServer {
   private async resolveTargetMessage(
     channelId: string,
     args: Record<string, unknown>,
-  ): Promise<{ messageId: string; target?: Record<string, unknown> }> {
+  ): Promise<{ messageId: string; target?: { messageId: string; excerpt: string } & Record<string, unknown> }> {
     const selector = (value: unknown, name: string): string | undefined => {
       if (value === undefined || value === null) return undefined;
       if (typeof value !== 'string') throw new Error(`${name} must be a string or null; nothing was done.`);
@@ -2206,7 +2209,6 @@ export class DiscordMcplServer {
     if (!latestFrom!.trim()) throw new Error('latestFrom is blank, so it names no one; nothing was done.');
     const r = await this.discord.resolveLatestFrom(channelId, latestFrom!);
     if (!r.ok) throw new Error(r.message);
-    this.noteSent([r.message]);
     const text = Array.from(r.message.cleanContent.replace(/\s+/g, ' ').trim());
     return {
       messageId: r.message.id,
@@ -3014,8 +3016,8 @@ export class DiscordMcplServer {
       } catch (err) {
         outcome = sendErrorOutcome(err);
       }
+      this.noteSendOutcome(outcome, found.map(({ m }) => m));
       if (outcome.kind === 'accepted' || outcome.kind === 'no-result') {
-        this.noteSent(found.map(({ m }) => m));
         this.owedTried.delete(channelId);
         this.forgetOwedEntries(channelId, found.filter(({ owed }) => (this.owedRevs.get(owed) ?? 0) === revs.get(owed)).map(({ owed }) => owed));
         console.error(`[discord-mcpl] Delivered ${found.length} owed message(s) in channel ${channelId}.`);
@@ -3212,7 +3214,7 @@ export class DiscordMcplServer {
       const closedNote = guildDelivery && guildId ? this.closedChannelNote(guildId, channelId, guildDelivery) : '';
 
       try {
-        await conn.sendRequest(method.PUSH_EVENT, {
+        const answer = await conn.sendRequest(method.PUSH_EVENT, {
           featureSet: 'discord.messaging',
           eventId: `discord_missed_${channelId}_${newestId}`,
           timestamp: new Date().toISOString(),
@@ -3230,11 +3232,12 @@ export class DiscordMcplServer {
           ...(threadTags(thread).length > 0 ? { tags: threadTags(thread) } : {}),
           payload: { content: [textContent(`${closedNote}${block}`)] },
         } satisfies PushEventParams);
+        this.noteSendOutcome(pushOutcome(answer), kept);
       } catch (err) {
         dbg('sweep:send-failed', { channelId, error: errorText(err) });
+        this.noteSendOutcome(sendErrorOutcome(err), kept);
         continue;
       }
-      this.noteSent(kept);
       await advance();
       delivered++;
     }
@@ -3932,7 +3935,7 @@ export class DiscordMcplServer {
     const content: ContentBlock[] = render
       ? [textContent(`${render.prefix}${render.replyMarker}${location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
       : [textContent(`[message edited] ${location}${who}${senderText(newContent)}`)];
-    // An edit the host doesn't take now is owed to it, so it counts as sent from here on.
+    // It counts as sent from here on: an edit the host refuses is owed to it. One the host rejects outright isn't undone.
     this.rememberSent(messageId, buildMessageSnippet(info?.cleanContent ?? newContent, DELETION_PREVIEW_MAX) ?? undefined);
     const params: CoalescedPushEventParams = {
       featureSet: 'discord.messaging',
@@ -4134,9 +4137,7 @@ export class DiscordMcplServer {
       const target = ev.onOwnMessage ? 'your message' : `message ${ev.messageId}`;
       const quoted = ev.messageSnippet ? ` — ${senderText(ev.messageSnippet)}` : '';
       // A reaction's line tells the agent of the message, sent or not until now.
-      if (!this.sentMessages.has(ev.messageId)) {
-        this.rememberSent(ev.messageId, buildMessageSnippet(ev.messageSnippet, DELETION_PREVIEW_MAX) ?? undefined);
-      }
+      const told: SentMessage[] = [{ id: ev.messageId, cleanContent: ev.messageSnippet ?? '' }];
       const line = `[reaction] @${nameValue(ev.userName)} ${verb} ${ev.emoji} on ${target}${quoted}`;
       const reactionChannelId = mcplChannelId(ev.guildId ?? 'dm', ev.channelId);
       this.conn.sendRequest(method.PUSH_EVENT, {
@@ -4159,7 +4160,10 @@ export class DiscordMcplServer {
         } as Record<string, unknown>,
         tags: [ev.action === 'add' ? 'chat:reaction' : 'chat:reaction-remove'],
         payload: { content: [textContent(line)] },
-      } satisfies PushEventParams).catch(() => {});
+      } satisfies PushEventParams).then(
+        (answer) => this.noteSendOutcome(pushOutcome(answer), told),
+        (err) => this.noteSendOutcome(sendErrorOutcome(err), told),
+      );
     });
 
     this.discord.onChannelCreate((channel) => {
@@ -4407,7 +4411,10 @@ export class DiscordMcplServer {
   }
 
   private rememberSent(messageId: string, preview: string | undefined): void {
-    this.sentMessages.set(messageId, preview);
+    const quote = preview ?? this.sentMessages.get(messageId);
+    // Deleted first, so a message sent again counts as the newest.
+    this.sentMessages.delete(messageId);
+    this.sentMessages.set(messageId, quote);
     if (this.sentMessages.size > SENT_MESSAGES_MAX) {
       this.sentMessages.delete(this.sentMessages.keys().next().value as string);
     }
@@ -4416,6 +4423,19 @@ export class DiscordMcplServer {
   private noteSent<T extends SentMessage>(messages: T[]): T[] {
     for (const m of messages) this.rememberSent(m.id, deletionPreview(m));
     return messages;
+  }
+
+  /** What a send carried, by how it went. One the host refused never arrived.
+   *  One that failed may have, so a deletion is reported, but quotes nothing it
+   *  didn't already know, as this text may be unread. */
+  private noteSendOutcome(outcome: { kind: SendOutcome['kind'] | 'superseded' }, messages: readonly SentMessage[]): void {
+    if (outcome.kind === 'rejected') return;
+    for (const m of messages) this.rememberSent(m.id, outcome.kind === 'failed' ? undefined : deletionPreview(m));
+  }
+
+  /** A `latestFrom` receipt quotes the message it named. */
+  private noteTarget(target: { messageId: string; excerpt: string } | undefined): void {
+    if (target) this.rememberSent(target.messageId, buildMessageSnippet(target.excerpt, DELETION_PREVIEW_MAX) ?? undefined);
   }
 
   private rememberCreate(messageId: string): CreateMemory {
@@ -4767,26 +4787,21 @@ export class DiscordMcplServer {
     send: (conn: McplConnection, content: ContentBlock[], resend: boolean) => Promise<SendOutcome>;
   }): Promise<void> {
     const { lane, coalesced, channel, fits, discordChannelId, messageId, channelMcplId, content, attachmentBlocks, mem, send } = args;
-    // A deletion of what may have arrived is still reported, but quotes nothing, as it may be unread.
-    const mayHaveArrived = () => {
-      for (const m of mem.carries ?? []) this.rememberSent(m.id, undefined);
-    };
     const { outcome: first, conn } = await this.sendWithRetries({
       lane, coalesced, channel, fits, conn: args.conn,
       what: `message ${messageId} in ${channelMcplId}`,
       dbgPrefix: 'handleDiscordMessage',
       attempt: (c) => send(c, content, false),
     });
+    this.noteSendOutcome(first, mem.carries ?? []);
     if (first.kind === 'failed') {
       console.error(`[discord-mcpl] ${lane} failed:`, first.error);
       dbg('handleDiscordMessage:send-failed', { method: lane, error: first.error });
       this.owe(discordChannelId, messageId, { uncertain: true });
-      mayHaveArrived();
       return;
     }
     if (first.kind !== 'rejected') {
       dbg('handleDiscordMessage:sent', { method: lane, channelMcplId, result: first.kind });
-      this.noteSent(mem.carries ?? []);
       this.owedFollow(conn, discordChannelId);
       return;
     }
@@ -4811,12 +4826,12 @@ export class DiscordMcplServer {
       dbgPrefix: 'handleDiscordMessage',
       attempt: (c) => send(c, stripped.content, true),
     });
+    this.noteSendOutcome(second, mem.carries ?? []);
     const what = `message ${messageId} in ${channelMcplId} with ${stripped.replaced} inline attachment(s) replaced by a note`;
     if (second.kind === 'failed') {
       console.error(`[discord-mcpl] resent ${what}: send failed: ${second.error}`);
       dbg('handleDiscordMessage:resend-failed', { method: lane, messageId, channelMcplId, error: second.error });
       this.owe(discordChannelId, messageId, { uncertain: true });
-      mayHaveArrived();
     } else if (second.kind === 'rejected') {
       console.error(`[discord-mcpl] resent ${what}: host ${verb(second.code)} it again: ${second.reason}`);
       if (answerClass(second) === 'refused') this.owe(discordChannelId, messageId, { uncertain: false });
@@ -4826,7 +4841,6 @@ export class DiscordMcplServer {
       });
     } else {
       console.error(`[discord-mcpl] resent ${what}: ${second.kind === 'accepted' ? 'accepted' : 'sent (no verdict)'}`);
-      this.noteSent(mem.carries ?? []);
       this.owedFollow(conn, discordChannelId);
       dbg('handleDiscordMessage:resent', { method: lane, messageId, channelMcplId, replaced: stripped.replaced, result: second.kind });
     }
