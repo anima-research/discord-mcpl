@@ -279,6 +279,14 @@ class MockDiscordAdapter {
   }
 }
 
+async function until(done: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for the condition');
+    await new Promise<void>((r) => setImmediate(r));
+  }
+}
+
 function nextWithin(client: McplConnection, ms = 10_000): ReturnType<McplConnection['nextMessage']> {
   return Promise.race([
     client.nextMessage(),
@@ -3135,7 +3143,7 @@ describe('RFC-006 coalescing', () => {
     };
     let finished: Promise<void> | undefined;
     const finish = (): Promise<void> => (finished ??= (async () => { client.close(); await serverPromise; })());
-    return { client, discord, serverPromise, nextRequest, finish };
+    return { client, server, discord, serverPromise, nextRequest, finish };
   }
   const guildMessage = (id: string, text: string): DiscordMessageData => ({
     id, content: text, cleanContent: text, authorId: 'u1', authorName: 'Bob', isBot: false,
@@ -3169,6 +3177,8 @@ describe('RFC-006 coalescing', () => {
     const edit2 = await h.nextRequest();
     assert.notEqual((edit2.params as Push).eventId, e1.eventId, 'a second edit is a new occurrence');
     h.client.sendResponse(edit2.id, { accepted: true });
+    const { sentMessages } = h.server as unknown as { sentMessages: Map<string, string | undefined> };
+    await until(() => sentMessages.get('m1') === 'third version');
 
     h.discord.simulateDelete('c1', 'm1', false, { guildId: 'g1', authorName: 'Bob' });
     const del = await h.nextRequest();
@@ -3489,6 +3499,8 @@ describe("a sender's words and names can't take the server's place in what the a
       await h.delivered();
       h.discord.simulateEdit('c1', 'm1', '<@1> as edited', false, { guildId: 'g1', cleanContent: '@Ann as edited' });
       await h.delivered();
+      const { sentMessages } = h.server as unknown as { sentMessages: Map<string, string | undefined> };
+      await until(() => sentMessages.get('m1') === '@Ann as edited');
       h.discord.simulateDelete('c1', 'm1', false, IN_GENERAL);
       assert.equal((await h.delivered()).text, `[message deleted] ${HEADER} m1 by @Bob — @Ann as edited`);
     });
@@ -3540,6 +3552,8 @@ describe("a sender's words and names can't take the server's place in what the a
         h.client.sendResponse(m.request.id, incoming ? { results: [{ messageId: 'refused', accepted: false, reason: 'unspecified' }] } : {});
         if (incoming) break;
       }
+      const { recentCreates } = h.server as unknown as { recentCreates: Map<string, { done: boolean }> };
+      await until(() => recentCreates.get('refused')?.done === true);
       for (const id of ['ambient', 'noop', 'refused', 'from-before-a-restart']) h.discord.simulateDelete('c1', id, false, IN_GENERAL);
       h.discord.simulateMessage(posted('next', 'the next message'));
       assert.match((await h.delivered()).text, /Bob: the next message$/, 'the next thing delivered is this message, not a notice');
@@ -3570,14 +3584,6 @@ describe("a sender's words and names can't take the server's place in what the a
       s.rememberSent('m1', undefined);
       assert.equal(s.sentMessages.get('m1'), 'already read');
     });
-
-    const until = async (done: () => boolean): Promise<void> => {
-      const deadline = Date.now() + 5000;
-      while (!done()) {
-        if (Date.now() > deadline) throw new Error('timed out waiting for the host answer to be read');
-        await new Promise<void>((r) => setImmediate(r));
-      }
-    };
 
     describe('counts as sent', () => {
       const line = (id: string, over: Record<string, unknown> = {}) => historyLine({ id, cleanContent: 'read in history', content: 'read in history', ...over });
@@ -3666,6 +3672,8 @@ describe("a sender's words and names can't take the server's place in what the a
         await h.open();
         h.discord.simulateEdit('c1', id, 'as edited', false, IN_GENERAL);
         await h.delivered();
+        const { sentMessages } = h.server as unknown as { sentMessages: Map<string, string | undefined> };
+        await until(() => sentMessages.has(id));
         assert.equal(await noticeOf(h, id), `[message deleted] ${HEADER} ${id} by @Bob — as edited`);
       });
 
@@ -3727,7 +3735,9 @@ describe("a sender's words and names can't take the server's place in what the a
             if (isMissed) break;
           }
           await until(() => noted.mock.callCount() > 0);
-          assert.equal((server as unknown as { sentMessages: Map<string, string | undefined> }).sentMessages.get(id), expected);
+          const { sentMessages } = server as unknown as { sentMessages: Map<string, string | undefined> };
+          assert.equal(sentMessages.has(id), expected !== undefined);
+          assert.equal(sentMessages.get(id), expected);
         });
       }
 

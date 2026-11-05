@@ -12,8 +12,9 @@ in the git log and PR descriptions.
   create, now always name the channel, in the form a message's own header
   uses. An unnamed channel goes by its id.
 
-- **A deletion notice says how the message began.** It quotes up to 50 code
-  points of the message, or an attachment's name when it has no text:
+- **A deletion notice says how the message began.** Where the server has that
+  text, it quotes up to 50 code points of the message, or an attachment's name
+  when it has no text:
   `[message deleted] [#general in Server] <id> by @name — how it began…`. The
   reaction snippet shares the helper, and is now cut by code point rather
   than UTF-16 unit, so it can't split an emoji.
@@ -25,7 +26,7 @@ in the git log and PR descriptions.
   excerpt, or when the agent wrote it. The server remembers the last 4096 of
   these, in memory only, so the deletion of an older message, or of one from
   before a restart, goes unreported too. A send that may have arrived counts as
-  sent, but its deletion quotes nothing.
+  sent, but adds nothing for a deletion to quote.
 
 ## 0.6.0 — 2026-10-30
 

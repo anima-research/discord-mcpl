@@ -3935,8 +3935,6 @@ export class DiscordMcplServer {
     const content: ContentBlock[] = render
       ? [textContent(`${render.prefix}${render.replyMarker}${location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
       : [textContent(`[message edited] ${location}${who}${senderText(newContent)}`)];
-    // It counts as sent from here on: an edit the host refuses is owed to it. One the host rejects outright isn't undone.
-    this.rememberSent(messageId, buildMessageSnippet(info?.cleanContent ?? newContent, DELETION_PREVIEW_MAX) ?? undefined);
     const params: CoalescedPushEventParams = {
       featureSet: 'discord.messaging',
       // The occurrence id (RFC-006 §3.1): a second edit of one message is a new
@@ -3955,7 +3953,9 @@ export class DiscordMcplServer {
         ? { coalesce: { key: `message:${messageId}`, ...(scope ? { channelId: scope } : {}) } }
         : {}),
     };
-    this.noteMutationOutcome('edit', messageId, channelId, registeredId ?? channelId, registeredId, conn, params);
+    this.noteMutationOutcome('edit', messageId, channelId, registeredId ?? channelId, registeredId, conn, params, [
+      { id: messageId, cleanContent: info?.cleanContent ?? newContent },
+    ]);
   }
 
   private async forwardMessageDelete(channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo): Promise<void> {
@@ -4426,11 +4426,12 @@ export class DiscordMcplServer {
   }
 
   /** What a send carried, by how it went. One the host refused never arrived.
-   *  One that failed may have, so a deletion is reported, but quotes nothing it
-   *  didn't already know, as this text may be unread. */
+   *  One with no answer may have, so a deletion is reported, but quotes nothing
+   *  it didn't already know, as this text may be unread. */
   private noteSendOutcome(outcome: { kind: SendOutcome['kind'] | 'superseded' }, messages: readonly SentMessage[]): void {
     if (outcome.kind === 'rejected') return;
-    for (const m of messages) this.rememberSent(m.id, outcome.kind === 'failed' ? undefined : deletionPreview(m));
+    const arrived = outcome.kind === 'accepted' || outcome.kind === 'no-result';
+    for (const m of messages) this.rememberSent(m.id, arrived ? deletionPreview(m) : undefined);
   }
 
   /** A `latestFrom` receipt quotes the message it named. */
@@ -5052,6 +5053,7 @@ export class DiscordMcplServer {
     registeredId: string | undefined,
     conn: McplConnection,
     params: CoalescedPushEventParams,
+    carries: readonly SentMessage[] = [],
   ): void {
     const seq = ++this.mutationSeq;
     const inFlight = this.mutationsInFlight.get(messageId) ?? { latest: 0, unsettled: 0 };
@@ -5078,6 +5080,7 @@ export class DiscordMcplServer {
             }
           },
         });
+        this.noteSendOutcome(outcome, carries);
         if (outcome.kind === 'accepted' || outcome.kind === 'no-result') {
           if (this.owed.get(discordChannelId)?.some((o) => o.id === messageId)) this.forgetOwed(discordChannelId, [messageId]);
         } else if (outcome.kind === 'rejected') {

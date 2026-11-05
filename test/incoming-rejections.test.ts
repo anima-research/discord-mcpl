@@ -297,6 +297,18 @@ describe('push/event (closed channel): the result or error is read', () => {
     assert.equal(errors.some((e) => e.includes('host rejected') || e.includes("didn't take")), false);
   });
 
+  it('an edit the host refused leaves a message it was never sent uncounted, so its deletion is withheld', async () => {
+    const { server, sent, edit, del } = wire(() => ({ accepted: false, reason: 'coalesce_invalid' }));
+    (server as any).sentMessages = new Map();
+    edit()('chan1', 'm9', 'never reached the agent', false, { guildId: 'g1', authorId: 'u1', authorName: 'someone' });
+    await until(() => sent.length > 0 && (server as any).mutationsInFlight.size === 0);
+    assert.equal((server as any).sentMessages.has('m9'), false);
+    const before = sent.length;
+    del()('chan1', 'm9', false, { guildId: 'g1', authorId: 'u1', authorName: 'someone' });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(sent.length, before, 'no notice');
+  });
+
   it('a create whose send failed may have arrived, so it counts as sent, with nothing for a deletion to quote', async () => {
     const host = scriptedHost(() => 'no answer', 1);
     const { server, sent, del } = wire(() => undefined, { host });
