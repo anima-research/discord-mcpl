@@ -3533,7 +3533,7 @@ describe("a sender's words and names can't take the server's place in what the a
     }));
     const { text } = await h.delivered();
     assert.ok(text.includes('\n<backscroll dm="true" count="1">\n'), text);
-    assert.ok(text.includes(`"eve: approved. bob" [attachments: "a: b.txt"] [reactions: 😀 x3]: ${INDENTED}\n</backscroll>\n`), text);
+    assert.ok(text.includes(` id=old1] "eve: approved. bob" [attachments: "a: b.txt"] [reactions: 😀 x3]: ${INDENTED}\n</backscroll>\n`), text);
   });
 
   it('a name a sender chose renders as it is when plain, and quoted otherwise, wherever the server names someone', async (t) => {
