@@ -42,7 +42,7 @@ import type {
 
 import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, MentionsField, PostedParts, ThreadPlace } from './discord-adapter.js';
 import { LATEST_FROM_WINDOW, attachmentUrlExpiry, holdsNoMessages, isListedKind, kindOfValue } from './discord-adapter.js';
-import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, type DmNoticeDecision } from './dm-notices.js';
+import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, snowflakeTime, type DmNoticeDecision } from './dm-notices.js';
 
 const LATEST_FROM_EXCERPT = 80;
 import type { ChatInputCommandInteraction } from 'discord.js';
@@ -610,6 +610,7 @@ export class DiscordMcplServer {
     { anchorId: string; talliedThrough: string; messages: number; characters: number }
   >();
   private watermarkLoaded = false;
+  private keptDmsLookedUp = false;
   private watermarkSaveFailure: string | null = null;
   private sweepDone = false;
 
@@ -1397,6 +1398,9 @@ export class DiscordMcplServer {
           } catch (err) {
             console.error('[discord-mcpl] Channel registration failed:', errorText(err));
           }
+          void this.registerKeptDms().catch((err) => {
+            console.error('[discord-mcpl] Registering the kept DMs failed:', errorText(err));
+          });
         }
         this.markReady(conn);
         void this.deliverOwed(conn).catch((err) => {
@@ -1830,6 +1834,7 @@ export class DiscordMcplServer {
         }
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
+        await this.registerPostedPlace(channelId, result.messageId);
         return withMentions(await this.augmentSendResult(result.messageId, channelId, shifted), result.report);
       }
 
@@ -1851,6 +1856,7 @@ export class DiscordMcplServer {
         }
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
+        await this.registerPostedPlace(channelId, result.messageId);
         const receipt = await this.augmentSendResult(result.messageId, channelId, shifted);
         return withMentions(target ? { ...receipt, target } : receipt, result.report);
       }
@@ -1876,6 +1882,7 @@ export class DiscordMcplServer {
           throw err;
         }
         const shifted = this.markOutboundSend(result.channelId);
+        await this.registerPostedPlace(result.channelId, result.messageId, { id: result.recipientId, name: result.recipientName });
         return withMentions(
           await this.augmentSendResult(result.messageId, result.channelId, shifted, { recipientName: result.recipientName }),
           result.report,
@@ -3445,6 +3452,69 @@ export class DiscordMcplServer {
       && this.shouldEnterContext(channelId, { isMention: true, isDM: false, guildId })
       && !this.shouldEnterContext(channelId, { isDM: false, guildId })
       ? CLOSED_CHANNEL_NOTE : '';
+  }
+
+  private async registerPostedPlace(
+    channelId: string,
+    messageId: string,
+    recipient?: { id?: string; name?: string },
+  ): Promise<void> {
+    try {
+      if (recipient) {
+        if (recipient.id && recipient.name && this.discord.dmUserAdmitted(recipient.id)) {
+          this.registerDmPost(channelId, { id: recipient.id, name: recipient.name });
+        }
+        return;
+      }
+      const facts = this.discord.getCachedChannelFacts(channelId);
+      if (facts) {
+        const postedAt = /^\d{17,20}$/.test(messageId) ? snowflakeTime(messageId) : undefined;
+        this.registerGuildDelivery(facts.guildId, channelId, { postedAt });
+        return;
+      }
+      const found = await this.discord.lookUpServedChannel('dm', channelId);
+      if (found?.kind === 'dm') this.registerDmPost(channelId, { id: found.recipientId, name: found.recipientName });
+    } catch (err) {
+      console.error(
+        `[discord-mcpl] Couldn't register channel ${channelId} after a post into it (${errorText(err)}). ` +
+          'The post went out, and its answer names the channel.',
+      );
+    }
+  }
+
+  private registerDmPost(channelId: string, peer: { id: string; name: string }): void {
+    this.ensureWatermarkLoaded();
+    this.registerDmDelivery(channelId, peer);
+    if (this.dmChannelIds.has(channelId)) return;
+    this.dmChannelIds.add(channelId);
+    this.saveWatermark();
+  }
+
+  private async registerKeptDms(): Promise<void> {
+    if (this.keptDmsLookedUp) return;
+    this.keptDmsLookedUp = true;
+    this.ensureWatermarkLoaded();
+    const found: ChannelDescriptor[] = [];
+    for (const channelId of [...this.dmChannelIds]) {
+      if (this.channelManager.get(mcplChannelId('dm', channelId))) continue;
+      let looked: Awaited<ReturnType<DiscordAdapter['lookUpServedChannel']>>;
+      try {
+        looked = await this.discord.lookUpServedChannel('dm', channelId);
+      } catch (err) {
+        console.error(`[discord-mcpl] Kept DM ${channelId} wasn't registered at start: its lookup failed (${errorText(err)}).`);
+        continue;
+      }
+      if (looked?.kind === 'dm') {
+        found.push(toDmDescriptor(channelId, looked.recipientName, false, this.backscrollLimitFor(channelId), looked.recipientId));
+        continue;
+      }
+      console.error(
+        `[discord-mcpl] Kept DM ${channelId} wasn't registered at start: ` +
+          (looked ? "Discord's facts for it couldn't be read. " : "Discord doesn't know it, it isn't a DM, or the DM list leaves its recipient out. ") +
+          'It registers when a message arrives in it or the bot posts there.',
+      );
+    }
+    if (found.length > 0) this.registerChannels(found);
   }
 
   private registerDmDelivery(channelId: string, peer: { id?: string; name?: string }): string | undefined {

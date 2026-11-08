@@ -5,6 +5,23 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Fixed
+
+- **A post into a place discord-mcpl serves names a channel the host
+  holds.** After a restart, discord-mcpl registered a DM only once its
+  other party wrote, so a `send_dm` to anyone who hadn't written since
+  answered with a channel the host didn't hold, and a host that reads a
+  send's place couldn't tell where it went. `send_message`,
+  `reply_message` and `send_dm` now register the place they posted into
+  before they answer, when discord-mcpl serves it: a channel or thread
+  the filters admit, or a DM whose recipient the DM list admits. A post
+  into a place they leave out still isn't registered. With
+  `DISCORD_WATERMARK_FILE` set, the DMs the file keeps are also
+  registered at start: each is looked up on Discord, one at a time, after
+  the first MCPL host connects, and those the DM list admits are
+  registered together. A DM the bot posts into is kept in the file once
+  it registers.
+
 ## 0.6.0 — 2026-10-30
 
 ### Added
