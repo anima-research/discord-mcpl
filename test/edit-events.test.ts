@@ -206,7 +206,7 @@ describe('edit/delete push events', () => {
     edit('chan1', 'm1', 'zz fixed typo', false, { guildId: 'g1', authorId: 'u1', authorName: 'niston' });
     assert.equal(sent.length, 1);
     const { origin, payload } = sent[0]!.params;
-    assert.equal(payload.content[0].text, '[message edited] niston: zz fixed typo');
+    assert.equal(payload.content[0].text, '[message edited] [id=m1] niston: zz fixed typo');
     assert.equal(origin.guildId, 'g1');
     assert.equal(origin.mcplChannelId, 'discord:g1:chan1');
     assert.equal(origin.messageId, 'm1');
@@ -218,7 +218,7 @@ describe('edit/delete push events', () => {
     const { server, edit, sent } = wire();
     edit('dmchan', 'm2', 'zz hola', true, { guildId: null, authorId: 'u2', authorName: '_reim0n' });
     const { origin, payload } = sent[0]!.params;
-    assert.equal(payload.content[0].text, '[message edited] _reim0n: zz hola');
+    assert.equal(payload.content[0].text, '[message edited] [id=m2] _reim0n: zz hola');
     assert.equal(origin.guildId, undefined);
     assert.equal(origin.mcplChannelId, 'discord:dm:dmchan');
     assert.equal(((server as any).channelManager as ChannelManager).get('discord:dm:dmchan')?.label, 'DM: _reim0n');
@@ -238,7 +238,7 @@ describe('edit/delete push events', () => {
   it('an edit without author info keeps the old text shape', () => {
     const { edit, sent } = wire();
     edit('chan1', 'm3', 'zz text', false);
-    assert.equal(sent[0]!.params.payload.content[0].text, '[message edited] zz text');
+    assert.equal(sent[0]!.params.payload.content[0].text, '[message edited] [id=m3] zz text');
     assert.equal(sent[0]!.params.origin.guildId, undefined);
     assert.equal('mcplChannelId' in sent[0]!.params.origin, false);
   });

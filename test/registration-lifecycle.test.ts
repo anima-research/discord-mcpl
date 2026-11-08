@@ -2597,7 +2597,7 @@ it('a mention in a thread that is neither open nor subscribed carries the note o
   const f = fixture(t);
   await f.server.handleDiscordMessage(f.posted());
   const text = f.pushes()[0].params.payload.content[0].text as string;
-  assert.equal(text, `${NOTE}[#before thread "topic" in Guild] Bob: hi`);
+  assert.equal(text, `${NOTE}[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it("a message addressed only by the role Discord created for the bot carries the note, and one mentioning another role the bot has isn't delivered", async (t) => {
@@ -2616,7 +2616,7 @@ it("a message addressed only by the role Discord created for the bot carries the
   });
   create(snowflakeAt(T), BOT_ROLE);
   await until(() => f.pushes().length > 0);
-  assert.equal(f.pushes()[0].params.payload.content[0].text, `${NOTE}[#before thread "topic" in Guild] Bob: @bot hi`);
+  assert.equal(f.pushes()[0].params.payload.content[0].text, `${NOTE}[#before thread "topic" in Guild] [id=${snowflakeAt(T)}] Bob: @bot hi`);
   create(snowflakeAt(T + 1000), TEAM);
   create(snowflakeAt(T + 2000), BOT_ROLE);
   await until(() => f.pushes().length > 1);
@@ -2634,7 +2634,7 @@ it('no note on a mention whose closed thread was deleted while its attachments w
   await delivery;
   const push = f.pushes()[0];
   assert.equal(push.params.origin.mcplChannelId, undefined, 'the push names no channel');
-  assert.equal(push.params.payload.content[0].text, '[#before thread "topic" in Guild] Bob: hi');
+  assert.equal(push.params.payload.content[0].text, `[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it('a mention admitted before its closed thread was muted, while its attachments were fetched, goes out naming its thread without the note', async (t) => {
@@ -2647,7 +2647,7 @@ it('a mention admitted before its closed thread was muted, while its attachments
   await delivery;
   const push = f.pushes()[0];
   assert.equal(push.params.origin.mcplChannelId, threadMcplId, 'admitted before the mute, it goes out naming its thread');
-  assert.equal(push.params.payload.content[0].text, '[#before thread "topic" in Guild] Bob: hi');
+  assert.equal(push.params.payload.content[0].text, `[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it('a mention admitted while its thread was open, and closed while its attachments were fetched, carries the note', async (t) => {
@@ -2662,7 +2662,7 @@ it('a mention admitted while its thread was open, and closed while its attachmen
   await delivery;
   const push = f.pushes()[0];
   assert.ok(push, 'closed by the time it goes out, it goes out as a push');
-  assert.equal(push.params.payload.content[0].text, `${NOTE}[#before thread "topic" in Guild] Bob: hi`);
+  assert.equal(push.params.payload.content[0].text, `${NOTE}[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it('an ordinary message admitted while its thread was open, and closed while its attachments were fetched, carries the note', async (t) => {
@@ -2678,7 +2678,7 @@ it('an ordinary message admitted while its thread was open, and closed while its
   const push = f.pushes()[0];
   assert.ok(push, 'admitted while the thread was open, it still goes out');
   assert.ok(push.params.tags.includes('chat:ambient'), 'it did not address the agent');
-  assert.equal(push.params.payload.content[0].text, `${NOTE}[#before thread "topic" in Guild] Bob: hi`);
+  assert.equal(push.params.payload.content[0].text, `${NOTE}[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it('an ordinary message admitted while its thread was subscribed, and unsubscribed while its attachments were fetched, carries the note', async (t) => {
@@ -2693,7 +2693,7 @@ it('an ordinary message admitted while its thread was subscribed, and unsubscrib
   const push = f.pushes()[0];
   assert.ok(push, 'admitted while the thread was subscribed, it still goes out');
   assert.ok(push.params.tags.includes('chat:ambient'), 'it did not address the agent');
-  assert.equal(push.params.payload.content[0].text, `${NOTE}[#before thread "topic" in Guild] Bob: hi`);
+  assert.equal(push.params.payload.content[0].text, `${NOTE}[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it('no note on a mention whose closed thread was subscribed while its attachments were fetched, since its other messages enter now', async (t) => {
@@ -2706,7 +2706,7 @@ it('no note on a mention whose closed thread was subscribed while its attachment
   await delivery;
   const push = f.pushes()[0];
   assert.equal(push.params.origin.mcplChannelId, threadMcplId);
-  assert.equal(push.params.payload.content[0].text, '[#before thread "topic" in Guild] Bob: hi');
+  assert.equal(push.params.payload.content[0].text, `[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it('no note on a mention whose registered thread was archived while its attachments were fetched', async (t) => {
@@ -2720,7 +2720,7 @@ it('no note on a mention whose registered thread was archived while its attachme
   await delivery;
   const push = f.pushes()[0];
   assert.equal(push.params.origin.mcplChannelId, undefined, 'archived after it was posted, the thread is forgotten');
-  assert.equal(push.params.payload.content[0].text, '[#before thread "topic" in Guild] Bob: hi');
+  assert.equal(push.params.payload.content[0].text, `[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it("no note on a mention from a registered thread whose facts may be older than Discord's, though the push names it", async (t) => {
@@ -2730,7 +2730,7 @@ it("no note on a mention from a registered thread whose facts may be older than 
   await f.server.handleDiscordMessage(f.posted());
   const push = f.pushes()[0];
   assert.equal(push.params.origin.mcplChannelId, threadMcplId, 'registered before, it is named');
-  assert.equal(push.params.payload.content[0].text, '[#before thread "topic" in Guild] Bob: hi');
+  assert.equal(push.params.payload.content[0].text, `[#before thread "topic" in Guild] [id=${M}] Bob: hi`);
 });
 
 it("the catch-up's block of a closed thread's mentions carries the note ahead of the block", { timeout: 5000 }, async (t) => {

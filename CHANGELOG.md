@@ -5,6 +5,20 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Changed
+
+- **Every message discord-mcpl renders names its id.** A message
+  delivered in an open channel or pushed from a closed one, an edit (both
+  the `[message edited]` notice and the re-rendered message that replaces
+  an unread one), a first DM's backscroll and the history a host's open
+  brings now carry `[id=<id>]` just before the sender's name, or before
+  the text where no name is known, the form catch-up lines already use; a
+  backscroll line puts the id beside its time, as a catch-up line does.
+  Discord keeps a message's id across edits, so an edit names the message
+  it changed. Nothing else on the line changes: a live message gains no
+  time, and the reply marker and the delete notice are as they were. Tool
+  descriptions don't change.
+
 ## 0.6.0 — 2026-10-30
 
 ### Added
