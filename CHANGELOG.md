@@ -20,7 +20,23 @@ in the git log and PR descriptions.
   registered at start: each is looked up on Discord, one at a time, after
   the first MCPL host connects, and those the DM list admits are
   registered together. A DM the bot posts into is kept in the file once
-  it registers.
+  it registers, and if it has no catch-up position yet, the post becomes
+  its position, so a reply sent there while discord-mcpl is down is
+  caught up at the next start. A post into a channel or thread whose
+  facts discord-mcpl holds may be older than Discord's doesn't register
+  it.
+
+### Changed
+
+- **The first reply in a DM the bot started comes without the
+  first-contact block.** The `<system>` block naming the sender and how
+  to answer, and the backscroll of earlier messages, come with a message
+  from a DM for which discord-mcpl holds no catch-up position. A post
+  that registers a DM, or goes into one already registered and kept, now
+  gives it a position, so the other party's first reply there comes
+  without them while that position is held, which across a restart needs
+  `DISCORD_WATERMARK_FILE`. A first message in a DM the bot didn't post
+  into first still brings both.
 
 ## 0.6.0 — 2026-10-30
 

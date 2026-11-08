@@ -3462,7 +3462,7 @@ export class DiscordMcplServer {
     try {
       if (recipient) {
         if (recipient.id && recipient.name && this.discord.dmUserAdmitted(recipient.id)) {
-          this.registerDmPost(channelId, { id: recipient.id, name: recipient.name });
+          this.registerDmPost(channelId, messageId, { id: recipient.id, name: recipient.name });
         }
         return;
       }
@@ -3472,8 +3472,20 @@ export class DiscordMcplServer {
         this.registerGuildDelivery(facts.guildId, channelId, { postedAt });
         return;
       }
+      this.ensureWatermarkLoaded();
+      if (this.channelManager.get(mcplChannelId('dm', channelId)) && this.dmChannelIds.has(channelId)) {
+        this.keepPostedDm(channelId, messageId);
+        return;
+      }
       const found = await this.discord.lookUpServedChannel('dm', channelId);
-      if (found?.kind === 'dm') this.registerDmPost(channelId, { id: found.recipientId, name: found.recipientName });
+      if (found?.kind === 'dm') {
+        this.registerDmPost(channelId, messageId, { id: found.recipientId, name: found.recipientName });
+      } else if (found?.kind === 'uncertain') {
+        console.error(
+          `[discord-mcpl] Couldn't register channel ${channelId} after a post into it: Discord's facts for it couldn't be read. ` +
+            'The post went out, and its answer names the channel.',
+        );
+      }
     } catch (err) {
       console.error(
         `[discord-mcpl] Couldn't register channel ${channelId} after a post into it (${errorText(err)}). ` +
@@ -3482,11 +3494,18 @@ export class DiscordMcplServer {
     }
   }
 
-  private registerDmPost(channelId: string, peer: { id: string; name: string }): void {
+  private registerDmPost(channelId: string, messageId: string, peer: { id: string; name: string }): void {
     this.ensureWatermarkLoaded();
     this.registerDmDelivery(channelId, peer);
-    if (this.dmChannelIds.has(channelId)) return;
+    this.keepPostedDm(channelId, messageId);
+  }
+
+  private keepPostedDm(channelId: string, messageId: string): void {
+    const kept = this.dmChannelIds.has(channelId);
+    const placed = this.forwardedWatermark.has(channelId);
+    if (kept && placed) return;
     this.dmChannelIds.add(channelId);
+    if (!placed) this.forwardedWatermark.set(channelId, messageId);
     this.saveWatermark();
   }
 
@@ -3494,7 +3513,7 @@ export class DiscordMcplServer {
     if (this.keptDmsLookedUp) return;
     this.keptDmsLookedUp = true;
     this.ensureWatermarkLoaded();
-    const found: ChannelDescriptor[] = [];
+    const found: Array<{ channelId: string; descriptor: ChannelDescriptor; recipientId: string }> = [];
     for (const channelId of [...this.dmChannelIds]) {
       if (this.channelManager.get(mcplChannelId('dm', channelId))) continue;
       let looked: Awaited<ReturnType<DiscordAdapter['lookUpServedChannel']>>;
@@ -3505,16 +3524,27 @@ export class DiscordMcplServer {
         continue;
       }
       if (looked?.kind === 'dm') {
-        found.push(toDmDescriptor(channelId, looked.recipientName, false, this.backscrollLimitFor(channelId), looked.recipientId));
+        found.push({
+          channelId,
+          descriptor: toDmDescriptor(channelId, looked.recipientName, false, this.backscrollLimitFor(channelId), looked.recipientId),
+          recipientId: looked.recipientId,
+        });
         continue;
       }
       console.error(
         `[discord-mcpl] Kept DM ${channelId} wasn't registered at start: ` +
-          (looked ? "Discord's facts for it couldn't be read. " : "Discord doesn't know it, it isn't a DM, or the DM list leaves its recipient out. ") +
-          'It registers when a message arrives in it or the bot posts there.',
+          (looked
+            ? "Discord's facts for it couldn't be read. It registers when a message arrives in it or the bot posts there."
+            : "Discord doesn't know it, it isn't a DM, or the DM list leaves its recipient out."),
       );
     }
-    if (found.length > 0) this.registerChannels(found);
+    const still = found.filter(({ channelId, descriptor, recipientId }) => {
+      if (this.channelManager.get(descriptor.id)) return false;
+      if (this.discord.dmUserAdmitted(recipientId)) return true;
+      console.error(`[discord-mcpl] Kept DM ${channelId} wasn't registered at start: the DM list left its recipient out during the lookups.`);
+      return false;
+    });
+    if (still.length > 0) this.registerChannels(still.map(({ descriptor }) => descriptor));
   }
 
   private registerDmDelivery(channelId: string, peer: { id?: string; name?: string }): string | undefined {
