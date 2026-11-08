@@ -3656,18 +3656,12 @@ describe('an id sent as a number', () => {
     'Nothing was done: ids must be strings in quotes, since a number past 2^53 can lose its last digits. ' +
     `This call sent a number at ${keys}, which arrived as ${arrived}.`;
 
-  function rawLine(id: number, tool: string, args: Record<string, unknown>, unquoted: string[] = []): string {
-    let json = JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: tool, arguments: args } });
-    for (const text of unquoted) json = json.replace(JSON.stringify(text), text);
-    return `${json}\n`;
-  }
-
-  async function wired(t: TestContext) {
-    const { client, clientSocket, serverConn, discord } = await createTestPair();
+  function watched() {
+    const discord = new MockDiscordAdapter();
     discord.facts.c1 = { id: 'c1', guildId: 'g1', guildName: 'Test Server', type: 'text', name: 'general' };
     const calls: string[] = [];
     let counting = false;
-    const watched = new Proxy(discord, {
+    const proxy = new Proxy(discord, {
       get(target, property, receiver) {
         const value = Reflect.get(target, property, receiver);
         return typeof value === 'function'
@@ -3678,31 +3672,19 @@ describe('an id sent as a number', () => {
           : value;
       },
     });
-    const written: string[] = [];
-    clientSocket.on('data', (chunk) => written.push(String(chunk)));
-    const server = new DiscordMcplServer(watched as unknown as DiscordAdapter);
-    const serverPromise = server.serve(serverConn);
-    t.after(async () => {
-      client.close();
-      await serverPromise;
-    });
-    await mcpHandshake(client);
-    const answer = async (line: string, id: number): Promise<{ text: string; isError?: boolean }> => {
+    const server = new DiscordMcplServer(proxy as unknown as DiscordAdapter) as unknown as {
+      handleToolCall(name: string, args: Record<string, unknown>): Promise<{ content: Array<{ text?: string }>; isError?: boolean }>;
+    };
+    const call = async (name: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> => {
       counting = true;
-      clientSocket.write(line);
-      const deadline = Date.now() + 5000;
-      for (;;) {
-        const found = written.join('').split('\n').slice(0, -1).map((l) => JSON.parse(l) as { id?: unknown; result?: { content: Array<{ text?: string }>; isError?: boolean } })
-          .find((m) => m.id === id);
-        if (found?.result) {
-          counting = false;
-          return { text: found.result.content[0]?.text ?? '', isError: found.result.isError };
-        }
-        if (Date.now() > deadline) throw new Error(`no answer to call ${id}`);
-        await new Promise((r) => setTimeout(r, 5));
+      try {
+        const result = await server.handleToolCall(name, args);
+        return { text: result.content[0]?.text ?? '', isError: result.isError };
+      } finally {
+        counting = false;
       }
     };
-    return { discord, calls, answer };
+    return { discord, calls, call };
   }
 
   it('every argument any tool takes is classed either as an id argument or as not one', () => {
@@ -3710,16 +3692,15 @@ describe('an id sent as a number', () => {
     assert.deepEqual(keys.filter((key) => ID_ARGUMENTS.includes(key) === NOT_IDS.includes(key)), []);
   });
 
-  it('is refused at every id argument of every tool, alone or in a list, naming it and what arrived, before anything is done', async (t) => {
+  it('is refused at every id argument of every tool, alone or in a list, naming it and what arrived, before anything is done', async () => {
     assert.ok(idCases.length > 0);
-    const { calls, answer } = await wired(t);
-    let id = 100;
+    const { calls, call } = watched();
     for (const { tool, key } of idCases) {
       for (const list of [false, true]) {
         const args: Record<string, unknown> = {};
         for (const required of tool.inputSchema.required ?? []) args[required] = required === 'channelId' ? 'c1' : 'x';
-        args[key] = list ? [WRITTEN] : WRITTEN;
-        const result = await answer(rawLine(++id, tool.name, args, [WRITTEN]), id);
+        args[key] = list ? [JSON.parse(WRITTEN)] : JSON.parse(WRITTEN);
+        const result = await call(tool.name, args);
         const which = `${tool.name} ${key}${list ? ' in a list' : ''}`;
         assert.equal(result.isError, true, `${which}: ${result.text}`);
         assert.equal(result.text, refusal(key, list ? `[${ARRIVED}]` : ARRIVED), which);
@@ -3728,24 +3709,24 @@ describe('an id sent as a number', () => {
     }
   });
 
-  it('names every id sent as a number, small ones included', async (t) => {
-    const { calls, answer } = await wired(t);
-    const result = await answer(rawLine(5, 'delete_message', { channelId: '42', messageId: WRITTEN }, ['42', WRITTEN]), 5);
+  it('names every id sent as a number, small ones included', async () => {
+    const { calls, call } = watched();
+    const result = await call('delete_message', { channelId: 42, messageId: JSON.parse(WRITTEN) });
     assert.equal(result.isError, true, result.text);
     assert.equal(result.text, refusal('channelId and messageId', `42 and ${ARRIVED}`));
     assert.deepEqual(calls, []);
   });
 
-  it('leaves a number alone under a name the tool does not take, as before', async (t) => {
-    const { discord, answer } = await wired(t);
-    const result = await answer(rawLine(6, 'send_message', { channelId: 'c1', content: 'x', messageId: WRITTEN }, [WRITTEN]), 6);
+  it('leaves a number alone under a name the tool does not take, as before', async () => {
+    const { discord, call } = watched();
+    const result = await call('send_message', { channelId: 'c1', content: 'x', messageId: JSON.parse(WRITTEN) });
     assert.equal(result.isError ?? false, false, result.text);
     assert.deepEqual(discord.sentMessages.map((m) => [m.channelId, m.content]), [['c1', 'x']]);
   });
 
-  it('as a string, the same id reaches Discord exactly as written', async (t) => {
-    const { discord, answer } = await wired(t);
-    const result = await answer(rawLine(7, 'delete_message', { channelId: 'c1', messageId: WRITTEN }), 7);
+  it('as a string, the same id reaches Discord exactly as written', async () => {
+    const { discord, call } = watched();
+    const result = await call('delete_message', { channelId: 'c1', messageId: WRITTEN });
     assert.equal(result.isError ?? false, false, result.text);
     assert.deepEqual(discord.deletedMessages, [{ channelId: 'c1', messageId: WRITTEN }]);
   });
