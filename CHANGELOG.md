@@ -22,7 +22,8 @@ in the git log and PR descriptions.
   ones were left out. The older messages themselves still aren't
   delivered, and nothing says how many there were. When the catch-up took
   every message after its position, exactly as many as the limit included,
-  its delivery is as before. The log's count of channels the catch-up
+  its delivery is as before, apart from the order of messages sent in the
+  same millisecond, below. The log's count of channels the catch-up
   delivered from leaves out a channel that got only that notice. No tool
   description changes.
 - **A catch-up's saved position no longer stops short of messages sent in
