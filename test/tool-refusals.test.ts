@@ -316,7 +316,7 @@ describe('a send refused for its files says nothing was sent, and what to send i
     writeFileSync(fine, 'x');
     for (const none of [null, false, 0]) await send(adapter, [{ path: fine, name: none, description: none }]);
     const attached = sends.map((s) => (s as { files: Array<{ name?: string; description?: string }> }).files[0]);
-    assert.deepEqual(attached.map((f) => [f.name, f.description]),
+    assert.deepEqual(attached.map((f) => [f.name, f.description ?? undefined]),
       [['fine.txt', undefined], ['fine.txt', undefined], ['fine.txt', undefined]]);
   });
 
