@@ -27,6 +27,7 @@ function fixture(opts: {
   dmAdmitted?: Set<string>;
   lookups?: Record<string, Looked | (() => Promise<Looked>)>;
   postAt?: number;
+  cachedRecipientName?: string;
 } = {}) {
   const log: string[] = [];
   const changed: Changed[] = [];
@@ -42,7 +43,7 @@ function fixture(opts: {
     getCachedChannelFacts: (id: string) => opts.facts?.[id] ?? null,
     getCachedChannelFactsFor: (ids: Iterable<string>) =>
       new Map([...ids].flatMap((id) => (opts.facts?.[id] ? [[id, opts.facts[id]] as const] : []))),
-    getCachedDmRecipientName: () => null,
+    getCachedDmRecipientName: () => opts.cachedRecipientName ?? null,
     isStale: () => false,
     hasGuild: (guildId: string) => guildId === 'g1',
     channelAdmitted: (_guildId: string, channelId: string) => opts.admitted?.has(channelId) ?? true,
@@ -162,7 +163,7 @@ describe('a post registers the place it went before its answer, where this serve
     assert.equal(f.server.dmChannelIds.has(DM), false);
   });
 
-  it('a post into a DM by its channel id registers it with the other party a lookup finds', async (t) => {
+  it('a post into a DM by its channel id registers it with the other party a lookup finds, and its answer names that party', async (t) => {
     watermarkFile(t, {});
     const OTHER = '160000000000000019';
     const f = fixture({
@@ -174,10 +175,12 @@ describe('a post registers the place it went before its answer, where this serve
         [DM]: { kind: 'dm', recipientId: 'u7', recipientName: 'Bo' },
         [OTHER]: { kind: 'dm', recipientId: 'u8', recipientName: 'Flo' },
       },
+      cachedRecipientName: 'Bot',
     });
-    for (const [tool, place, extra] of [['send_message', DM, {}], ['reply_message', OTHER, { messageId: '5' }]] as const) {
+    for (const [tool, place, extra, label] of [['send_message', DM, {}, 'DM: Bo'], ['reply_message', OTHER, { messageId: '5' }, 'DM: Flo']] as const) {
       const answer = await f.call(tool, { channelId: place, content: 'hi', ...extra });
       assert.equal(answer.channelId, `discord:dm:${place}`, tool);
+      assert.equal(answer.channelLabel, label, tool);
     }
     assert.deepEqual(f.log, ['channels/changed', 'answered', 'channels/changed', 'answered']);
     assert.deepEqual(f.changed.map((c) => c.added?.map((d) => [d.id, d.label, d.metadata?.recipientId])), [
