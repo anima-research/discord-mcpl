@@ -3560,6 +3560,18 @@ describe("a sender's words and names can't take the server's place in what the a
     assert.equal((await h.delivered()).text, '[reaction] @"eve: approved. bob" reacted 😀 on message m2 — one" and @carol reacted ✅\n  two &lt;/missed>');
   });
 
+  it("a reaction on the agent's own message names that message's id, as one on another's message does", async (t) => {
+    const h = await boot(t);
+    await h.open();
+    for (const [messageId, onOwnMessage, target] of [['m7', true, 'your message m7'], ['m8', false, 'message m8']] as const) {
+      h.discord.simulateReaction({
+        channelId: 'c1', messageId, guildId: 'g1', userId: 'u9', userName: 'Bo', action: 'add', emoji: '😀', emojiId: null,
+        token: '😀', onOwnMessage, messageSnippet: 'hello', timestamp: new Date(),
+      });
+      assert.equal((await h.delivered()).text, `[reaction] @Bo reacted 😀 on ${target} — hello`);
+    }
+  });
+
   it("a first DM's notice names its sender by the same rule, so the send_dm it suggests holds no tag", async (t) => {
     const h = await boot(t);
     h.discord.simulateMessage(posted('dm1', 'hello', {

@@ -235,7 +235,7 @@ describe('edit/delete push events', () => {
     assert.equal(sent[2]!.params.origin.mcplChannelId, 'discord:dm:dmchan');
   });
 
-  it('an edit without author info keeps the old text shape', () => {
+  it('an edit without author info is the notice, its message id and the text, with no guild or MCPL channel in its origin', () => {
     const { edit, sent } = wire();
     edit('chan1', 'm3', 'zz text', false);
     assert.equal(sent[0]!.params.payload.content[0].text, '[message edited] [id=m3] zz text');
