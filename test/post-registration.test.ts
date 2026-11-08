@@ -3,9 +3,9 @@ import * as assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SnowflakeUtil } from 'discord.js';
 import type { ChannelFacts, DiscordAdapter } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
+import { snowflakeAt } from '../src/dm-notices.js';
 import { toDescriptor, toDmDescriptor } from '../src/channels.js';
 
 const DM = '160000000000000009';
@@ -18,7 +18,7 @@ type Looked = { kind: 'dm'; recipientId: string; recipientName: string } | { kin
 type Descriptor = { id: string; label: string; metadata?: Record<string, unknown> };
 type Changed = { added?: Descriptor[]; updated?: Descriptor[] };
 
-const postedAt = (ms: number) => SnowflakeUtil.generate({ timestamp: ms }).toString();
+const postedAt = (ms: number) => snowflakeAt(ms);
 
 function fixture(opts: {
   meta?: Record<string, Meta>;
@@ -33,6 +33,7 @@ function fixture(opts: {
   const lookedUp: string[] = [];
   let inFlight = 0;
   let mostAtOnce = 0;
+  let dmPosts = 0;
   const adapter = {
     botUserId: 'bot',
     refreshStale: async () => {},
@@ -63,7 +64,7 @@ function fixture(opts: {
       return { messageId: postedAt(opts.postAt ?? Date.now()) };
     },
     async sendDM() {
-      return { messageId: postedAt(Date.now()), channelId: DM, recipientId: 'u9', recipientName: 'Ra' };
+      return { messageId: postedAt(Date.parse('2026-11-08T00:00:00Z') + 1000 * ++dmPosts), channelId: DM, recipientId: 'u9', recipientName: 'Ra' };
     },
   };
   const server = new DiscordMcplServer(adapter as unknown as DiscordAdapter) as unknown as {
@@ -137,8 +138,18 @@ describe('a post registers the place it went before its answer, where this serve
     const f = fixture();
     await f.call('send_dm', { userId: 'u9', content: 'hi' });
     const after = JSON.parse(readFileSync(path, 'utf8'));
-    assert.deepEqual(after.watermarks, { [CHANNEL]: '120000000000000002' });
+    assert.deepEqual(after.watermarks, { [CHANNEL]: '120000000000000002', [DM]: postedAt(Date.parse('2026-11-08T00:00:01Z')) });
     assert.deepEqual(after.dmChannels, ['150000000000000005', DM]);
+  });
+
+  it("a post into a DM with no catch-up position makes the post's id its position, and a DM that has one keeps it", async (t) => {
+    const path = watermarkFile(t, {});
+    const f = fixture();
+    await f.call('send_dm', { userId: 'u9', content: 'first' });
+    const first = postedAt(Date.parse('2026-11-08T00:00:01Z'));
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).watermarks?.[DM], first);
+    await f.call('send_dm', { userId: 'u9', content: 'second' });
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).watermarks?.[DM], first);
   });
 
   it('send_dm to someone the DM list leaves out: nothing is registered or kept, and the answer still names the DM', async (t) => {
@@ -153,17 +164,64 @@ describe('a post registers the place it went before its answer, where this serve
 
   it('a post into a DM by its channel id registers it with the other party a lookup finds', async (t) => {
     watermarkFile(t, {});
+    const OTHER = '160000000000000019';
     const f = fixture({
-      meta: { [DM]: { name: null, guildId: null, guildName: null, isDM: true } },
-      lookups: { [DM]: { kind: 'dm', recipientId: 'u7', recipientName: 'Bo' } },
+      meta: {
+        [DM]: { name: null, guildId: null, guildName: null, isDM: true },
+        [OTHER]: { name: null, guildId: null, guildName: null, isDM: true },
+      },
+      lookups: {
+        [DM]: { kind: 'dm', recipientId: 'u7', recipientName: 'Bo' },
+        [OTHER]: { kind: 'dm', recipientId: 'u8', recipientName: 'Flo' },
+      },
     });
-    for (const [tool, extra] of [['send_message', {}], ['reply_message', { messageId: '5' }]] as const) {
-      const answer = await f.call(tool, { channelId: DM, content: 'hi', ...extra });
-      assert.equal(answer.channelId, `discord:dm:${DM}`, tool);
+    for (const [tool, place, extra] of [['send_message', DM, {}], ['reply_message', OTHER, { messageId: '5' }]] as const) {
+      const answer = await f.call(tool, { channelId: place, content: 'hi', ...extra });
+      assert.equal(answer.channelId, `discord:dm:${place}`, tool);
     }
-    assert.deepEqual(f.log, ['channels/changed', 'answered', 'answered']);
-    assert.deepEqual(f.changed[0].added?.map((d) => [d.id, d.label, d.metadata?.recipientId]), [[`discord:dm:${DM}`, 'DM: Bo', 'u7']]);
-    assert.ok(f.server.dmChannelIds.has(DM));
+    assert.deepEqual(f.log, ['channels/changed', 'answered', 'channels/changed', 'answered']);
+    assert.deepEqual(f.changed.map((c) => c.added?.map((d) => [d.id, d.label, d.metadata?.recipientId])), [
+      [[`discord:dm:${DM}`, 'DM: Bo', 'u7']],
+      [[`discord:dm:${OTHER}`, 'DM: Flo', 'u8']],
+    ]);
+    assert.ok(f.server.dmChannelIds.has(DM) && f.server.dmChannelIds.has(OTHER));
+  });
+
+  it('a post into a DM already registered and kept makes no lookup, and keeps the position the DM has', async (t) => {
+    const path = watermarkFile(t, { watermarks: { [DM]: '150000000000000001' }, dmChannels: [DM] });
+    const f = fixture({ meta: { [DM]: { name: null, guildId: null, guildName: null, isDM: true } } });
+    f.server.channelManager.register(toDmDescriptor(DM, 'Bo', false, 80, 'u7'));
+    const answer = await f.call('send_message', { channelId: DM, content: 'hi' });
+    assert.equal(answer.channelId, `discord:dm:${DM}`);
+    assert.deepEqual(f.lookedUp, []);
+    assert.deepEqual(f.log, ['answered']);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).watermarks?.[DM], '150000000000000001');
+  });
+
+  it('a post into a DM registered and kept with no catch-up position makes the post its position, with no lookup', async (t) => {
+    const path = watermarkFile(t, { dmChannels: [DM] });
+    const at = Date.parse('2026-11-08T00:00:05Z');
+    const f = fixture({ meta: { [DM]: { name: null, guildId: null, guildName: null, isDM: true } }, postAt: at });
+    f.server.channelManager.register(toDmDescriptor(DM, 'Bo', false, 80, 'u7'));
+    await f.call('send_message', { channelId: DM, content: 'hi' });
+    assert.deepEqual(f.lookedUp, []);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).watermarks?.[DM], postedAt(at));
+  });
+
+  it("a post into a DM whose other party Discord's answer leaves uncertain registers nothing, and says so in one line", async (t) => {
+    watermarkFile(t, {});
+    const f = fixture({ meta: { [DM]: { name: null, guildId: null, guildName: null, isDM: true } }, lookups: { [DM]: { kind: 'uncertain' } } });
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => { lines.push(a.join(' ')); };
+    t.after(() => { console.error = original; });
+    const answer = await f.call('send_message', { channelId: DM, content: 'hi' });
+    assert.equal(answer.channelId, `discord:dm:${DM}`);
+    assert.deepEqual(f.log, ['answered']);
+    assert.equal(f.server.dmChannelIds.has(DM), false);
+    const said = lines.filter((l) => l.includes(DM));
+    assert.equal(said.length, 1, lines.join(' | '));
+    assert.match(said[0], /couldn't be read/);
   });
 
   it('a post into a DM the lookup finds no longer served registers nothing', async (t) => {
@@ -261,6 +319,35 @@ describe('at start, the DMs the watermark file keeps are looked up one at a time
       assert.equal(lines.filter((l) => l.includes(id)).length, 1, `one line for ${id}: ${lines.join(' | ')}`);
       assert.ok(f.server.dmChannelIds.has(id), 'a skipped DM stays kept');
     }
+    assert.doesNotMatch(lines.find((l) => l.includes(refused))!, /registers when/, 'a DM the list may leave out is promised nothing');
+  });
+
+  it('the batch leaves out a DM registered while the lookups ran, and one whose recipient the DM list dropped meanwhile', async (t) => {
+    const [early, dropped, last] = ['171', '172', '173'].map((p) => `${p}000000000000001`);
+    watermarkFile(t, { dmChannels: [early, dropped, last] });
+    const admitted = new Set(['u1', 'u2', 'u3']);
+    let f!: ReturnType<typeof fixture>;
+    f = fixture({
+      dmAdmitted: admitted,
+      lookups: {
+        [early]: { kind: 'dm', recipientId: 'u1', recipientName: 'u1-from-lookup' },
+        [dropped]: { kind: 'dm', recipientId: 'u2', recipientName: 'Bea' },
+        [last]: async () => {
+          f.server.channelManager.register(toDmDescriptor(early, 'Al', false, 80, 'u1'));
+          admitted.delete('u2');
+          return { kind: 'dm', recipientId: 'u3', recipientName: 'Cal' };
+        },
+      },
+    });
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => { lines.push(a.join(' ')); };
+    t.after(() => { console.error = original; });
+    await f.server.registerKeptDms();
+    assert.deepEqual(f.changed.map((c) => c.added?.map((d) => d.id)), [[`discord:dm:${last}`]]);
+    assert.equal(f.server.channelManager.get(`discord:dm:${early}`)?.label, 'DM: Al', 'the registration made meanwhile stands');
+    assert.equal(f.server.channelManager.get(`discord:dm:${dropped}`), undefined);
+    assert.equal(lines.filter((l) => l.includes(dropped)).length, 1, lines.join(' | '));
   });
 
   it('a lookup that rejects leaves its DM out and the others still land', async (t) => {
