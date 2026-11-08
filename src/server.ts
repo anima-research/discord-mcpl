@@ -4068,7 +4068,7 @@ export class DiscordMcplServer {
         return;
       }
       const verb = ev.action === 'add' ? 'reacted' : 'removed a reaction';
-      const target = ev.onOwnMessage ? 'your message' : `message ${ev.messageId}`;
+      const target = `${ev.onOwnMessage ? 'your message' : 'message'} ${ev.messageId}`;
       const quoted = ev.messageSnippet ? ` — ${senderText(ev.messageSnippet)}` : '';
       const line = `[reaction] @${nameValue(ev.userName)} ${verb} ${ev.emoji} on ${target}${quoted}`;
       const reactionChannelId = mcplChannelId(ev.guildId ?? 'dm', ev.channelId);

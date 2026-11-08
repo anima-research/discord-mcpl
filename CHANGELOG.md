@@ -15,9 +15,11 @@ in the git log and PR descriptions.
   the text where no name is known, the form catch-up lines already use; a
   backscroll line puts the id beside its time, as a catch-up line does.
   Discord keeps a message's id across edits, so an edit names the message
-  it changed. Nothing else on the line changes: a live message gains no
-  time, and the reply marker and the delete notice are as they were. Tool
-  descriptions don't change.
+  it changed. A reaction notice on the agent's own message now names that
+  message's id too, as `on your message <id>`, in the form a reaction on
+  another message already used (`on message <id>`). Nothing else on the
+  line changes: a live message gains no time, and the reply marker and
+  the delete notice are as they were. Tool descriptions don't change.
 
 ## 0.6.0 — 2026-10-30
 
