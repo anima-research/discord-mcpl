@@ -1756,7 +1756,8 @@ export class DiscordMcplServer {
         content: [textContent(
           'Nothing was done: ids must be strings in quotes, since a number past 2^53 can lose its last digits. ' +
             `This call sent a number at ${listed(numbered)}, which arrived as ` +
-            `${listed(numbered.map((key) => JSON.stringify(args[key])))}.`,
+            `${listed(numbered.map((key) => JSON.stringify(args[key])))}. ` +
+            'Those may not be the digits you sent: take the id again from where you read it, not from this message, and send it in quotes.',
         )],
         isError: true,
       };

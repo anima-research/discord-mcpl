@@ -14,7 +14,9 @@ in the git log and PR descriptions.
   `delete_message` and `send_message` went ahead with that rounded number,
   and a few others refused a number without saying why. Now a tool refuses
   a number at any id argument it takes, doing nothing, and says which
-  argument it was and what it arrived as. The id arguments are
+  argument it was and what it arrived as, and that those may not be the
+  digits sent, asking for the id again, taken from where it was read and
+  sent in quotes. The id arguments are
   `channelId`, `messageId`, `userId`, `guildId`, `categoryId`, `before`,
   `after` and `latestFrom`, which can carry a user id, and
   `filters_update`'s `addGuilds`, `removeGuilds` and `setDmUsers`, where a

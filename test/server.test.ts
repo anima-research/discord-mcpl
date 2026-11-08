@@ -3654,7 +3654,8 @@ describe('an id sent as a number', () => {
     Object.keys(tool.inputSchema.properties).filter((key) => ID_ARGUMENTS.includes(key)).map((key) => ({ tool, key })));
   const refusal = (keys: string, arrived: string) =>
     'Nothing was done: ids must be strings in quotes, since a number past 2^53 can lose its last digits. ' +
-    `This call sent a number at ${keys}, which arrived as ${arrived}.`;
+    `This call sent a number at ${keys}, which arrived as ${arrived}. ` +
+    'Those may not be the digits you sent: take the id again from where you read it, not from this message, and send it in quotes.';
 
   function watched() {
     const discord = new MockDiscordAdapter();
@@ -3714,6 +3715,28 @@ describe('an id sent as a number', () => {
     const result = await call('delete_message', { channelId: 42, messageId: JSON.parse(WRITTEN) });
     assert.equal(result.isError, true, result.text);
     assert.equal(result.text, refusal('channelId and messageId', `42 and ${ARRIVED}`));
+    assert.deepEqual(calls, []);
+  });
+
+  it('refuses a 0 sent as a number, so a cursor or server is never dropped as if it were missing', async () => {
+    const { calls, call } = watched();
+    for (const [name, key, args] of [
+      ['fetch_history', 'before', { channelId: 'c1', before: 0 }],
+      ['fetch_history', 'after', { channelId: 'c1', after: 0 }],
+      ['list_emojis', 'guildId', { guildId: 0 }],
+    ] as const) {
+      const result = await call(name, { ...args });
+      assert.equal(result.isError, true, `${name} ${key}: ${result.text}`);
+      assert.equal(result.text, refusal(key, '0'), `${name} ${key}`);
+    }
+    assert.deepEqual(calls, []);
+  });
+
+  it('refuses a list that holds a number among strings', async () => {
+    const { calls, call } = watched();
+    const result = await call('filters_update', { addGuilds: ['123', JSON.parse(WRITTEN)] });
+    assert.equal(result.isError, true, result.text);
+    assert.equal(result.text, refusal('addGuilds', `["123",${ARRIVED}]`));
     assert.deepEqual(calls, []);
   });
 
