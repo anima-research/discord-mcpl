@@ -3752,3 +3752,41 @@ describe('U+2028, U+2029 and a reset on the wire', () => {
     assert.ok(answer.serverInfo, 'the next client is answered');
   });
 });
+
+describe('the DMs the watermark file keeps are registered after the first host connects', () => {
+  it('announces each kept DM the DM list admits, in one channels/changed after channels/register', { timeout: 10_000 }, async (t) => {
+    const path = join(tmpdir(), `dm-kept-${process.pid}-${Date.now()}.json`);
+    writeFileSync(path, JSON.stringify({ dmChannels: ['dmkept1'] }));
+    const before = process.env.DISCORD_WATERMARK_FILE;
+    process.env.DISCORD_WATERMARK_FILE = path;
+    t.after(() => {
+      if (before === undefined) delete process.env.DISCORD_WATERMARK_FILE;
+      else process.env.DISCORD_WATERMARK_FILE = before;
+      if (existsSync(path)) unlinkSync(path);
+    });
+    const { client, serverConn, discord } = await createTestPair();
+    Object.assign(discord, {
+      lookUpServedChannel: async (guildSegment: string, channelId: string) =>
+        guildSegment === 'dm' && channelId === 'dmkept1' ? { kind: 'dm', recipientId: 'u_kay', recipientName: 'Kay' } : null,
+      fetchHistory: async () => [],
+    });
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
+    await mcplHandshake(client);
+    for (;;) {
+      const msg = await client.nextMessage();
+      if (msg.type === 'request') {
+        client.sendResponse(msg.request.id, {});
+        continue;
+      }
+      if (msg.type !== 'notification' || msg.notification.method !== method.CHANNELS_CHANGED) continue;
+      const added = (msg.notification.params as { added?: Array<{ id: string; label?: string }> }).added ?? [];
+      assert.deepEqual(added.map((d) => [d.id, d.label]), [['discord:dm:dmkept1', 'DM: Kay']]);
+      break;
+    }
+  });
+});
