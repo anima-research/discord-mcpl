@@ -4358,6 +4358,14 @@ describe('the messages a closed catch-up sweep left out', () => {
       };
     });
 
+  type ReadOptions = { limit?: number; before?: string; after?: string };
+  const byId = (a: string, b: string) => (BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0);
+  const readLikeDiscord = (history: Missed[], options?: ReadOptions): Missed[] => history
+    .filter((m) => (options?.after === undefined || byId(m.id, options.after) > 0)
+      && (options?.before === undefined || byId(m.id, options.before) < 0))
+    .sort((a, b) => byId(b.id, a.id))
+    .slice(0, options?.limit ?? 50);
+
   async function restarted(t: TestContext, history: Missed[], channels: string[] = ['c1']) {
     const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-left-out-${++watermarkFiles}.json`);
     writeFileSync(wmPath, JSON.stringify({ watermarks: Object.fromEntries(channels.map((c) => [c, '100'])), dmChannels: [] }));
@@ -4372,6 +4380,12 @@ describe('the messages a closed catch-up sweep left out', () => {
       for (const line of lines) if (line.trim()) wire.push(JSON.parse(line));
     });
     discord.historyToReturn = history;
+    const reads: Array<{ channelId: string; options?: ReadOptions }> = [];
+    (discord as unknown as { fetchHistory: (channelId: string, options?: ReadOptions) => Promise<Missed[]> })
+      .fetchHistory = async (channelId, options) => {
+        reads.push({ channelId, options });
+        return readLikeDiscord(discord.historyToReturn, options);
+      };
     for (const [c, name] of channels.map((c, i) => [c, i === 0 ? 'general' : `other-${i}`])) {
       discord.cachedChannelMeta[c] = { name, guildId: 'g1', guildName: 'Test Guild', isDM: false };
       discord.facts[c] = { id: c, guildId: 'g1', guildName: 'Test Guild', type: 'text', name };
@@ -4388,7 +4402,7 @@ describe('the messages a closed catch-up sweep left out', () => {
     const reg = await nextWithin(client);
     if (reg.type !== 'request' || reg.request.method !== method.CHANNELS_REGISTER) assert.fail('expected the registration');
     const savedPosition = () => (JSON.parse(readFileSync(wmPath, 'utf8')) as { watermarks: Record<string, string> }).watermarks.c1;
-    return { client, discord, registration: reg.request, savedPosition, wire };
+    return { client, discord, registration: reg.request, savedPosition, wire, reads };
   }
 
   async function positionSaved(savedPosition: () => string, id: string): Promise<void> {
@@ -4426,20 +4440,21 @@ describe('the messages a closed catch-up sweep left out', () => {
     }
   }
 
-  function holdTheSweepsRead(discord: MockDiscordAdapter, history: Missed[]) {
+  function holdTheSweepsRead(discord: MockDiscordAdapter) {
     let entered!: () => void;
     const reading = new Promise<void>((resolve) => { entered = resolve; });
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
     let calls = 0;
-    (discord as unknown as { fetchHistory: (channelId: string, options?: { limit?: number }) => Promise<Missed[]> })
-      .fetchHistory = async (_channelId, options) => {
-        if (++calls === 1) {
-          entered();
-          await released;
-        }
-        return options?.limit !== undefined && options.limit < history.length ? history.slice(-options.limit) : history;
-      };
+    const stand = discord as unknown as { fetchHistory: (channelId: string, options?: ReadOptions) => Promise<Missed[]> };
+    const read = stand.fetchHistory;
+    stand.fetchHistory = async (channelId, options) => {
+      if (++calls === 1) {
+        entered();
+        await released;
+      }
+      return read(channelId, options);
+    };
     return { reading, release };
   }
 
@@ -4519,7 +4534,8 @@ describe('the messages a closed catch-up sweep left out', () => {
     assert.match(deleted, /^\[message deleted\] [^\n]*\b109 by @Bob — m109$/, deleted);
   });
 
-  it('counts the rest as sent, with nothing to quote, when its send fails with no verdict, so the deletion of one of them is reported bare', { timeout: 15_000 }, async (t) => {
+  it('counts the rest as sent, with nothing to quote, when its send fails with no verdict, so the deletion of one of them is reported bare, and says the send failed', { timeout: 15_000 }, async (t) => {
+    const log = t.mock.method(console, 'error', () => {});
     const { client, discord, registration } = await restarted(t, missed(10, 101));
     client.sendResponse(registration.id, {});
     await nextPush(client);
@@ -4532,9 +4548,12 @@ describe('the messages a closed catch-up sweep left out', () => {
     discord.simulateDelete('c1', '109', false, { guildId: 'g1', authorName: 'Bob' });
     const deleted = await nextPush(client);
     assert.match(deleted, /^\[message deleted\] [^\n]*\b109 by @Bob$/, deleted);
+    const lines = log.mock.calls.map((c) => c.arguments.map(String).join(' '));
+    assert.ok(lines.some((l) => l.includes('channel c1') && /\b2\b/.test(l) && l.includes('internal error')), lines.join('\n'));
   });
 
-  it("doesn't count the rest as sent when the host refuses it, so the deletion of one of them isn't reported", { timeout: 15_000 }, async (t) => {
+  it("doesn't count the rest as sent when the host refuses it, so the deletion of one of them isn't reported, and says it was refused", { timeout: 15_000 }, async (t) => {
+    const log = t.mock.method(console, 'error', () => {});
     const { client, discord, registration } = await restarted(t, missed(10, 101));
     client.sendResponse(registration.id, {});
     await nextPush(client);
@@ -4548,11 +4567,115 @@ describe('the messages a closed catch-up sweep left out', () => {
     discord.simulateDelete('c1', '105', false, { guildId: 'g1', authorName: 'Bob' });
     const deleted = await nextPush(client);
     assert.match(deleted, /^\[message deleted\] [^\n]*\b105 by @Bob — m105$/, `only the deletion of one the sweep's block carried is reported: ${deleted}`);
+    const lines = log.mock.calls.map((c) => c.arguments.map(String).join(' '));
+    assert.ok(lines.some((l) => l.includes('channel c1') && /\b2\b/.test(l) && l.includes('refused') && l.includes('not now')), lines.join('\n'));
+  });
+
+  it('delivers the rest as Discord has it at the open: an edit since the sweep shows, and a message deleted since is left out', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    discord.historyToReturn = discord.historyToReturn
+      .filter((m) => m.id !== '110')
+      .map((m) => (m.id === '109' ? { ...m, content: 'm109 edited', cleanContent: 'm109 edited' } : m));
+
+    await open(client);
+    const rest = await nextPush(client);
+    assert.match(rest, missedHeader(1), rest);
+    assert.match(rest, /: m109 edited$/m, rest);
+    assert.doesNotMatch(rest, /m110\b/, rest);
+  });
+
+  it("reads the rest again only within what the sweep read, so a message posted after the sweep's read isn't in it", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, reads } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    discord.historyToReturn = [...discord.historyToReturn, ...missed(11).slice(10)];
+
+    await open(client);
+    const rest = await nextPush(client);
+    assert.match(rest, missedHeader(2), rest);
+    assert.match(rest, /m109\b/, rest);
+    assert.match(rest, /m110\b/, rest);
+    assert.doesNotMatch(rest, /m111\b/, rest);
+    assert.equal(reads.filter((r) => r.channelId === 'c1').length, 2, 'the sweep read the channel, and the open read it again');
+  });
+
+  it("doesn't read a channel again at its open when its first block delivered everything the sweep read", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, reads } = await restarted(t, missed(3, 102));
+    client.sendResponse(registration.id, {});
+    const mentions = await nextPush(client);
+    for (const id of [101, 102, 103]) assert.match(mentions, new RegExp(`m${id}\\b`), mentions);
+
+    await open(client);
+    await nothingMissedBefore(client, discord);
+    assert.equal(reads.filter((r) => r.channelId === 'c1').length, 1, 'only the sweep read the channel');
+  });
+
+  it("sends nothing, and says so naming the channel, when the rest can't be read at the open", { timeout: 15_000 }, async (t) => {
+    const log = t.mock.method(console, 'error', () => {});
+    const { client, discord, registration } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    (discord as unknown as { fetchHistory: () => Promise<Missed[]> }).fetchHistory = async () => {
+      throw new Error('Missing Access');
+    };
+
+    await open(client);
+    await nothingMissedBefore(client, discord);
+    const lines = log.mock.calls.map((c) => c.arguments.map(String).join(' '));
+    assert.ok(lines.some((l) => l.includes('channel c1') && l.includes('Missing Access')), lines.join('\n'));
+  });
+
+  it('leaves out of the rest a message forwarded live while the sweep was still reading', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(3));
+    const { reading, release } = holdTheSweepsRead(discord);
+    t.after(() => release());
+    client.sendResponse(registration.id, {});
+    await reading;
+    await open(client);
+    discord.simulateMessage({
+      id: '103', content: 'm103', cleanContent: 'm103', authorId: 'u2', authorName: 'Bob', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Guild', mentions: [], attachments: [],
+      timestamp: new Date(),
+    });
+    const live = await nextWithin(client, 5000);
+    if (live.type !== 'request') assert.fail(`expected the live message, got a ${live.type}`);
+    client.sendResponse(live.request.id, {});
+    assert.match(JSON.stringify(live.request.params), /m103\b/);
+    release();
+
+    const rest = await nextPush(client);
+    assert.match(rest, missedHeader(2), rest);
+    assert.match(rest, /m101\b/, rest);
+    assert.match(rest, /m102\b/, rest);
+    assert.doesNotMatch(rest, /m103\b/, rest);
+  });
+
+  it("sends nothing more when the open's history answer carried every message the sweep left out", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    const answer = (await open(client, { limit: 2 })) as { history?: Array<{ messageId: string }> };
+    assert.deepEqual(answer.history?.map((m) => m.messageId), ['109', '110']);
+    await nothingMissedBefore(client, discord);
+  });
+
+  it("keeps nothing when the sweep's own push fails, so its position stays for the next start", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, savedPosition } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    const mentions = await nextPushRequest(client);
+    client.sendError(mentions.id, -32603, 'internal error');
+    await answerRead(client);
+
+    await open(client);
+    assert.equal(savedPosition(), '100', "the failed push left the sweep's position where it was");
+    await nothingMissedBefore(client, discord);
   });
 
   it('delivers them when the open takes effect while the sweep is still reading that channel', { timeout: 15_000 }, async (t) => {
     const { client, discord, registration } = await restarted(t, missed(3));
-    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    const { reading, release } = holdTheSweepsRead(discord);
     t.after(() => release());
     client.sendResponse(registration.id, {});
     await reading;
@@ -4620,7 +4743,7 @@ describe('the messages a closed catch-up sweep left out', () => {
 
   it("leaves out of them what an open's history answer carries, a later open's included", { timeout: 15_000 }, async (t) => {
     const { client, discord, registration } = await restarted(t, missed(3));
-    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    const { reading, release } = holdTheSweepsRead(discord);
     t.after(() => release());
     client.sendResponse(registration.id, {});
     await reading;
@@ -4636,7 +4759,8 @@ describe('the messages a closed catch-up sweep left out', () => {
     await nothingMissedBefore(client, discord);
   });
 
-  it('delivers none of them once the filters stop admitting the channel', { timeout: 15_000 }, async (t) => {
+  it('delivers none of them once the filters stop admitting the channel, and says how many it withheld', { timeout: 15_000 }, async (t) => {
+    const log = t.mock.method(console, 'error', () => {});
     const { client, discord, registration, savedPosition } = await restarted(t, missed(10, 101));
     client.sendResponse(registration.id, {});
     const mentions = await nextPushRequest(client);
@@ -4646,11 +4770,13 @@ describe('the messages a closed catch-up sweep left out', () => {
     client.sendResponse(mentions.id, {});
     await positionSaved(savedPosition, '110');
     await nothingMissedBefore(client, discord);
+    const lines = log.mock.calls.map((c) => c.arguments.map(String).join(' '));
+    assert.ok(lines.some((l) => l.includes('channel c1') && /withheld 2\b/.test(l) && l.includes('channel-not-allowed')), lines.join('\n'));
   });
 
   it('drops them when the host closes the channel before the sweep is done with it, though it opens it again', { timeout: 15_000 }, async (t) => {
     const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
-    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    const { reading, release } = holdTheSweepsRead(discord);
     t.after(() => release());
     client.sendResponse(registration.id, {});
     await reading;
@@ -4670,7 +4796,7 @@ describe('the messages a closed catch-up sweep left out', () => {
       if (existsSync(mutedPath)) unlinkSync(mutedPath);
     });
     const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
-    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    const { reading, release } = holdTheSweepsRead(discord);
     t.after(() => release());
     const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c1' } });
     client.sendResponse(registration.id, {});
@@ -4691,7 +4817,7 @@ describe('the messages a closed catch-up sweep left out', () => {
       if (existsSync(mutedPath)) unlinkSync(mutedPath);
     });
     const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
-    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    const { reading, release } = holdTheSweepsRead(discord);
     t.after(() => release());
     const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c1' } });
     client.sendResponse(registration.id, {});
@@ -4713,7 +4839,7 @@ describe('the messages a closed catch-up sweep left out', () => {
       if (existsSync(mutedPath)) unlinkSync(mutedPath);
     });
     const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
-    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    const { reading, release } = holdTheSweepsRead(discord);
     t.after(() => release());
     const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c1' } });
     client.sendResponse(registration.id, {});
@@ -4735,7 +4861,7 @@ describe('the messages a closed catch-up sweep left out', () => {
       if (existsSync(mutedPath)) unlinkSync(mutedPath);
     });
     const { client, discord, registration } = await restarted(t, missed(10, 101), ['c1', 'c2']);
-    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    const { reading, release } = holdTheSweepsRead(discord);
     t.after(() => release());
     const tool = (name: string) => client.sendRequest('tools/call', { name, arguments: { channelId: 'c2' } });
     client.sendResponse(registration.id, {});
@@ -4751,7 +4877,7 @@ describe('the messages a closed catch-up sweep left out', () => {
 
   it('delivers nothing once the host has turned discord.messaging off', { timeout: 15_000 }, async (t) => {
     const { client, discord, registration, savedPosition } = await restarted(t, missed(3));
-    const { reading, release } = holdTheSweepsRead(discord, discord.historyToReturn);
+    const { reading, release } = holdTheSweepsRead(discord);
     t.after(() => release());
     client.sendResponse(registration.id, {});
     await reading;
