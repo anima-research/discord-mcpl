@@ -1391,7 +1391,7 @@ export class DiscordMcplServer {
           }),
         ]);
         if (this.conn !== conn) return;
-        await this.discord.whenReady();
+        if (this.discord.connecting) await this.discord.whenReady();
         if (this.conn !== conn) return;
         if (this.mcplEnabled) {
           try {
@@ -3737,11 +3737,11 @@ export class DiscordMcplServer {
   }
 
   private async waitForDiscord(timeoutMs: number): Promise<void> {
-    if (this.discord.isConnected) return;
+    if (this.discord.isConnected || !this.discord.connecting) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
-        () => reject(new Error('Discord is not connected right now (network down or reconnecting) — try again shortly.')),
+        () => reject(new Error('Discord is not connected yet: the connector is still logging in, and the network may be down. Try again shortly.')),
         timeoutMs,
       );
     });
@@ -3769,7 +3769,7 @@ export class DiscordMcplServer {
     }
 
     dbg('handlePublish', { channelId: params.channelId, textLen: text.length, preview: text.slice(0, 80) });
-    await this.waitForDiscord(60_000);
+    await this.waitForDiscord(15_000);
     const result = await this.discord.sendMessage(parsed.channelId, text);
     this.stateTracker.recordSent(result.messageId, parsed.channelId, text);
     dbg('handlePublish:sent', { channelId: params.channelId, messageId: result.messageId });

@@ -105,3 +105,44 @@ describe('connectWithRetry', () => {
     await within(adapter.whenReady());
   });
 });
+
+describe('a token Discord refuses', () => {
+  const refused = () => Object.assign(new Error('401: Unauthorized'), { status: 401 });
+
+  it('ends the connect at the probe with an error naming DISCORD_TOKEN, with no login and no retry', async () => {
+    let probes = 0;
+    const adapter = adapterWith({ probe: async () => { probes++; throw refused(); }, failLogins: 0 });
+    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /DISCORD_TOKEN/);
+    assert.equal(probes, 1);
+    assert.equal(FakeClient.made[0]!.logins, 0);
+  });
+
+  it('ends the connect at login with an error naming DISCORD_TOKEN, with no fresh client', async () => {
+    FakeClient.made = [];
+    const client = new FakeClient({ failLogin: false });
+    client.login = async () => { client.logins++; client.destroyed = true; throw Object.assign(new Error('An invalid token was provided.'), { code: 'TokenInvalid' }); };
+    const adapter = new DiscordAdapter({ token: 'not-used', clientFactory: () => client as unknown as Client, probeGateway: async () => {} });
+    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /DISCORD_TOKEN/);
+    assert.equal(client.logins, 1);
+    assert.equal(FakeClient.made.length, 1);
+  });
+});
+
+describe('connecting', () => {
+  it('is false before a connect starts, true while the gateway is unreachable, and false once it is ready', async () => {
+    let probes = 0;
+    let during: boolean | undefined;
+    const adapter = adapterWith({ probe: async () => { if (++probes < 2) { during = adapter.connecting; throw new Error('getaddrinfo ENOTFOUND discord.com'); } }, failLogins: 0 });
+    assert.equal(adapter.connecting, false);
+    await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
+    assert.equal(during, true);
+    assert.equal(adapter.connecting, false);
+    assert.equal(adapter.isConnected, true);
+  });
+
+  it('is false once a refused token has ended the connect', async () => {
+    const adapter = adapterWith({ probe: async () => { throw Object.assign(new Error('401: Unauthorized'), { status: 401 }); }, failLogins: 0 });
+    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })));
+    assert.equal(adapter.connecting, false);
+  });
+});

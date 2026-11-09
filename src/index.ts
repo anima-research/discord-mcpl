@@ -41,7 +41,10 @@ async function main(): Promise<void> {
   discord.onReady(() => {
     console.error(`[discord-mcpl] Discord connected as bot ${discord.botUserId}`);
   });
-  void discord.connectWithRetry();
+  discord.connectWithRetry().catch((err) => {
+    console.error('[discord-mcpl] Fatal error:', (err as Error).message);
+    process.exit(1);
+  });
 
   // Built before the server, so the initialize handshake can declare
   // channels.streaming. ./voice.js is imported only after the env check, inside
@@ -51,6 +54,7 @@ async function main(): Promise<void> {
   let voice = null as import('./voice.js').VoiceOutput | null;
   const vEnv = voiceEnv();
   if (vEnv) {
+    await discord.whenReady();
     try {
       const { createVoiceOutput } = await import('./voice.js');
       voice = await createVoiceOutput(vEnv, discord.rawClient);

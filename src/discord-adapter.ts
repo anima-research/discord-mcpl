@@ -680,6 +680,18 @@ export function applyMentionCandidates(
   };
 }
 
+/** Discord's answer to a token it won't accept: a 401 from the REST API
+ *  (@discordjs/rest's DiscordAPIError carries `status`), or discord.js's
+ *  TokenInvalid from login. */
+function refusedToken(err: unknown): boolean {
+  const e = err as { status?: unknown; code?: unknown } | null;
+  return e?.status === 401 || e?.code === 'TokenInvalid';
+}
+
+function tokenRefused(err: unknown): Error {
+  return new Error(`Discord refused the bot token (${(err as Error).message}): check DISCORD_TOKEN`);
+}
+
 export class DiscordAdapter {
   private client: Client;
   private readonly clientFactory: () => Client;
@@ -687,6 +699,8 @@ export class DiscordAdapter {
   /** whenReady() callers. Owned here, not by a client, so they survive a
    *  client replacement (see connectWithRetry). */
   private readyWaiters: Array<() => void> = [];
+  private connectStarted = false;
+  private connectEnded = false;
 
   get rawClient(): Client {
     return this.client;
@@ -781,8 +795,10 @@ export class DiscordAdapter {
     return this.client.isReady();
   }
 
-  /** Log in, retrying with backoff until the gateway is READY. Never rejects:
-   *  an unreachable network (sleep, VPN, captive wifi) is a wait, not a crash.
+  /** Log in, retrying with backoff until the gateway is READY: an unreachable
+   *  network (sleep, VPN, captive wifi) is a wait, not a crash. It rejects only
+   *  when Discord refuses the token (a 401 to the probe, or TokenInvalid from
+   *  login), which no wait would change.
    *
    *  discord.js destroys a client whose login() fails, and never clears that:
    *  a later successful login on the same client receives messages but
@@ -792,6 +808,7 @@ export class DiscordAdapter {
    *  probe the gateway endpoint first, leaving the client untouched while the
    *  network is down, and if a login fails anyway, replace the client. */
   async connectWithRetry(opts: { initialDelayMs?: number; maxDelayMs?: number } = {}): Promise<void> {
+    this.connectStarted = true;
     let delay = opts.initialDelayMs ?? 5_000;
     const maxDelay = opts.maxDelayMs ?? 60_000;
     const wait = async () => {
@@ -802,6 +819,7 @@ export class DiscordAdapter {
       try {
         await this.probeGatewayFn();
       } catch (err) {
+        if (refusedToken(err)) { this.connectEnded = true; throw tokenRefused(err); }
         console.error(
           `[discord-mcpl] Discord unreachable (attempt ${attempt}): ${(err as Error).message} — retrying in ${Math.round(delay / 1000)}s`,
         );
@@ -812,6 +830,7 @@ export class DiscordAdapter {
         await this.connect();
         return;
       } catch (err) {
+        if (refusedToken(err)) { this.connectEnded = true; throw tokenRefused(err); }
         console.error(
           `[discord-mcpl] Discord login failed (attempt ${attempt}): ${(err as Error).message} — ` +
             `starting a fresh client, retrying in ${Math.round(delay / 1000)}s`,
@@ -823,9 +842,9 @@ export class DiscordAdapter {
   }
 
   /** A failed login leaves the client destroyed for good: build a new one
-   *  with the same handlers. Callers holding `rawClient` from before keep the
-   *  old one (voice output takes it at startup), so this is the fallback;
-   *  the probe keeps it rare. */
+   *  with the same handlers. Logins fail only before the gateway's first
+   *  READY, and voice output takes `rawClient` after it, so nothing holds a
+   *  replaced client. The probe keeps replacement rare. */
   private replaceClient(): void {
     const old = this.client;
     old.removeAllListeners();
@@ -841,6 +860,12 @@ export class DiscordAdapter {
   private async defaultProbeGateway(): Promise<void> {
     const rest = new REST({ version: '10', retries: 0, timeout: 15_000 }).setToken(this.token);
     await rest.get(Routes.gatewayBot());
+  }
+
+  /** True from connectWithRetry's start until the gateway is READY, and false
+   *  once a refused token has ended it. */
+  get connecting(): boolean {
+    return this.connectStarted && !this.connectEnded && !this.client.isReady();
   }
 
   /** Resolves once the gateway is READY (immediately if it already is). */

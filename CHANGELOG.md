@@ -7,9 +7,13 @@ in the git log and PR descriptions.
 
 ### Fixed
 
-- **The MCPL host is served before Discord is READY,** with login retried
-  in the background, so a slow or failed gateway login no longer stalls the
-  host. Voice setup now runs before READY when voice is configured.
+- **The MCPL host is served before Discord is ready,** with login retried
+  in the background, so an unreachable network at boot no longer fails the
+  host's handshake or ends the process. A tool call or publish made while
+  Discord is still connecting waits up to 15 s, then answers that Discord
+  isn't connected yet. A token Discord refuses still ends the process, now
+  with a line naming `DISCORD_TOKEN`. With voice configured, start-up still
+  waits for Discord, since voice setup needs it.
 - **Booting while Discord is unreachable no longer leaves the connector
   unable to send.** discord.js destroys a client whose login fails, and a
   later successful login on the same client reports `isReady()` false
