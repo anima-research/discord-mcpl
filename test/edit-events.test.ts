@@ -13,6 +13,7 @@ import { ChannelManager, toDescriptor } from '../src/channels.js';
 import { ChannelType, type Client } from 'discord.js';
 import { DiscordMcplServer } from '../src/server.js';
 import type { MessageEventInfo } from '../src/discord-adapter.js';
+import { countEveryMessageAsSent } from './every-message-sent.js';
 
 const EDITED_AT = 1790000000000;
 const guildMsg = (over: Record<string, unknown> = {}) => ({
@@ -54,6 +55,7 @@ describe('edit/delete push events', () => {
 
   function wire(subscribed = true): { server: DiscordMcplServer; edit: EditHandler; del: DeleteHandler; sent: Array<{ method: string; params: any }> } {
     const server = new DiscordMcplServer({} as DiscordAdapter);
+    countEveryMessageAsSent(server);
     const s = server as unknown as Record<string, unknown>;
     let edit: EditHandler | undefined;
     let del: DeleteHandler | undefined;
@@ -74,6 +76,7 @@ describe('edit/delete push events', () => {
       channelAdmitted: () => true,
       onMessageEdit: (h: EditHandler) => { edit = h; },
       onMessageDelete: (h: DeleteHandler) => { del = h; },
+      onOwnMessage: noop,
     };
     const sent: Array<{ method: string; params: any }> = [];
     s.conn = {
@@ -203,10 +206,10 @@ describe('edit/delete push events', () => {
 
   it('a guild edit names its author and carries the guild + composite channel id', () => {
     const { edit, sent } = wire();
-    edit('chan1', 'm1', 'zz fixed typo', false, { guildId: 'g1', authorId: 'u1', authorName: 'niston' });
+    edit('chan1', 'm1', 'zz fixed typo', false, { guildId: 'g1', channelName: 'general', guildName: 'Guild', authorId: 'u1', authorName: 'niston' });
     assert.equal(sent.length, 1);
     const { origin, payload } = sent[0]!.params;
-    assert.equal(payload.content[0].text, '[message edited] [id=m1] niston: zz fixed typo');
+    assert.equal(payload.content[0].text, '[message edited] [#general in Guild] [id=m1] niston: zz fixed typo');
     assert.equal(origin.guildId, 'g1');
     assert.equal(origin.mcplChannelId, 'discord:g1:chan1');
     assert.equal(origin.messageId, 'm1');
@@ -218,7 +221,7 @@ describe('edit/delete push events', () => {
     const { server, edit, sent } = wire();
     edit('dmchan', 'm2', 'zz hola', true, { guildId: null, authorId: 'u2', authorName: '_reim0n' });
     const { origin, payload } = sent[0]!.params;
-    assert.equal(payload.content[0].text, '[message edited] [id=m2] _reim0n: zz hola');
+    assert.equal(payload.content[0].text, '[message edited] [DM] [id=m2] _reim0n: zz hola');
     assert.equal(origin.guildId, undefined);
     assert.equal(origin.mcplChannelId, 'discord:dm:dmchan');
     assert.equal(((server as any).channelManager as ChannelManager).get('discord:dm:dmchan')?.label, 'DM: _reim0n');
@@ -235,10 +238,10 @@ describe('edit/delete push events', () => {
     assert.equal(sent[2]!.params.origin.mcplChannelId, 'discord:dm:dmchan');
   });
 
-  it('an edit without author info is the notice, its message id and the text, with no guild or MCPL channel in its origin', () => {
+  it('an edit without author info or names says the rest: its channel by id, its message id, and its text', () => {
     const { edit, sent } = wire();
     edit('chan1', 'm3', 'zz text', false);
-    assert.equal(sent[0]!.params.payload.content[0].text, '[message edited] [id=m3] zz text');
+    assert.equal(sent[0]!.params.payload.content[0].text, '[message edited] [#chan1] [id=m3] zz text');
     assert.equal(sent[0]!.params.origin.guildId, undefined);
     assert.equal('mcplChannelId' in sent[0]!.params.origin, false);
   });
@@ -247,7 +250,7 @@ describe('edit/delete push events', () => {
     const { del, sent } = wire();
     del('chan1', 'm4', false, { guildId: 'g1' });
     const { origin, payload } = sent[0]!.params;
-    assert.equal(payload.content[0].text, '[message deleted] m4');
+    assert.equal(payload.content[0].text, '[message deleted] [#chan1] m4');
     assert.equal(origin.mcplChannelId, 'discord:g1:chan1');
   });
 });
