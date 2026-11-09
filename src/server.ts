@@ -3106,7 +3106,7 @@ export class DiscordMcplServer {
       let msgs: Awaited<ReturnType<typeof this.discord.fetchHistory>>;
       try {
         msgs = await this.discord.fetchHistory(channelId, {
-          limit: this.catchupLimit,
+          limit: this.catchupLimit + 1,
           after: watermark,
         });
       } catch (err) {
@@ -3122,7 +3122,9 @@ export class DiscordMcplServer {
         }
         continue;
       }
-      msgs.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+      const olderLeftOut = msgs.length > this.catchupLimit;
+      msgs.sort((a, b) => a.id.localeCompare(b.id, 'en-US-u-kn-true'));
+      if (olderLeftOut) msgs = msgs.slice(msgs.length - this.catchupLimit);
       msgs = msgs.filter((m) => m.authorId !== botId && !m.content.startsWith(CHX_NOOP_PREFIX));
       if (msgs.length === 0) continue;
 
@@ -3220,7 +3222,7 @@ export class DiscordMcplServer {
         }
         kept = [...keepIdx].sort((a, b) => a - b).map((i) => msgs[i]);
       }
-      if (kept.length === 0) {
+      if (kept.length === 0 && !olderLeftOut) {
         await advance();
         continue;
       }
@@ -3230,6 +3232,7 @@ export class DiscordMcplServer {
       const attrs = this.missedPlaceAttrs(meta, channelId, isDM);
       attrs.push(`count="${keepAll ? kept.length : mentionCount}"`);
       if (!keepAll) attrs.push(`lines="${kept.length}"`);
+      if (olderLeftOut) attrs.push('older="left out"', `after=${quotedLabel(watermark)}`);
       attrs.push(`reason="${isDM ? 'dm' : hadMention ? 'mention' : 'backscroll'}"`);
       const lines = kept.map((m) => this.missedLine(m, m.mentionsBot ? ' (mention)' : ''));
       const block = [
@@ -3271,7 +3274,7 @@ export class DiscordMcplServer {
         continue;
       }
       await advance();
-      delivered++;
+      if (kept.length > 0) delivered++;
     }
 
     await this.backfillMissedTallies();
