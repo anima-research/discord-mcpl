@@ -363,6 +363,12 @@ describe('DiscordMcplServer', () => {
     ].sort());
   });
 
+  it("declares discord.messaging's own discord:late tag, which a late delivery carries", () => {
+    const messaging = featureSets.find((fs) => fs.name === 'discord.messaging') as unknown as { tagOntology?: { tags?: Record<string, { desc?: string }> } };
+    assert.deepEqual(Object.keys(messaging.tagOntology?.tags ?? {}), ['discord:late']);
+    assert.ok(messaging.tagOntology?.tags?.['discord:late']?.desc);
+  });
+
   it('MCPL handshake exposes feature sets and channels', async () => {
     const { client, serverConn, discord } = await createTestPair();
     const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);

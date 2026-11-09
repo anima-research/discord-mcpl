@@ -1794,7 +1794,7 @@ describe('late deliveries', () => {
     req.method === 'channels/incoming' ? req.params.messages[0].tags : req.params.tags;
 
   for (const lane of ['channels/incoming', 'push/event'] as const) {
-    it(`a ${lane} message handed on more than 2 minutes after it was sent opens with when it was sent and received, tagged chat:late`, async (t) => {
+    it(`a ${lane} message handed on more than 2 minutes after it was sent opens with when it was sent and received, tagged discord:late`, async (t) => {
       const received = SENT + 2 * 60_000 + 1;
       t.mock.timers.enable({ apis: ['Date'], now: received });
       const { server, sent } = wire(accept, { open: lane === 'channels/incoming' });
@@ -1802,7 +1802,8 @@ describe('late deliveries', () => {
       assert.equal(sent[0].method, lane);
       const line = `[delayed delivery · sent ${shownTime(new Date(SENT))} · received ${shownTime(new Date(received))}]\n`;
       assert.ok(textOf(sent[0]).startsWith(line), textOf(sent[0]));
-      assert.ok(tagsOf(sent[0]).includes('chat:late'), tagsOf(sent[0]).join(', '));
+      assert.ok(tagsOf(sent[0]).includes('discord:late'), tagsOf(sent[0]).join(', '));
+      assert.ok(!tagsOf(sent[0]).includes('chat:late'), tagsOf(sent[0]).join(', '));
       assert.equal(timesOf(sent[0]).sentAt, new Date(SENT).toISOString());
       assert.equal(timesOf(sent[0]).receivedAt, new Date(received).toISOString());
     });
@@ -1813,7 +1814,7 @@ describe('late deliveries', () => {
       await (server as any).handleDiscordMessage(message());
       assert.equal(sent[0].method, lane);
       assert.doesNotMatch(textOf(sent[0]), /delayed delivery/);
-      assert.ok(!tagsOf(sent[0]).includes('chat:late'));
+      assert.ok(!tagsOf(sent[0]).includes('discord:late'));
       assert.equal(timesOf(sent[0]).sentAt, undefined);
       assert.equal(timesOf(sent[0]).receivedAt, undefined);
     });
@@ -1867,16 +1868,18 @@ describe('late deliveries', () => {
     assert.equal(timesOf(sent[1]).receivedAt, new Date(first).toISOString());
   });
 
-  it('an edit that replaces a late create keeps its line', async (t) => {
-    t.mock.timers.enable({ apis: ['Date'], now: SENT + 5 * 60_000 });
+  it("an edit of a late create opens with the create's times, named as an edit of a late delivery", async (t) => {
+    const received = SENT + 5 * 60_000;
+    t.mock.timers.enable({ apis: ['Date'], now: received });
     const { server, sent, edit } = wire(accept);
     await (server as any).handleDiscordMessage(message());
     edit()('chan1', 'm1', 'hello again', false, { guildId: 'g1', authorId: 'u1', authorName: 'someone' });
     await turnsUntil(() => sent.length === 2);
-    const createLine = textOf(sent[0]).split('\n')[0];
-    assert.match(createLine, /^\[delayed delivery · sent .+\]$/);
-    assert.match(textOf(sent[1]), /^[^\n]+\n[^\n]*someone \[edited\]: hello again$/);
-    assert.equal(textOf(sent[1]).split('\n')[0], createLine);
+    const times = `sent ${shownTime(new Date(SENT))} · received ${shownTime(new Date(received))}`;
+    assert.equal(textOf(sent[0]).split('\n')[0], `[delayed delivery · ${times}]`);
+    const [first, ...rest] = textOf(sent[1]).split('\n');
+    assert.equal(first, `[edit of a late delivery · ${times}]`);
+    assert.match(rest.join('\n'), /^[^\n]*someone \[edited\]: hello again$/);
   });
 
   it("a first DM's line sits directly above the message, after the DM notice", async (t) => {
