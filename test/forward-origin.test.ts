@@ -85,6 +85,12 @@ describe("a forward's text and where it came from, as the agent gets them", () =
     assert.equal(got.content, '[forwarded message] ask @Eve Ng or @tutors in #math');
   });
 
+  it("leaves a mention the cache can't name in a forward's text as Discord wrote it", async (t) => {
+    const w = world(t);
+    const got = await w.live(w.forward({ channel: LISTED, guild: G }, `ask <@100000000000000099> in <#${UNCACHED}>`));
+    assert.equal(got.content, `[forwarded message] ask <@100000000000000099> in <#${UNCACHED}>`);
+  });
+
   it('gives the channel a forward came from when the filters allow it, and its server when that is another server', async (t) => {
     const w = world(t, { guildIds: [G, G2] });
     assert.deepEqual(await from(w, { channel: LISTED, guild: G }), { channel: 'math', otherServer: false });

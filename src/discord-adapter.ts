@@ -415,7 +415,7 @@ interface ForwardSnapshot {
 export function buildForwardedContent(
   baseContent: string,
   snapshots: Iterable<ForwardSnapshot>,
-  nameMentions: (text: string) => string = (text) => text,
+  nameMentions: (text: string) => string,
 ): string {
   const parts: string[] = [];
   for (const snap of snapshots) {
@@ -766,12 +766,12 @@ export class DiscordAdapter {
     if (!m.messageSnapshots?.size || !ref?.channelId || ref.channelId === m.channelId || !ref.guildId) return undefined;
     const otherServer = ref.guildId !== m.guildId;
     const source = this.client.channels.cache.get(ref.channelId) as { name?: string | null; parentId?: string | null } | undefined;
+    const name = this.knownName(ref.channelId, source?.name);
     const server = otherServer ? this.client.guilds.cache.get(ref.guildId)?.name : undefined;
-    if (!source?.name || (otherServer && !server) || this.isStale(ref.channelId)
-      || !this.channelAdmitted(ref.guildId, ref.channelId, source.parentId ?? null)) {
+    if (!name || (otherServer && !server) || !this.channelAdmitted(ref.guildId, ref.channelId, source?.parentId ?? null)) {
       return { otherServer };
     }
-    return { channel: source.name, ...(server ? { server } : {}), otherServer };
+    return { channel: name, ...(server ? { server } : {}), otherServer };
   }
 
   async connect(): Promise<void> {

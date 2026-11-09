@@ -20,11 +20,14 @@ in the git log and PR descriptions.
 - **A forward names its mentions and says where it came from.** A forwarded
   message's text names the members, users, roles and channels it mentions as
   a message's own text names them, where it showed raw `<@id>`, `<@&id>` and
-  `<#id>` tokens. Its text keeps the `[forwarded message]` label. Where it
-  came from is now the server's own mark after the author's name, as
-  `Bob [forwarded from #math]: …`, in a delivered message, a `<missed>` or
-  `<backscroll>` line, an opened channel's history and an edit that replaces
-  the message. `fetch_history` and `fetch_around` give it as
+  `<#id>` tokens. A mention discord-mcpl's cache can't name stays as Discord
+  wrote it. As in a message's own text, a channel mentioned there is named
+  whether or not the configured filters allow it; the filters apply to the
+  origin mark below. A forward's text keeps the `[forwarded message]` label.
+  Where it came from is now the server's own mark after the author's name,
+  as `Bob [forwarded from #math]: …`, in a delivered message, a `<missed>`
+  or `<backscroll>` line, an opened channel's history and an edit that
+  replaces the message. `fetch_history` and `fetch_around` give it as
   `forwardedFrom`. The mark names the channel, and its server when that's
   another server than the forward's, only when discord-mcpl's cache holds
   the channel, and for another server the server, with facts it still
