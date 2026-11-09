@@ -4211,6 +4211,9 @@ describe('a DM the bot posts into first', () => {
     assert.ok(reply.endsWith('Bob: thanks'), reply);
     assert.ok(!reply.includes('<system>Direct message'), reply);
     assert.ok(!reply.includes('<backscroll'), reply);
+    discord.simulateDelete('dm88', '1299999999999999000', true, { guildId: null, authorName: 'Cy' });
+    discord.simulateDelete('dm88', REPLY, true, { guildId: null, authorName: 'Bob' });
+    assert.equal(await nextPushText(client), `[message deleted] [DM] ${REPLY} by @Bob — thanks`, 'no backscroll brought the earlier message, so its deletion is withheld');
     discord.simulateMessage(dmFrom('1300000000000000200', 'u_cy', 'Cy', 'dm99', 'hi there'));
     const fresh = await nextPushText(client);
     assert.ok(fresh.includes('<system>Direct message from @Cy'), fresh);
