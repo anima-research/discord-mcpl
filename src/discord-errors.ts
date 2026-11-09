@@ -1,0 +1,155 @@
+/**
+ * Discord answers an id it doesn't know with two words, "Unknown Channel",
+ * which say nothing about what went wrong or what to do instead.
+ */
+import { isSnowflake } from './channel-names.js';
+import { parseMcplChannelId } from './channels.js';
+import type { PostedParts } from './discord-adapter.js';
+import { quotedValue } from './source-header.js';
+
+/** Discord's JSON error codes for an id it can't resolve, or can't reach. */
+export const UNKNOWN_CHANNEL = 10003;
+const UNKNOWN_GUILD = 10004;
+const UNKNOWN_MESSAGE = 10008;
+const UNKNOWN_USER = 10013;
+export const MISSING_ACCESS = 50001;
+/** A malformed field in a request, such as an id that isn't a snowflake. */
+export const INVALID_FORM_BODY = 50035;
+/** Discord's codes for a refusal the agent can't change itself. */
+const CANNOT_DM_USER = 50007;
+const MISSING_PERMISSIONS = 50013;
+/** Cannot send messages to this user, when it shares no server with the bot. */
+const CANNOT_DM_NO_MUTUAL_GUILDS = 50278;
+
+export interface ExplainContext {
+  channelGiven?: string;
+}
+
+export function explainDiscordError(err: unknown, args: Record<string, unknown>, ctx: ExplainContext = {}): string {
+  const carried = (err as { message?: unknown } | null)?.message;
+  const message = typeof carried === 'string' ? carried : String(err);
+  const code = (err as { code?: unknown } | null)?.code;
+  const given = (key: string): string | undefined =>
+    typeof args[key] === 'string' && (args[key] as string).trim() ? (args[key] as string).trim() : undefined;
+  const channel = given('channelId');
+  const guild = given('guildId');
+  const user = given('userId');
+  const named = ctx.channelGiven && !parseMcplChannelId(ctx.channelGiven) ? ctx.channelGiven : undefined;
+  const recalled = 'the id may be mistyped or remembered rather than copied';
+  let why: string | undefined;
+  switch (code) {
+    case UNKNOWN_CHANNEL:
+      if (named && channel) {
+        why =
+          `${named} resolved to channel ${channel}, which Discord doesn't know: it may have been deleted ` +
+          "since this connection last saw it. list_channels shows a server's channels now, with their ids.";
+      } else if (!channel && given('categoryId')) {
+        why =
+          `No category ${given('categoryId')} is visible to this connection: ${recalled}, or the category deleted. ` +
+          "list_channels shows a server's channels, categories included, with their ids, within the configured filters.";
+      } else {
+        why =
+          `${channel ? `No channel ${channel}` : 'No such channel'} is visible to this connection: ${recalled}, ` +
+          'or the channel deleted. For a text, announcement, voice or stage channel, re-send with its name instead ' +
+          "(#name, or #name (Server)), or take its label from list_channels, which shows a server's channels: " +
+          'a channel whose name reaches another channel, or has a thread label\'s shape, is listed by its id. ' +
+          "A thread or DM has no name route: its id has to be copied from where it was shown, not recalled.";
+      }
+      break;
+    case UNKNOWN_GUILD:
+      why =
+        `${guild ? `No server ${guild}` : 'No such server'} is visible to this connection: ${recalled}, or the ` +
+        'bot is no longer in it. list_guilds shows the servers this bot is in, with their ids.';
+      break;
+    case UNKNOWN_MESSAGE:
+      why =
+        `${given('messageId') ? `No message ${given('messageId')}` : 'No such message'} is visible` +
+        `${channel ? ` in channel ${channel}` : ''}: ${recalled}, ` +
+        'the message deleted, or in another channel. Copy the message id from fetch_history or from the ' +
+        'message as it arrived, with the channel it arrived in.';
+      break;
+    case UNKNOWN_USER:
+      why = !user
+        ? 'A user this call needed is gone from Discord.'
+        : isSnowflake(user.replace(/^@/, ''))
+          ? `No user ${user.replace(/^@/, '')} is known to Discord: ${recalled}. A message's author and list_channel_members ` +
+            'show real ids, and a name works for someone who shares a server with this bot or has DMed it ' +
+            '(@username or display name).'
+          : `${user} matched an account Discord no longer knows: it may have been deleted. A message's author ` +
+            'and list_channel_members show the ids of accounts that exist.';
+      break;
+    case MISSING_ACCESS:
+      why = channel
+        ? `This bot can't reach channel ${channel}: the channel's permissions or its server leave this bot ` +
+          "out, or it's a DM this bot isn't in. For a server channel, list_channels shows the channels this bot " +
+          "can see there, within the configured filters; threads and DMs aren't listed."
+        : guild
+          ? `This bot can't reach server ${guild}: it isn't in it, or can't see what this call needs there. ` +
+            'list_guilds shows the servers it is in.'
+          : "This bot can't reach what this call needs: permissions leave it out.";
+      break;
+    case MISSING_PERMISSIONS: {
+      const lacks = `Discord refused this request: this bot lacks a permission it needs${channel ? ` in channel ${channel}` : guild ? ` in server ${guild}` : ''}`;
+      const posted = (err as { postedParts?: PostedParts } | null)?.postedParts;
+      if (posted === undefined) {
+        why = `${lacks}. Calling again will be refused the same way until someone who manages this server's permissions ` +
+          'grants that permission.';
+        break;
+      }
+      const k = posted.ids.length;
+      // The files go with the last part, so the part refused carried them when
+      // it was the last (a message sent in one part, its only one). Refused
+      // after text before it posted, that part most likely lacked Attach Files.
+      const filesRefused = posted.files && k === posted.of - 1;
+      if (filesRefused && k > 0) {
+        why = `${lacks}, likely Attach Files, since the part it refused carried the files and the text before that part ` +
+          'posted. The rest of the text may go through without the files; the files will be refused the same way until ' +
+          "someone who manages this server's permissions grants that permission.";
+        break;
+      }
+      // What Discord documents a message post needs: Send Messages in a guild
+      // channel (Send Messages in Threads in a thread), Read Message History
+      // for a reply, which the first part carries, and Attach Files for files.
+      const needs = [
+        'Send Messages (Send Messages in Threads, in a thread)',
+        ...(posted.reply && k === 0 ? ['Read Message History, which a reply needs'] : []),
+        ...(filesRefused ? ['Attach Files, since this message carried files'] : []),
+      ];
+      const named = needs.length === 1 ? needs[0]
+        : needs.length === 2 ? `${needs[0]}, or ${needs[1]}`
+        : `${needs.slice(0, -1).join('; ')}; or ${needs[needs.length - 1]}`;
+      // Discord doesn't say which of them is missing, or how many.
+      const grants = `until someone who manages this server's permissions grants ${needs.length === 1 ? 'it' : "what's missing"}`;
+      why = `${lacks}: ${named}. ` + (
+        filesRefused && posted.failed !== ''
+          ? `If Attach Files is all that's missing, the text alone may go through. Calling again with the files will be ` +
+            `refused the same way ${grants}.`
+          : k > 0
+            ? `Sending what didn't post will be refused the same way ${grants}.`
+            : `Calling again will be refused the same way ${grants}.`);
+      break;
+    }
+    case CANNOT_DM_USER:
+    case CANNOT_DM_NO_MUTUAL_GUILDS: {
+      // Who can change each cause. Sharing a server takes either side: the
+      // recipient joining one this bot is in, or this bot being added to one
+      // the recipient is in; the text names no one for that, since who can
+      // add the bot depends on how it's set up. A DM setting or a block is
+      // the recipient's alone.
+      // 50278 is Discord's code for the no-shared-server cause by itself.
+      const to = user ? ` to ${quotedValue(user)}` : '';
+      const [they, them, theyAre] = user ? ['they', 'them', "they're"] : ['the recipient', 'the recipient', 'the recipient is'];
+      const sharing = (what: string) =>
+        `Sharing a server changes ${what}: ${they} can join a server this bot is in, or this bot can be added to a ` +
+        `server ${theyAre} in.`;
+      why = code === CANNOT_DM_NO_MUTUAL_GUILDS
+        ? `Discord won't deliver this DM${to}: this bot shares no server with ${them}. ${sharing('that')} ` +
+          'Until then, calling again will be refused the same way.'
+        : `Discord won't deliver this DM${to}: ${they} may share no server with this bot, have turned off DMs from server ` +
+          `members, or have blocked it. ${sharing('the first')} Only ${they} can change the other two. Until one of ` +
+          'these changes, calling again will be refused the same way.';
+      break;
+    }
+  }
+  return why ? `${message}\n\n${why}` : message;
+}
