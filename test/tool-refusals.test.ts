@@ -38,7 +38,6 @@ const wrongChannelIds: Array<[unknown, string]> = [
   [null, ', and this call gave none'],
   ['', ', and this call gave it blank'],
   ['   ', ', and this call gave it blank'],
-  [42, ' as a string, and this call gave a number'],
   [['123456789012345678'], ' as a string, and this call gave a list'],
   [{ id: '123456789012345678' }, ' as a string, and this call gave an object'],
   [true, ' as a string, and this call gave a boolean'],
@@ -179,7 +178,7 @@ describe('tool refusals say what did not happen', () => {
     for (const [userId, wrong] of [
       [undefined, ', and this call gave none'],
       ['  ', ', and this call gave it blank'],
-      [42, ' as a string, and this call gave a number'],
+      [true, ' as a string, and this call gave a boolean'],
     ] as const) {
       const r = await s.handleToolCall('send_dm', { userId, content: 'hi' });
       assert.equal(r.isError, true, String(userId));

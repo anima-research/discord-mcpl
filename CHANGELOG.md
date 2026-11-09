@@ -86,6 +86,26 @@ in the git log and PR descriptions.
   channel or thread whose facts discord-mcpl holds may be older than
   Discord's doesn't register it.
 
+- **An id sent as a number is refused, not rounded.** A Discord id is past
+  2^53, where a JSON number can lose its last digits, so a tool call that
+  sent one unquoted could arrive with a different id:
+  `1309876543210987654` arrived as `1309876543210987800`. Tools such as
+  `delete_message` and `send_message` went ahead with that rounded number,
+  and a few others refused a number without saying why. Now a tool refuses
+  a number at any id argument it takes, doing nothing, and says which
+  argument it was and what it arrived as, and that those may not be the
+  digits sent, asking for the id again, taken from where it was read and
+  sent in quotes. The id arguments are
+  `channelId`, `messageId`, `userId`, `guildId`, `categoryId`, `before`,
+  `after` and `latestFrom`, which can carry a user id, and
+  `filters_update`'s `addGuilds`, `removeGuilds` and `setDmUsers`, where a
+  list holding a number is refused too. Small numbers are refused as well,
+  so calls like these, which worked before, now refuse: `fetch_history`
+  with a `before` or `after` of 0, which was dropped so the latest
+  messages came back, and `list_emojis` with a `guildId` of 0, which
+  listed every server's emojis. No tool's schema allowed a number at any
+  of them, so no tool description changes.
+
 ## 0.6.0 — 2026-10-30
 
 ### Added
