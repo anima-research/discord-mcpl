@@ -19,9 +19,10 @@ in the git log and PR descriptions.
   just-arrived and gates can route on it. "Received" is when discord-mcpl
   first handed the message on, after fetching its attachments, and a resend
   of the same delivery carries the same line. On a host that coalesces
-  events, an edit of the message opens with `[edit of a late delivery · sent
-  <time> · received <time>]`, giving the message's own times, while
-  discord-mcpl still remembers the message, which it does for a bounded
+  events, an edit of the message carries `[edit of a late delivery · sent
+  <time> · received <time>]` where the message carried its late line, giving
+  the message's own times, while discord-mcpl still remembers the message,
+  which it does for a bounded
   number of recent messages and not across a restart. The edit's own tags
   and metadata describe the edit. Both `<missed>` blocks, the reconnect
   catch-up's and the undelivered one, gain `received="…"` in their lines'
