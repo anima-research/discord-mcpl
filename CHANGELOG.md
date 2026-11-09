@@ -36,6 +36,19 @@ in the git log and PR descriptions.
   before a restart, goes unreported too. A send that may have arrived counts as
   sent, but adds nothing for a deletion to quote.
 
+- **The first reply in a DM the bot started comes without the
+  first-contact block.** The `<system>` block naming the sender and how
+  to answer, and the backscroll of earlier messages, come with a message
+  from a DM for which discord-mcpl holds no catch-up position. A post
+  that registers a DM, or goes into one already registered and kept, now
+  gives it a position, so the other party's first reply there comes
+  without them while that position is held, which across a restart needs
+  `DISCORD_WATERMARK_FILE`. A first message in a DM the bot didn't post
+  into first still brings both. A host's open with
+  `history.sinceLastSeen` reads the same position, so in a DM the bot's
+  post gave a position, it brings only the messages after that post,
+  where it brought the latest ones.
+
 - **Every message discord-mcpl renders names its id.** A message
   delivered in an open channel or pushed from a closed one, an edit (both
   the `[message edited]` notice and the re-rendered message that replaces
@@ -49,6 +62,29 @@ in the git log and PR descriptions.
   another message already used (`on message <id>`). Nothing else on the
   line changes: a live message gains no time, and the reply marker and
   the delete notice are as they were. Tool descriptions don't change.
+
+### Fixed
+
+- **A post into a place discord-mcpl serves names a channel the host
+  holds.** After a restart, discord-mcpl registered a DM only once its
+  other party wrote, so a `send_dm` to anyone who hadn't written since
+  answered with a channel the host didn't hold, and a host that reads a
+  send's place couldn't tell where it went. `send_message`,
+  `reply_message` and `send_dm` now register the place they posted into
+  before they answer, when discord-mcpl serves it: a channel or thread
+  the filters admit, or a DM whose recipient the DM list admits. A post
+  into a place they leave out still isn't registered. Once a post
+  registers a DM, its answer's `channelLabel` is the registered DM's,
+  naming the other party, where for a DM discord.js had recorded with
+  only the bot it named the bot. With `DISCORD_WATERMARK_FILE` set, the
+  DMs the file keeps are also registered at start: each is looked up on
+  Discord, one at a time, after the first MCPL host connects, and those
+  the DM list admits are registered together. A DM the bot posts into is
+  kept in the file once it registers, and if it has no catch-up position
+  yet, the post becomes its position, so a reply sent there while
+  discord-mcpl is down is caught up at the next start. A post into a
+  channel or thread whose facts discord-mcpl holds may be older than
+  Discord's doesn't register it.
 
 ## 0.6.0 — 2026-10-30
 
