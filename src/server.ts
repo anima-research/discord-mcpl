@@ -276,8 +276,6 @@ export class DiscordMcplServer {
   /** Set once the reconnect catch-up sweep has run for the current process,
    *  so it doesn't re-run if a host reconnects mid-session. */
   private sweepDone = false;
-  /** Serializes catch-up sweeps (host reconnect + gateway session restores). */
-  private sweepChain: Promise<void> = Promise.resolve();
 
   /** Max messages to scan per channel during the reconnect catch-up sweep.
    *  Tunable via DISCORD_CATCHUP_LIMIT; clamped to [1, 10000], default 3000.
@@ -914,7 +912,11 @@ export class DiscordMcplServer {
       // Deliver anything that arrived while the bot was offline (mentions +
       // DMs everywhere, full missed backscroll for subscribed channels).
       // Best-effort and one-shot; failures must not block serving.
-      await this.queueSweep('host-connect');
+      try {
+        await this.runReconnectSweep();
+      } catch (err) {
+        console.error('[discord-mcpl] Reconnect catch-up sweep failed:', (err as Error).message);
+      }
     })();
 
     // Main loop
@@ -2124,25 +2126,6 @@ export class DiscordMcplServer {
     return ` [reactions: ${parts.join(', ')}]`;
   }
 
-  /** Run a catch-up sweep after any in-flight one. `gateway-session` sweeps
-   *  re-arm the once-per-process guard: Discord started a fresh session,
-   *  so events during the gap were never delivered and must be fetched. */
-  private queueSweep(reason: 'host-connect' | 'gateway-session'): Promise<void> {
-    this.sweepChain = this.sweepChain.then(async () => {
-      if (reason === 'gateway-session') {
-        if (!this.conn) return; // no host yet; its connect sweep will cover the gap
-        this.sweepDone = false;
-      }
-      dbg('sweep:start', { reason });
-      try {
-        await this.runReconnectSweep();
-      } catch (err) {
-        console.error(`[discord-mcpl] Catch-up sweep (${reason}) failed:`, (err as Error).message);
-      }
-    });
-    return this.sweepChain;
-  }
-
   /** On (re)connect, deliver what arrived while the bot was offline:
    *  mentions + DMs from any known channel, plus the full missed backscroll
    *  for subscribed channels (which already receive ambient delivery). Each
@@ -2150,7 +2133,7 @@ export class DiscordMcplServer {
    *
    *  No-op unless a watermark file is configured (without a persisted anchor
    *  there's no "since when" to scan from) and messaging is enabled. Runs at
-   *  most once per process, unless a fresh gateway session re-arms it. */
+   *  most once per process. */
   private async runReconnectSweep(): Promise<void> {
     if (this.sweepDone) return;
     this.sweepDone = true;
@@ -2654,10 +2637,6 @@ export class DiscordMcplServer {
   // ── Discord Event Forwarding ──
 
   private setupDiscordForwarding(): void {
-    this.discord.onSessionRestored(() => {
-      void this.queueSweep('gateway-session');
-    });
-
     this.discord.onMessage((msg) => {
       this.handleDiscordMessage(msg).catch((err) => {
         console.error('[discord-mcpl] Error forwarding Discord message:', err);

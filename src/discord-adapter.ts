@@ -467,8 +467,6 @@ export class DiscordAdapter {
   private deleteHandler?: (channelId: string, messageId: string, isDM: boolean) => void;
   private reactionHandler?: (ev: ReactionEvent) => void;
   private readyHandler?: () => void;
-  private sessionRestoredHandler?: () => void;
-  private sessionsStarted = 0;
   private channelCreateHandler?: (guildId: string, channel: DiscordChannelInfo) => void;
   private channelDeleteHandler?: (guildId: string, channelId: string) => void;
   private guildCreateHandler?: (
@@ -636,13 +634,6 @@ export class DiscordAdapter {
 
   onReady(handler: () => void): void {
     this.readyHandler = handler;
-  }
-
-  /** Called when the gateway starts a NEW session after the first one (a
-   *  RESUME was impossible, e.g. after sleep or a long network drop). Discord
-   *  does not replay events from the gap, so the caller should catch up. */
-  onSessionRestored(handler: () => void): void {
-    this.sessionRestoredHandler = handler;
   }
 
   /** Handler for slash-command (chat input) interactions. */
@@ -1847,11 +1838,6 @@ export class DiscordAdapter {
         status: this.client.ws.status,
         pingMs: this.client.ws.ping,
       });
-      // shardReady fires for every fresh session (a successful RESUME emits
-      // shardResume instead). Every session after the first means a gap whose
-      // events were never delivered.
-      this.sessionsStarted++;
-      if (this.sessionsStarted > 1) this.sessionRestoredHandler?.();
     });
 
     this.client.on('shardDisconnect', (event, shardId) => {

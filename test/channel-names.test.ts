@@ -313,7 +313,7 @@ function mockAdapter(withResolver: boolean) {
       return { messageId: 'm1' };
     },
     onMessage() {}, onChannelCreate() {}, onChannelDelete() {},
-    onGuildCreate() {}, onReaction() {}, onSessionRestored() {},
+    onGuildCreate() {}, onReaction() {},
     isConnected: true,
   };
   if (!withResolver) return base;

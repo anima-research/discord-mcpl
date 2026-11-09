@@ -126,13 +126,9 @@ in the git log and PR descriptions.
 
 ### Fixed
 
-- **Messages missed while offline are recovered on reconnect.** The
-  catch-up sweep now runs on every fresh Discord gateway session (not just
-  host start), so messages sent while the machine slept or the network
-  dropped are delivered when the connector comes back. The MCPL host is
-  also served before Discord is READY, with login retried in the
-  background, so a slow or failed gateway login no longer stalls the host.
-  Voice setup now runs before READY when voice is configured.
+- **The MCPL host is served before Discord is READY,** with login retried
+  in the background, so a slow or failed gateway login no longer stalls the
+  host. Voice setup now runs before READY when voice is configured.
 - **Booting while Discord is unreachable no longer leaves the connector
   unable to send.** discord.js destroys a client whose login fails, and a
   later successful login on the same client reports `isReady()` false
