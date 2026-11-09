@@ -49,6 +49,20 @@ in the git log and PR descriptions.
   post gave a position, it brings only the messages after that post,
   where it brought the latest ones.
 
+- **Every message discord-mcpl renders names its id.** A message
+  delivered in an open channel or pushed from a closed one, an edit (both
+  the `[message edited]` notice and the re-rendered message that replaces
+  an unread one), a first DM's backscroll and the history a host's open
+  brings now carry `[id=<id>]` just before the sender's name, or before
+  the text where no name is known, the form catch-up lines already use; a
+  backscroll line puts the id beside its time, as a catch-up line does.
+  Discord keeps a message's id across edits, so an edit names the message
+  it changed. A reaction notice on the agent's own message now names that
+  message's id too, as `on your message <id>`, in the form a reaction on
+  another message already used (`on message <id>`). Nothing else on the
+  line changes: a live message gains no time, and the reply marker and
+  the delete notice are as they were. Tool descriptions don't change.
+
 ### Fixed
 
 - **A post into a place discord-mcpl serves names a channel the host

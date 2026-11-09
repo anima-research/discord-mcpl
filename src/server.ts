@@ -3754,7 +3754,7 @@ export class DiscordMcplServer {
         messageId: message.id,
         author: { id: message.authorId, name: message.authorName },
         timestamp: message.timestamp.toISOString(),
-        content: [textContent(`${nameValue(message.authorName)}: ${senderText(message.cleanContent)}`)],
+        content: [textContent(`[id=${message.id}] ${nameValue(message.authorName)}: ${senderText(message.cleanContent)}`)],
         metadata: {
           isBot: message.isBot,
           attachments: message.attachments,
@@ -4033,8 +4033,8 @@ export class DiscordMcplServer {
     const render = this.hostCoalescing?.pushEvents ? mem?.render : undefined;
     const location = noticeLocation(channelId, isDM, info);
     const content: ContentBlock[] = render
-      ? [textContent(`${render.prefix}${render.replyMarker}${location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
-      : [textContent(`[message edited] ${location}${who}${senderText(newContent)}`)];
+      ? [textContent(`${render.prefix}${render.replyMarker}${location}[id=${messageId}] ${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
+      : [textContent(`[message edited] ${location}[id=${messageId}] ${who}${senderText(newContent)}`)];
     const params: CoalescedPushEventParams = {
       featureSet: 'discord.messaging',
       // The occurrence id (RFC-006 §3.1): a second edit of one message is a new
@@ -4234,7 +4234,7 @@ export class DiscordMcplServer {
         return;
       }
       const verb = ev.action === 'add' ? 'reacted' : 'removed a reaction';
-      const target = ev.onOwnMessage ? 'your message' : `message ${ev.messageId}`;
+      const target = `${ev.onOwnMessage ? 'your message' : 'message'} ${ev.messageId}`;
       const quoted = ev.messageSnippet ? ` — ${senderText(ev.messageSnippet)}` : '';
       // A reaction's line tells the agent of the message, sent or not until now.
       const told: SentMessage[] = [{ id: ev.messageId, cleanContent: ev.messageSnippet ?? '' }];
@@ -4666,13 +4666,7 @@ export class DiscordMcplServer {
       if (backscrollMsgs.length > 0) {
         carriedBackscroll = backscrollMsgs;
         const open = `<backscroll dm="true" count="${backscrollMsgs.length}">`;
-        const lines = backscrollMsgs.map((m) => {
-          const ts = formatAgentDateTime(m.timestamp, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
-          const att = m.attachments && m.attachments.length > 0
-            ? ` [attachments: ${m.attachments.map((a) => nameValue(a.name)).join(', ')}]`
-            : '';
-          return `${ts ? `[${ts}] ` : ''}${nameValue(m.authorName)}${att}${this.renderReactionState(m.reactions)}: ${senderText(m.cleanContent)}`;
-        });
+        const lines = backscrollMsgs.map((m) => this.missedLine(m, ''));
         blocks.push([open, ...lines, '</backscroll>'].join('\n'));
       }
       if (blocks.length > 0) {
@@ -4693,7 +4687,7 @@ export class DiscordMcplServer {
     const replyMarker = msg.replyToId
       ? `[replying to ${msg.replyToUserName ? `@${nameValue(msg.replyToUserName)}` : 'unknown author'}]\n`
       : '';
-    const renderedContent = `${prefixBlock}${replyMarker}${location}${nameValue(msg.authorName)}: ${senderText(msg.cleanContent)}`;
+    const renderedContent = `${prefixBlock}${replyMarker}${location}[id=${msg.id}] ${nameValue(msg.authorName)}: ${senderText(msg.cleanContent)}`;
     if (isDM || !this.deletedLately(guildId, msg.channelId)) this.forwardedWatermark.set(msg.channelId, msg.id);
     if (isDM) this.dmChannelIds.add(msg.channelId);
     this.saveWatermark();
