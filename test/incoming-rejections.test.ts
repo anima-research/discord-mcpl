@@ -18,6 +18,7 @@ import type { ContentBlock } from '@animalabs/mcpl-core';
 import type { DiscordAdapter, MessageEventInfo } from '../src/discord-adapter.js';
 import { ChannelManager, toDescriptor } from '../src/channels.js';
 import { DiscordMcplServer } from '../src/server.js';
+import { countEveryMessageAsSent } from './every-message-sent.js';
 import {
   advertisedRetryWindowMs,
   answerClass,
@@ -95,6 +96,7 @@ async function turnsUntil(done: () => boolean): Promise<void> {
 
 function wire(respond: Responder, opts: { open?: boolean; host?: ReturnType<typeof scriptedHost>; coalescing?: boolean } = {}) {
   const server = new DiscordMcplServer({} as DiscordAdapter);
+  countEveryMessageAsSent(server);
   const s = server as unknown as Record<string, unknown>;
   let edit: EditHandler | undefined;
   let del: DeleteHandler | undefined;
@@ -115,6 +117,7 @@ function wire(respond: Responder, opts: { open?: boolean; host?: ReturnType<type
     channelAdmitted: () => true,
     onMessageEdit: (h: EditHandler) => { edit = h; },
     onMessageDelete: (h: DeleteHandler) => { del = h; },
+    onOwnMessage: () => {},
   };
   const sent: Array<{ method: string; params: any }> = opts.host?.sent ?? [];
   s.conn = opts.host?.conn ?? {
@@ -292,6 +295,30 @@ describe('push/event (closed channel): the result or error is read', () => {
     assert.equal(new Set(sent.map(eventIdOf)).size, 1);
     assert.ok(errors.some((e) => e.startsWith('[discord-mcpl] push/event failed:')), errors.join('\n'));
     assert.equal(errors.some((e) => e.includes('host rejected') || e.includes("didn't take")), false);
+  });
+
+  it('an edit the host refused leaves a message it was never sent uncounted, so its deletion is withheld', async () => {
+    const { server, sent, edit, del } = wire(() => ({ accepted: false, reason: 'coalesce_invalid' }));
+    (server as any).sentMessages = new Map();
+    edit()('chan1', 'm9', 'never reached the agent', false, { guildId: 'g1', authorId: 'u1', authorName: 'someone' });
+    await until(() => sent.length > 0 && (server as any).mutationsInFlight.size === 0);
+    assert.equal((server as any).sentMessages.has('m9'), false);
+    const before = sent.length;
+    del()('chan1', 'm9', false, { guildId: 'g1', authorId: 'u1', authorName: 'someone' });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(sent.length, before, 'no notice');
+  });
+
+  it('a create whose send failed may have arrived, so it counts as sent, with nothing for a deletion to quote', async () => {
+    const host = scriptedHost(() => 'no answer', 1);
+    const { server, sent, del } = wire(() => undefined, { host });
+    (server as any).sentMessages = new Map();
+    await deliver(server, null);
+    const before = sent.length;
+    del()('chan1', 'm1', false, { guildId: 'g1', channelName: 'general', guildName: 'Guild', authorName: 'someone' });
+    await until(() => sent.length > before);
+    await until(() => (server as any).mutationsInFlight.size === 0);
+    assert.equal(sent[before].params.payload.content[0].text, '[message deleted] [#general in Guild] m1 by @someone');
   });
 
   it('a resend mcpl-core times out is logged as a failed resend, not as sent', async () => {
@@ -925,6 +952,20 @@ describe('sending the same occurrence again, by what the spec defines', () => {
         assert.deepEqual(sent[1].params.coalesce, sent[0].params.coalesce);
       });
     }
+
+    it('a superseded edit leaves the record to the edit after it, so two refused edits count as nothing', async () => {
+      let answerFirst!: (v: unknown) => void;
+      const firstAnswer = new Promise((r) => { answerFirst = r; });
+      const { server, sent, edit } = wire((_m, _p, n) => n === 1 ? firstAnswer : { accepted: false, reason: 'coalesce_invalid' });
+      (server as any).sentMessages = new Map();
+      edit()('chan1', 'm9', 'first', false, info);
+      await until(() => sent.length === 1);
+      edit()('chan1', 'm9', 'second', false, info);
+      await until(() => sent.length >= 2);
+      answerFirst({ accepted: false, reason: 'storage busy' });
+      await until(() => (server as any).mutationsInFlight.size === 0);
+      assert.equal((server as any).sentMessages.has('m9'), false);
+    });
 
     for (const later of ['edit', 'delete'] as const) {
       it(`an edit is not sent again once a later ${later} of the message has gone out`, async () => {
