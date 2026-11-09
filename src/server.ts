@@ -130,6 +130,19 @@ const packageJson: typeof import('../package.json') = JSON.parse(
 
 const INSPECTION_TOOLS: ReadonlySet<string> = new Set(['fetch_history', 'fetch_around']);
 
+const TOOL_NAMES: ReadonlySet<string> = new Set(toolDefinitions.map((t) => t.name));
+
+/** Tools that read or change only this connector's own state, so they run
+ *  before Discord is ready. filters_update isn't one: widening an unrestricted
+ *  guild filter reads the guilds Discord has sent. */
+const LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  'filters_get', 'list_subscriptions', 'channel_missed', 'set_reaction_visibility',
+  'subscribe_channel', 'unsubscribe_channel', 'mute_channel', 'unmute_channel',
+]);
+
+const namesChannel = (args: Record<string, unknown>): boolean =>
+  typeof args.channelId === 'string' && parseChannelRef(args.channelId)?.kind === 'name';
+
 const withMentions = <T extends object>(result: T, report: MentionsField | undefined): T | (T & MentionsField) =>
   report ? { ...result, ...report } : result;
 
@@ -1728,12 +1741,6 @@ export class DiscordMcplServer {
     name: string,
     args: Record<string, unknown>,
   ): Promise<{ content: ContentBlock[]; isError?: boolean; state?: unknown }> {
-    try {
-      await this.waitForDiscord(15_000);
-    } catch (err) {
-      return { content: [textContent((err as Error).message)], isError: true };
-    }
-
     const fs = featureSetForTool(name);
     if (fs && this.mcplEnabled && !isEnabled(fs, this.enabledFeatureSets)) {
       return {
@@ -1744,6 +1751,12 @@ export class DiscordMcplServer {
         )],
         isError: true,
       };
+    }
+
+    // A local tool needs Discord too when it names a channel, which only Discord's channel list resolves.
+    if (TOOL_NAMES.has(name) && (!LOCAL_TOOLS.has(name) || namesChannel(args))) {
+      const refused = this.notConnectedYet(name);
+      if (refused) return { content: [textContent(refused)], isError: true };
     }
 
     let explain: ExplainContext = {};
@@ -3506,6 +3519,8 @@ export class DiscordMcplServer {
   }
 
   private async handleChannelOpen(params: ChannelOpenRequest): Promise<ChannelOpenResponse> {
+    const refused = this.notConnectedYet('channels/open');
+    if (refused) throw new RequestRefusal(ERR_CHANNEL_OPEN_FAILED, refused);
     const target = resolveOpenTarget(params, this.channelManager.getAll());
     if (target.kind === 'refused') throw new RequestRefusal(target.code, target.reason);
     const parsed = parseMcplChannelId(target.kind === 'registered' ? target.channel.id : target.id);
@@ -3694,6 +3709,8 @@ export class DiscordMcplServer {
     if (!parsed) {
       return { acknowledged: false, reason: `Invalid Discord channel ID: ${params.channelId}` };
     }
+    const refused = this.notConnectedYet('channels/acknowledge');
+    if (refused) return { acknowledged: false, reason: refused };
     const representation = params.value?.trim() || '👀';
     try {
       await this.discord.addReaction(parsed.channelId, params.messageId, representation);
@@ -3736,20 +3753,15 @@ export class DiscordMcplServer {
     }
   }
 
-  private async waitForDiscord(timeoutMs: number): Promise<void> {
-    if (this.discord.isConnected || !this.discord.connecting) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error('Discord is not connected yet: the connector is still logging in, and the network may be down. Try again shortly.')),
-        timeoutMs,
-      );
-    });
-    try {
-      await Promise.race([this.discord.whenReady(), timeout]);
-    } finally {
-      clearTimeout(timer);
-    }
+  /** Before Discord's first READY, a request that needs Discord is answered at
+   *  once, never held: requests are answered one at a time, so a held one would
+   *  hold every request behind it. The answer says nothing ran. */
+  private notConnectedYet(what: string): string | null {
+    if (!this.discord.connecting) return null;
+    return (
+      `${what} didn't run, so nothing was sent or changed: Discord isn't connected yet ` +
+      '(this connector is still logging in, and the network may be down). Try again in a minute.'
+    );
   }
 
   private async handlePublish(params: ChannelsPublishParams): Promise<ChannelsPublishResult & Partial<MentionsField>> {
@@ -3769,7 +3781,8 @@ export class DiscordMcplServer {
     }
 
     dbg('handlePublish', { channelId: params.channelId, textLen: text.length, preview: text.slice(0, 80) });
-    await this.waitForDiscord(15_000);
+    const refused = this.notConnectedYet('channels/publish');
+    if (refused) throw new Error(refused);
     const result = await this.discord.sendMessage(parsed.channelId, text);
     this.stateTracker.recordSent(result.messageId, parsed.channelId, text);
     dbg('handlePublish:sent', { channelId: params.channelId, messageId: result.messageId });

@@ -41,10 +41,6 @@ async function main(): Promise<void> {
   discord.onReady(() => {
     console.error(`[discord-mcpl] Discord connected as bot ${discord.botUserId}`);
   });
-  discord.connectWithRetry().catch((err) => {
-    console.error('[discord-mcpl] Fatal error:', (err as Error).message);
-    process.exit(1);
-  });
 
   // Built before the server, so the initialize handshake can declare
   // channels.streaming. ./voice.js is imported only after the env check, inside
@@ -54,17 +50,30 @@ async function main(): Promise<void> {
   let voice = null as import('./voice.js').VoiceOutput | null;
   const vEnv = voiceEnv();
   if (vEnv) {
-    await discord.whenReady();
+    // Voice is built from the ready client, before the handshake, so a voice
+    // box connects first, and a failed login ends the process.
+    await discord.connect();
     try {
       const { createVoiceOutput } = await import('./voice.js');
       voice = await createVoiceOutput(vEnv, discord.rawClient);
     } catch (err) {
       console.error('[discord-mcpl] voice setup failed:', (err as Error).message, '— continuing text-only');
     }
+  } else {
+    // The host's handshake is answered at once, while Discord connects in the
+    // background, retrying while it can't be reached. A refusal no retry would
+    // change ends the process, before or after the handshake is answered.
+    discord.connectWithRetry().catch((err) => {
+      console.error('[discord-mcpl] Fatal error:', (err as Error).message);
+      process.exit(1);
+    });
   }
 
   const server = new DiscordMcplServer(discord, voice);
-  await server.setupDmRefusals();
+  // The DM notice file is named by the bot's id, which Discord's READY gives.
+  void discord.whenReady().then(() => server.setupDmRefusals()).catch((err) => {
+    console.error('[discord-mcpl] DM refusal setup failed:', (err as Error).message);
+  });
 
   if (filtersFileBroken) {
     server.filtersState.markBroken('invalid');

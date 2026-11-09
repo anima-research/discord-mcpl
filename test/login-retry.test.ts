@@ -14,15 +14,26 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import * as net from 'node:net';
 import { Client, GatewayIntentBits, Status } from 'discord.js';
 
 const { DiscordAdapter } = await import('../src/discord-adapter.js');
 
 describe('the library behaviour behind the bug', () => {
   it('a failed login leaves the client destroyed: isReady() stays false even at status Ready', async () => {
-    // Refused connection = "network down" for the REST call login() makes first.
-    const client = new Client({ intents: [GatewayIntentBits.Guilds], rest: { api: 'http://127.0.0.1:9', retries: 0, timeout: 2_000 } });
-    await assert.rejects(client.login('not-a-real-token'));
+    // Refused connection = "network down" for the REST call login() makes first: a port just bound and closed.
+    const port = await new Promise<number>((resolve) => {
+      const s = net.createServer().listen(0, '127.0.0.1', () => {
+        const { port: p } = s.address() as net.AddressInfo;
+        s.close(() => resolve(p));
+      });
+    });
+    const client = new Client({ intents: [GatewayIntentBits.Guilds], rest: { api: `http://127.0.0.1:${port}`, retries: 0, timeout: 2_000 } });
+    await assert.rejects(client.login('not-a-real-token'), (err: unknown) => {
+      const e = err as { code?: unknown; cause?: { code?: unknown } };
+      assert.equal(e.cause?.code ?? e.code, 'ECONNREFUSED', String(err));
+      return true;
+    });
     assert.equal((client.ws as unknown as { destroyed: boolean }).destroyed, true);
     (client.ws as unknown as { status: Status }).status = Status.Ready; // what a later successful login sets
     assert.equal(client.isReady(), false, 'the flag the connector trusted can never recover');
@@ -45,7 +56,8 @@ class FakeClient extends EventEmitter {
   async login(): Promise<string> {
     this.logins++;
     if (this.plan.failLogin) { this.destroyed = true; throw new Error('getaddrinfo ENOTFOUND discord.com'); }
-    queueMicrotask(() => { this.ready = true; this.emit('ready', this); });
+    // As a real client can, it turns ready only after login resolves.
+    setImmediate(() => { this.ready = true; this.emit('ready', this); });
     return 'token';
   }
   async destroy(): Promise<void> { this.destroyed = true; }
@@ -75,14 +87,21 @@ function adapterWith(opts: { probe: () => Promise<void>; failLogins: number }) {
 describe('connectWithRetry', () => {
   it('network down at boot: never logs in until the gateway is reachable, then connects cleanly', async () => {
     let probes = 0;
+    const loginsAtFailedProbes: number[] = [];
     const adapter = adapterWith({
-      probe: async () => { if (++probes < 3) throw new Error('getaddrinfo ENOTFOUND discord.com'); },
+      probe: async () => {
+        if (++probes < 3) {
+          loginsAtFailedProbes.push(FakeClient.made.reduce((n, c) => n + c.logins, 0));
+          throw new Error('getaddrinfo ENOTFOUND discord.com');
+        }
+      },
       failLogins: 0,
     });
     const waiter = adapter.whenReady(); // registered while down, as index.ts does
     await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
     await within(waiter);
     assert.equal(probes, 3);
+    assert.deepEqual(loginsAtFailedProbes, [0, 0], 'no login before or during a failed probe');
     assert.equal(FakeClient.made.length, 1, 'the client was never destroyed, so never replaced');
     assert.equal(FakeClient.made[0]!.logins, 1, 'no login while the network was down');
     assert.equal(adapter.isConnected, true);
@@ -128,6 +147,41 @@ describe('a token Discord refuses', () => {
   });
 });
 
+describe('other refusals no wait would change', () => {
+  it('a probe answered with a 4xx other than 429 ends the connect, naming the developer portal, with no login', async () => {
+    let probes = 0;
+    const adapter = adapterWith({ probe: async () => { probes++; throw Object.assign(new Error('403: Forbidden'), { status: 403 }); }, failLogins: 0 });
+    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /403: Forbidden.*developer portal/);
+    assert.equal(probes, 1);
+    assert.equal(FakeClient.made[0]!.logins, 0);
+  });
+
+  it('a probe answered with a 5xx or a 429 is retried', async () => {
+    let probes = 0;
+    const adapter = adapterWith({
+      probe: async () => {
+        probes++;
+        if (probes === 1) throw Object.assign(new Error('503: Service Unavailable'), { status: 503 });
+        if (probes === 2) throw Object.assign(new Error('429: Too Many Requests'), { status: 429 });
+      },
+      failLogins: 0,
+    });
+    await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
+    assert.equal(probes, 3);
+    assert.equal(adapter.isConnected, true);
+  });
+
+  it("a login closed for intents Discord doesn't allow ends the connect, naming the intents, with no fresh client", async () => {
+    FakeClient.made = [];
+    const client = new FakeClient({ failLogin: false });
+    client.login = async () => { client.logins++; client.destroyed = true; throw new Error('Used disallowed intents'); };
+    const adapter = new DiscordAdapter({ token: 'not-used', clientFactory: () => client as unknown as Client, probeGateway: async () => {} });
+    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /Used disallowed intents.*Server Members and Message Content/);
+    assert.equal(client.logins, 1);
+    assert.equal(FakeClient.made.length, 1);
+  });
+});
+
 describe('connecting', () => {
   it('is false before a connect starts, true while the gateway is unreachable, and false once it is ready', async () => {
     let probes = 0;
@@ -141,8 +195,15 @@ describe('connecting', () => {
   });
 
   it('is false once a refused token has ended the connect', async () => {
-    const adapter = adapterWith({ probe: async () => { throw Object.assign(new Error('401: Unauthorized'), { status: 401 }); }, failLogins: 0 });
-    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })));
+    let probes = 0;
+    let during: boolean | undefined;
+    const adapter = adapterWith({
+      probe: async () => { probes++; during = adapter.connecting; throw Object.assign(new Error('401: Unauthorized'), { status: 401 }); },
+      failLogins: 0,
+    });
+    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /DISCORD_TOKEN/);
+    assert.equal(probes, 1);
+    assert.equal(during, true);
     assert.equal(adapter.connecting, false);
   });
 });

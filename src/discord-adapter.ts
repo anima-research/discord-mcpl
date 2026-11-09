@@ -680,16 +680,35 @@ export function applyMentionCandidates(
   };
 }
 
-/** Discord's answer to a token it won't accept: a 401 from the REST API
- *  (@discordjs/rest's DiscordAPIError carries `status`), or discord.js's
- *  TokenInvalid from login. */
-function refusedToken(err: unknown): boolean {
-  const e = err as { status?: unknown; code?: unknown } | null;
-  return e?.status === 401 || e?.code === 'TokenInvalid';
-}
+/** The gateway closes Discord sends for a configuration no retry changes, as
+ *  @discordjs/ws 1.2 rejects a shard's connect on them (its close-code switch,
+ *  `dist/index.js`), each with what to fix. */
+const CONFIGURATION_CLOSES: Record<string, string> = {
+  'Used disallowed intents':
+    "turn on the bot's Server Members and Message Content intents in Discord's developer portal",
+  'Used invalid intents': "this connector asks for intents Discord doesn't accept; update discord-mcpl",
+  'Sharding is required':
+    "the bot is in more servers than one gateway connection may serve, and this connector doesn't shard",
+  'Used an invalid API version': "this connector's Discord API version is no longer accepted; update discord-mcpl",
+};
 
-function tokenRefused(err: unknown): Error {
-  return new Error(`Discord refused the bot token (${(err as Error).message}): check DISCORD_TOKEN`);
+/** What to fix, when Discord has answered with a refusal no wait would change;
+ *  null for a failure worth retrying (no answer, a 5xx or a 429). A refusal is
+ *  a refused token (a 401 from the REST API, whose DiscordAPIError carries
+ *  `status`, discord.js's TokenInvalid, or the gateway's authentication
+ *  close), a gateway close for configuration, or any other 4xx answer. */
+function refusal(err: unknown): string | null {
+  const e = err as { status?: unknown; code?: unknown; message?: unknown } | null;
+  const message = typeof e?.message === 'string' ? e.message : String(err);
+  if (e?.status === 401 || e?.code === 'TokenInvalid' || message === 'Authentication failed') {
+    return `Discord refused the bot token (${message}): check DISCORD_TOKEN`;
+  }
+  const closed = CONFIGURATION_CLOSES[message];
+  if (closed) return `Discord closed the gateway (${message}): ${closed}`;
+  if (typeof e?.status === 'number' && e.status >= 400 && e.status < 500 && e.status !== 429) {
+    return `Discord refused the connector's request (${message}): check the bot's application in Discord's developer portal`;
+  }
+  return null;
 }
 
 export class DiscordAdapter {
@@ -797,8 +816,8 @@ export class DiscordAdapter {
 
   /** Log in, retrying with backoff until the gateway is READY: an unreachable
    *  network (sleep, VPN, captive wifi) is a wait, not a crash. It rejects only
-   *  when Discord refuses the token (a 401 to the probe, or TokenInvalid from
-   *  login), which no wait would change.
+   *  when Discord answers with a refusal no wait would change (see `refusal`),
+   *  with a message naming what to fix.
    *
    *  discord.js destroys a client whose login() fails, and never clears that:
    *  a later successful login on the same client receives messages but
@@ -819,7 +838,8 @@ export class DiscordAdapter {
       try {
         await this.probeGatewayFn();
       } catch (err) {
-        if (refusedToken(err)) { this.connectEnded = true; throw tokenRefused(err); }
+        const refused = refusal(err);
+        if (refused) { this.connectEnded = true; throw new Error(refused); }
         console.error(
           `[discord-mcpl] Discord unreachable (attempt ${attempt}): ${(err as Error).message} — retrying in ${Math.round(delay / 1000)}s`,
         );
@@ -830,7 +850,8 @@ export class DiscordAdapter {
         await this.connect();
         return;
       } catch (err) {
-        if (refusedToken(err)) { this.connectEnded = true; throw tokenRefused(err); }
+        const refused = refusal(err);
+        if (refused) { this.connectEnded = true; throw new Error(refused); }
         console.error(
           `[discord-mcpl] Discord login failed (attempt ${attempt}): ${(err as Error).message} — ` +
             `starting a fresh client, retrying in ${Math.round(delay / 1000)}s`,
@@ -863,7 +884,7 @@ export class DiscordAdapter {
   }
 
   /** True from connectWithRetry's start until the gateway is READY, and false
-   *  once a refused token has ended it. */
+   *  once a refusal has ended it. */
   get connecting(): boolean {
     return this.connectStarted && !this.connectEnded && !this.client.isReady();
   }
