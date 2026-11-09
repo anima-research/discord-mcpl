@@ -3115,17 +3115,20 @@ export class DiscordMcplServer {
   }
 
   private claimLeftOut(channelId: string, claims: LeftOut[]): LeftOut {
-    let settle!: () => void;
-    const settled = new Promise<void>((resolve) => { settle = resolve; });
+    let resolve!: () => void;
+    const settled = new Promise<void>((r) => { resolve = r; });
     const claim: LeftOut = {
       settled,
-      settle,
+      settle: () => {
+        resolve();
+        if (!claim.span && this.leftOut.get(channelId) === claim) this.leftOut.delete(channelId);
+      },
       span: null,
       shown: new Set(),
       taken: false,
       keep: (span) => {
         claim.span = span;
-        settle();
+        claim.settle();
       },
     };
     this.leftOut.set(channelId, claim);
@@ -3139,7 +3142,7 @@ export class DiscordMcplServer {
     if (!claim) return;
     for (const m of answered ?? []) claim.shown.add(m.messageId);
     void this.deliverLeftOut(conn, channelId, claim).catch((err) => {
-      console.error('[discord-mcpl] Delivering the rest of a missed catch-up failed:', errorText(err));
+      console.error(`[discord-mcpl] Delivering the rest of channel ${channelId}'s missed catch-up failed:`, errorText(err));
     });
   }
 
@@ -3163,7 +3166,7 @@ export class DiscordMcplServer {
       if (this.leftOut.get(channelId) === claim) this.leftOut.delete(channelId);
       console.error(
         `[discord-mcpl] Catch-up couldn't read again the missed messages it left out of channel ${channelId}'s ` +
-          `first delivery (${errorText(err)}), so they weren't delivered at its first open. They stay on Discord.`,
+          `first delivery (${errorText(err)}), so they weren't delivered at its first open.`,
       );
       return;
     }
@@ -3555,6 +3558,10 @@ export class DiscordMcplServer {
   private forgetChannels(ids: string[]): void {
     const removed = ids.filter((id) => this.channelManager.unregister(id));
     if (removed.length === 0) return;
+    for (const id of removed) {
+      const parsed = parseMcplChannelId(id);
+      if (parsed) this.leftOut.delete(parsed.channelId);
+    }
     if (this.conn && !this.conn.isClosed && this.mcplEnabled) {
       this.conn.sendNotification(method.CHANNELS_CHANGED, { removed });
     } else {
@@ -4827,7 +4834,8 @@ export class DiscordMcplServer {
       });
       return;
     }
-    this.leftOut.get(msg.channelId)?.shown.add(msg.id);
+    const waiting = this.leftOut.get(msg.channelId);
+    if (waiting && (!waiting.span || msg.id.localeCompare(waiting.span.newest, 'en-US-u-kn-true') <= 0)) waiting.shown.add(msg.id);
 
     this.ensureSubscriptionsLoaded();
     this.ensureWatermarkLoaded();
