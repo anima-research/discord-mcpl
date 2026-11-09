@@ -4447,6 +4447,7 @@ describe('the messages a closed catch-up sweep left out', () => {
     client.sendRequest(method.CHANNELS_OPEN, { channelId: 'discord:g1:c1', type: 'discord', ...(history ? { history } : {}) });
   const close = (client: McplConnection) => client.sendRequest(method.CHANNELS_CLOSE, { channelId: 'discord:g1:c1' });
   const restLine = /now that this channel is open/;
+  const answerRead = (client: McplConnection) => client.sendRequest('tools/list', {});
   const missedHeader = (count: number) => new RegExp(`<missed [^>]*channelId="c1"[^>]*count="${count}"[^>]*reason="backscroll">`);
 
   it("delivers the rest of a closed channel's missed messages once the host opens it, after its answer, none of them twice, and only on the first open", { timeout: 15_000 }, async (t) => {
@@ -4466,6 +4467,7 @@ describe('the messages a closed catch-up sweep left out', () => {
     assert.equal(origin.isMention, false);
     assert.equal(origin.isDM, false);
     assert.match(rest, missedHeader(2), rest);
+    assert.doesNotMatch(rest, /older=|after=/, rest);
     assert.match(rest, /channel="#general"/, rest);
     assert.match(rest, restLine, rest);
     assert.match(rest, /m109\b/, rest);
@@ -4480,6 +4482,72 @@ describe('the messages a closed catch-up sweep left out', () => {
     await close(client);
     await open(client);
     await nothingMissedBefore(client, discord);
+  });
+
+  it('marks the rest as coming after older messages left out, as the sweep marks its own block, when its read left older ones out', { timeout: 15_000 }, async (t) => {
+    const limit = process.env.DISCORD_CATCHUP_LIMIT;
+    process.env.DISCORD_CATCHUP_LIMIT = '20';
+    t.after(() => {
+      if (limit === undefined) delete process.env.DISCORD_CATCHUP_LIMIT;
+      else process.env.DISCORD_CATCHUP_LIMIT = limit;
+    });
+    const { client, registration } = await restarted(t, missed(30, 111));
+    client.sendResponse(registration.id, {});
+    const mentions = await nextPush(client);
+    assert.match(mentions, /count="1" lines="8" older="left out" after="100" reason="mention">/, mentions);
+
+    await open(client);
+    const rest = await nextPush(client);
+    assert.match(rest, /<missed [^>]*channelId="c1"[^>]*count="12" older="left out" after="100" reason="backscroll">/, rest);
+    assert.match(rest, restLine, rest);
+    for (let id = 119; id <= 130; id++) assert.match(rest, new RegExp(`id=${id}\\][^\\n]*: m${id}\\b`), rest);
+    for (let id = 101; id <= 118; id++) assert.doesNotMatch(rest, new RegExp(`m${id}\\b`), rest);
+  });
+
+  it('counts the rest as sent once the host takes it, so the deletion of one of them is reported', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    await open(client);
+    const restPush = await nextPushRequest(client);
+    assert.match(pushText(restPush.params), /m109\b/);
+    client.sendResponse(restPush.id, { accepted: true });
+    await answerRead(client);
+
+    discord.simulateDelete('c1', '109', false, { guildId: 'g1', authorName: 'Bob' });
+    const deleted = await nextPush(client);
+    assert.match(deleted, /^\[message deleted\] [^\n]*\b109 by @Bob — m109$/, deleted);
+  });
+
+  it('counts the rest as sent, with nothing to quote, when its send fails with no verdict, so the deletion of one of them is reported bare', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    await open(client);
+    const restPush = await nextPushRequest(client);
+    assert.match(pushText(restPush.params), /m109\b/);
+    client.sendError(restPush.id, -32603, 'internal error');
+    await answerRead(client);
+
+    discord.simulateDelete('c1', '109', false, { guildId: 'g1', authorName: 'Bob' });
+    const deleted = await nextPush(client);
+    assert.match(deleted, /^\[message deleted\] [^\n]*\b109 by @Bob$/, deleted);
+  });
+
+  it("doesn't count the rest as sent when the host refuses it, so the deletion of one of them isn't reported", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    await open(client);
+    const restPush = await nextPushRequest(client);
+    assert.match(pushText(restPush.params), /m109\b/);
+    client.sendResponse(restPush.id, { accepted: false, reason: 'not now' });
+    await answerRead(client);
+
+    discord.simulateDelete('c1', '109', false, { guildId: 'g1', authorName: 'Bob' });
+    discord.simulateDelete('c1', '105', false, { guildId: 'g1', authorName: 'Bob' });
+    const deleted = await nextPush(client);
+    assert.match(deleted, /^\[message deleted\] [^\n]*\b105 by @Bob — m105$/, `only the deletion of one the sweep's block carried is reported: ${deleted}`);
   });
 
   it('delivers them when the open takes effect while the sweep is still reading that channel', { timeout: 15_000 }, async (t) => {
