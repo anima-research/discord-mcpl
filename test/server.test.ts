@@ -2337,6 +2337,37 @@ describe('DiscordMcplServer', () => {
     }
   });
 
+  for (const [oldestAgo, late] of [[10 * 60_000, true], [0, false]] as const) {
+    it(`a catch-up block whose oldest line was sent ${oldestAgo / 60_000} minutes before it is handed on is ${late ? '' : 'not '}tagged discord:late`, async () => {
+      const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-sweep-late-${oldestAgo}.json`);
+      writeFileSync(wmPath, JSON.stringify({ watermarks: { c1: '100' }, dmChannels: [] }));
+      process.env.DISCORD_WATERMARK_FILE = wmPath;
+      try {
+        const { client, serverConn, discord } = await createTestPair();
+        const now = Date.now();
+        discord.historyToReturn = [
+          { id: '101', authorId: 'u1', authorName: 'Alice', isBot: false, content: 'earlier', cleanContent: 'earlier', attachments: [], mentionsBot: false, timestamp: new Date(now - oldestAgo), reactions: [] },
+          { id: '102', authorId: 'u2', authorName: 'Bob', isBot: false, content: '<@bot_123> ping', cleanContent: '@bot ping', attachments: [], mentionsBot: true, timestamp: new Date(now), reactions: [] },
+        ];
+        const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+        const serverPromise = server.serve(serverConn);
+        await mcplHandshake(client);
+        const regMsg = await client.nextMessage();
+        if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+        const missed = await client.nextMessage();
+        const p = missed.type === 'request' ? missed.request.params as PushEventParams : undefined;
+        if (missed.type === 'request') client.sendResponse(missed.request.id, {});
+        client.close();
+        await serverPromise;
+        assert.equal(p?.eventId, 'discord_missed_c1_102');
+        assert.equal((p?.tags ?? []).includes('discord:late'), late, JSON.stringify(p?.tags));
+      } finally {
+        delete process.env.DISCORD_WATERMARK_FILE;
+        if (existsSync(wmPath)) unlinkSync(wmPath);
+      }
+    });
+  }
+
   it('reconnect sweep delivers missed mentions with nearby context from a non-subscribed channel', async () => {
     const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-sweep.json`);
     writeFileSync(wmPath, JSON.stringify({ watermarks: { c1: '100' }, dmChannels: [] }));

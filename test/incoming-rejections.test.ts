@@ -1775,6 +1775,24 @@ describe('owed messages', () => {
     assert.equal(receivedOf(pushes[0]), receivedShown ? blockTime(new Date(first)) : undefined);
     assert.equal(receivedOf(pushes[1]), receivedShown ? blockTime(new Date(first + 10 * 60_000)) : undefined);
   });
+
+  for (const [oldestAgo, late] of [[2 * 60_000 + 1, true], [2 * 60_000, false]] as const) {
+    it(`an undelivered block whose oldest message was sent ${oldestAgo} ms before it is handed on is ${late ? '' : 'not '}tagged discord:late`, async (t) => {
+      const now = Date.parse('2026-11-03T07:00:00Z');
+      t.mock.timers.enable({ apis: ['Date'], now });
+      const { server, sent } = wire(() => ({ accepted: true }));
+      onDiscord(server, [
+        history('m1', 'older', { timestamp: new Date(now - oldestAgo) }),
+        history('m2', 'newer', { timestamp: new Date(now - 1000) }),
+      ]);
+      (server as any).owe('chan1', 'm1', { uncertain: false });
+      (server as any).owe('chan1', 'm2', { uncertain: false });
+      await (server as any).deliverOwed((server as any).conn);
+      const [push] = owedPushes(sent);
+      assert.ok(push, 'the block is pushed');
+      assert.equal((push.params.tags ?? []).includes('discord:late'), late, JSON.stringify(push.params.tags));
+    });
+  }
 });
 
 describe('late deliveries', () => {
