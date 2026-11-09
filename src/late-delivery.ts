@@ -21,7 +21,8 @@ export function lateDeliveryLine(
   timeZone: string,
   style: TimestampStyle,
   thresholdMs: number = LATE_DELIVERY_THRESHOLD_MS,
+  what: 'delayed delivery' | 'edit of a late delivery' = 'delayed delivery',
 ): string {
   if (received.getTime() - sent.getTime() <= thresholdMs) return '';
-  return `[delayed delivery · sent ${deliveryTime(sent, timeZone, style)} · received ${deliveryTime(received, timeZone, style)}]\n`;
+  return `[${what} · sent ${deliveryTime(sent, timeZone, style)} · received ${deliveryTime(received, timeZone, style)}]\n`;
 }

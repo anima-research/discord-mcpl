@@ -13,12 +13,14 @@ in the git log and PR descriptions.
   timestamp now carries `[delayed delivery · sent <time> · received <time>]`
   on a line of its own just before the message and its `[replying to …]`
   line if it has one, after any notice or backscroll that comes with it, and
-  a `chat:late` tag and `sentAt`/`receivedAt` metadata, on
+  a `discord:late` tag, which `discord.messaging`'s tag ontology declares,
+  and `sentAt`/`receivedAt` metadata, on
   `channels/incoming` and `push/event` alike, so it can't read as
   just-arrived and gates can route on it. "Received" is when discord-mcpl
   first handed the message on, after fetching its attachments, and a resend
   of the same delivery carries the same line. On a host that coalesces
-  events, an edit that replaces the message keeps the line in its text while
+  events, an edit of the message opens with `[edit of a late delivery · sent
+  <time> · received <time>]`, giving the message's own times, while
   discord-mcpl still remembers the message, which it does for a bounded
   number of recent messages and not across a restart. The edit's own tags
   and metadata describe the edit. Both `<missed>` blocks, the reconnect

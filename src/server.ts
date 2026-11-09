@@ -11,7 +11,7 @@ import {
   ERR_CHECKPOINT_NOT_FOUND,
 } from '@animalabs/mcpl-core';
 import { formatAgentDateTime, resolveAgentTimeZone, resolveTimestampStyle } from './timezone.js';
-import { lateDeliveryLine, receivedAttribute } from './late-delivery.js';
+import { LATE_DELIVERY_THRESHOLD_MS, lateDeliveryLine, receivedAttribute } from './late-delivery.js';
 
 import type {
   JsonRpcRequest,
@@ -532,7 +532,7 @@ interface CreateMemory {
   done: boolean;
   /** Coalescing scope the create used (RFC-006): a channel id, or null for feature-set scope. */
   scope?: string | null;
-  render?: { prefix: string; replyMarker: string; location: string; authorName: string; attachments: ContentBlock[] };
+  render?: { prefix: string; editLateLine: string; replyMarker: string; location: string; authorName: string; attachments: ContentBlock[] };
   edits: number;
 }
 const RECENT_CREATES_MAX = 512;
@@ -3884,7 +3884,7 @@ export class DiscordMcplServer {
     // An edit may replace the unread create (RFC-006 §4.1), so it must be as self-contained as the create was.
     const render = this.hostCoalescing?.pushEvents ? mem?.render : undefined;
     const content: ContentBlock[] = render
-      ? [textContent(`${render.prefix}${render.replyMarker}${render.location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
+      ? [textContent(`${render.prefix}${render.editLateLine}${render.replyMarker}${render.location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
       : [textContent(`[message edited] ${who}${senderText(newContent)}`)];
     const params: CoalescedPushEventParams = {
       featureSet: 'discord.messaging',
@@ -4540,7 +4540,7 @@ export class DiscordMcplServer {
     const eventTags: string[] = (() => {
       const t = new Set<string>(addressTags(flags, isDM, isBot));
       for (const tag of threadTags(msg)) t.add(tag);
-      if (lateLine) t.add('chat:late');
+      if (lateLine) t.add('discord:late');
       for (const a of msg.attachments) {
         const ct = (a.contentType || '').toLowerCase();
         if (ct.startsWith('image/')) t.add('chat:has-image');
@@ -4551,7 +4551,11 @@ export class DiscordMcplServer {
     })();
 
     mem.render = {
-      prefix: `${prefixBlock}${lateLine}`, replyMarker, location, authorName: msg.authorName,
+      prefix: prefixBlock,
+      editLateLine: lateDeliveryLine(
+        msg.timestamp, receivedAt, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE, LATE_DELIVERY_THRESHOLD_MS, 'edit of a late delivery',
+      ),
+      replyMarker, location, authorName: msg.authorName,
       attachments: rememberedAttachments(attachmentBlocks),
     };
 
