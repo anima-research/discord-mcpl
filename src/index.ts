@@ -2,7 +2,7 @@
 
 import * as net from 'node:net';
 import { McplConnection } from '@animalabs/mcpl-core';
-import { DiscordAdapter } from './discord-adapter.js';
+import { DiscordAdapter, refusal } from './discord-adapter.js';
 import { DiscordMcplServer, serveStdio, serveTcp } from './server.js';
 import {
   resolveStartupFilters,
@@ -52,7 +52,9 @@ async function main(): Promise<void> {
   if (vEnv) {
     // Voice is built from the ready client, before the handshake, so a voice
     // box connects first, and a failed login ends the process.
-    await discord.connect();
+    await discord.connect().catch((err) => {
+      throw new Error(refusal(err) ?? (err as Error).message);
+    });
     try {
       const { createVoiceOutput } = await import('./voice.js');
       voice = await createVoiceOutput(vEnv, discord.rawClient);

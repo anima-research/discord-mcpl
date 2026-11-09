@@ -697,7 +697,7 @@ const CONFIGURATION_CLOSES: Record<string, string> = {
  *  a refused token (a 401 from the REST API, whose DiscordAPIError carries
  *  `status`, discord.js's TokenInvalid, or the gateway's authentication
  *  close), a gateway close for configuration, or any other 4xx answer. */
-function refusal(err: unknown): string | null {
+export function refusal(err: unknown): string | null {
   const e = err as { status?: unknown; code?: unknown; message?: unknown } | null;
   const message = typeof e?.message === 'string' ? e.message : String(err);
   if (e?.status === 401 || e?.code === 'TokenInvalid' || message === 'Authentication failed') {

@@ -3759,7 +3759,7 @@ describe('while Discord is still connecting', () => {
   class ConnectingAdapter extends MockDiscordAdapter {
     connecting = true;
     get isConnected(): boolean { return !this.connecting; }
-    private waiters: Array<() => void> = [];
+    waiters: Array<() => void> = [];
     whenReady(): Promise<void> {
       return this.connecting ? new Promise((resolve) => this.waiters.push(resolve)) : Promise.resolve();
     }
@@ -3785,12 +3785,16 @@ describe('while Discord is still connecting', () => {
     return (await client.sendRequest('tools/call', { name, arguments: args })) as { content: Array<{ text: string }>; isError?: boolean };
   }
 
-  it('answers a Discord tool at once that it didn\'t run, and sends nothing; a ping behind it is answered', async (t) => {
+  it('answers a Discord tool at once that it didn\'t run, and sends nothing; a ping sent behind it is answered', async (t) => {
     const { client, discord } = await boot(t);
     const started = Date.now();
-    const result = await call(client, 'send_message', { channelId: 'discord:g1:c1', content: 'hello' });
-    await client.sendRequest('ping', {});
-    assert.ok(Date.now() - started < 1_000, `answered after ${Date.now() - started} ms`);
+    // Both sent before either answers, so the ping queues behind the call. A call that waited for Discord would hold
+    // both, as the 15 s wait this replaced did.
+    const [result] = await Promise.all([
+      call(client, 'send_message', { channelId: 'discord:g1:c1', content: 'hello' }),
+      client.sendRequest('ping', {}),
+    ]);
+    assert.ok(Date.now() - started < 5_000, `answered after ${Date.now() - started} ms`);
     assert.equal(result.isError, true);
     assert.match(result.content[0]!.text, didntRun('send_message'));
     assert.deepEqual(discord.sentMessages, []);
@@ -3805,11 +3809,14 @@ describe('while Discord is still connecting', () => {
     assert.match(byName.content[0]!.text, didntRun('mute_channel'));
   });
 
-  it('answers an unknown tool as unknown', async (t) => {
+  it('answers an unknown or retired tool with its own answer, a channel given by name included', async (t) => {
     const { client } = await boot(t);
-    const result = await call(client, 'no_such_tool', {});
-    assert.equal(result.isError, true);
-    assert.match(result.content[0]!.text, /There's no Discord tool "no_such_tool"/);
+    const unknown = await call(client, 'no_such_tool', { channelId: '#general' });
+    assert.equal(unknown.isError, true);
+    assert.match(unknown.content[0]!.text, /There's no Discord tool "no_such_tool"/);
+    const retired = await call(client, 'subscribe_channel', { channelId: '#general' });
+    assert.equal(retired.isError, true);
+    assert.match(retired.content[0]!.text, /subscribe_channel is retired/);
   });
 
   it('refuses a publish, an open and an acknowledgement at once, saying none ran', async (t) => {
@@ -3833,9 +3840,15 @@ describe('while Discord is still connecting', () => {
 
   it('registers channels with the host only once Discord is ready', async (t) => {
     const { client, discord } = await boot(t);
+    let arrived = false;
     const first = client.nextMessage();
-    const early = await Promise.race([first.then(() => 'sent'), new Promise((r) => setTimeout(() => r('nothing'), 300))]);
-    assert.equal(early, 'nothing', 'nothing registered while connecting');
+    void first.then(() => { arrived = true; }, () => {});
+    // The start-up parks on whenReady() once the host's policy is answered.
+    const deadline = Date.now() + 5_000;
+    while (discord.waiters.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(discord.waiters.length, 1, 'the start-up waits for Discord');
+    await new Promise((r) => setImmediate(r));
+    assert.equal(arrived, false, 'nothing registered while connecting');
     discord.becomeReady();
     const reg = await Promise.race([first, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no register after ready')), 5_000))]);
     assert.equal(reg.type === 'request' ? reg.request.method : reg.type, method.CHANNELS_REGISTER);

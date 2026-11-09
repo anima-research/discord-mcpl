@@ -64,7 +64,9 @@ function serverOver(t: TestContext, filters: DiscordFilters, botGuilds: string[]
     const result = await callTool('filters_update', args);
     return { refused: result.isError === true, text: result.content.map((c) => c.text ?? '').join('') };
   };
-  return { path, delivered, post, postDm, update, fileText: () => readFileSync(path, 'utf8') };
+  // Mark a connect under way, as connectWithRetry does, with the client not ready.
+  const connecting = () => { (adapter as unknown as { connectStarted: boolean }).connectStarted = true; };
+  return { path, delivered, post, postDm, update, connecting, fileText: () => readFileSync(path, 'utf8') };
 }
 
 describe('filters_update narrows the server list and never empties it', () => {
@@ -251,5 +253,25 @@ describe('a filters file\'s empty server list', () => {
     post('guild-1');
     post('guild-2');
     assert.deepEqual(delivered, ['guild-1/channel-guild-1', 'guild-2/channel-guild-2']);
+  });
+});
+
+describe('filters_update while Discord is still connecting', () => {
+  it('refuses to widen an unrestricted server list, which needs the servers Discord has sent, and changes nothing', async (t) => {
+    const s = serverOver(t, {}, ['guild-1']);
+    s.connecting();
+    const before = s.fileText();
+    const result = await s.update({ addGuilds: ['guild-9'] });
+    assert.equal(result.refused, true);
+    assert.match(result.text, /^filters_update didn't run, so nothing was sent or changed: Discord isn't connected yet/);
+    assert.equal(s.fileText(), before);
+  });
+
+  it('changes a listed server list, which needs nothing from Discord', async (t) => {
+    const s = serverOver(t, { guildIds: ['guild-1'] });
+    s.connecting();
+    const result = await s.update({ addGuilds: ['guild-2'] });
+    assert.equal(result.refused, false, result.text);
+    assert.deepEqual(JSON.parse(s.fileText()).guildIds, ['guild-1', 'guild-2']);
   });
 });

@@ -133,11 +133,11 @@ const INSPECTION_TOOLS: ReadonlySet<string> = new Set(['fetch_history', 'fetch_a
 const TOOL_NAMES: ReadonlySet<string> = new Set(toolDefinitions.map((t) => t.name));
 
 /** Tools that read or change only this connector's own state, so they run
- *  before Discord is ready. filters_update isn't one: widening an unrestricted
- *  guild filter reads the guilds Discord has sent. */
+ *  before Discord is ready. filters_update's one read of Discord, widening an
+ *  unrestricted guild filter, refuses on its own. */
 const LOCAL_TOOLS: ReadonlySet<string> = new Set([
-  'filters_get', 'list_subscriptions', 'channel_missed', 'set_reaction_visibility',
-  'subscribe_channel', 'unsubscribe_channel', 'mute_channel', 'unmute_channel',
+  'filters_get', 'filters_update', 'list_subscriptions', 'channel_missed', 'set_reaction_visibility',
+  'mute_channel', 'unmute_channel',
 ]);
 
 const namesChannel = (args: Record<string, unknown>): boolean =>
@@ -1760,7 +1760,8 @@ export class DiscordMcplServer {
     }
 
     let explain: ExplainContext = {};
-    if (typeof args.channelId === 'string' && args.channelId.trim()) {
+    // An unknown or retired tool gets its own answer, so its channel isn't resolved.
+    if (TOOL_NAMES.has(name) && typeof args.channelId === 'string' && args.channelId.trim()) {
       const given = args.channelId;
       const path: AddressingPath = isSnowflake(given.trim()) ? 'explicit-id' : 'name-resolved';
       const noResolver = typeof this.discord.resolveChannelRef !== 'function';
@@ -2285,6 +2286,9 @@ export class DiscordMcplServer {
     const notes: string[] = [];
 
     if ((addGuilds.length || removeGuilds.length) && !next.guildIds?.length) {
+      // The guilds Discord has sent are none before its READY.
+      const refused = this.notConnectedYet('filters_update');
+      if (refused) throw new Error(refused);
       next.guildIds = (await this.discord.listGuilds()).map((g) => g.id);
       notes.push(
         'Guild filter was unrestricted; materialized it as the list of all current guilds before applying your change.',
