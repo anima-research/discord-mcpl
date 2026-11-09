@@ -11,7 +11,7 @@ import {
   ERR_CHECKPOINT_NOT_FOUND,
 } from '@animalabs/mcpl-core';
 import { formatAgentDateTime, resolveAgentTimeZone, resolveTimestampStyle } from './timezone.js';
-import { LATE_DELIVERY_THRESHOLD_MS, lateDeliveryLine, receivedAttribute } from './late-delivery.js';
+import { LATE_DELIVERY_THRESHOLD_MS, isLateDelivery, lateDeliveryLine, receivedAttribute } from './late-delivery.js';
 
 import type {
   JsonRpcRequest,
@@ -223,6 +223,12 @@ function addressTags(flags: { isExplicitMention: boolean; isReplyToBot: boolean;
  *  (the host documents it as "Occurred in a thread"). */
 function threadTags(thread: ThreadPlace): string[] {
   return thread.threadId ? ['chat:thread'] : [];
+}
+
+function blockTags(thread: ThreadPlace, lines: Array<{ timestamp: Date }>): { tags?: string[] } {
+  const oldest = lines.reduce((min, m) => Math.min(min, m.timestamp.getTime()), Infinity);
+  const tags = [...threadTags(thread), ...(isLateDelivery(new Date(oldest), new Date()) ? ['discord:late'] : [])];
+  return tags.length > 0 ? { tags } : {};
 }
 
 function knowsLessThan(d: ChannelDescriptor, known: ChannelDescriptor): boolean {
@@ -2963,7 +2969,7 @@ export class DiscordMcplServer {
             isMention: hadMention,
             isDM,
           } as Record<string, unknown>,
-          ...(threadTags(thread).length > 0 ? { tags: threadTags(thread) } : {}),
+          ...blockTags(thread, found.map(({ m }) => m)),
           payload: { content: [textContent(payloadText)] },
         } satisfies PushEventParams));
       } catch (err) {
@@ -3183,7 +3189,7 @@ export class DiscordMcplServer {
             isMention: hadMention,
             isDM,
           } as Record<string, unknown>,
-          ...(threadTags(thread).length > 0 ? { tags: threadTags(thread) } : {}),
+          ...blockTags(thread, kept),
           payload: { content: [textContent(`${closedNote}${block}`)] },
         } satisfies PushEventParams);
       } catch (err) {

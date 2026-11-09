@@ -26,7 +26,9 @@ in the git log and PR descriptions.
   and metadata describe the edit. Both `<missed>` blocks, the reconnect
   catch-up's and the undelivered one, gain `received="…"` in their lines'
   time zone and style, and none under `AGENT_TIMESTAMP_STYLE=none`, where
-  their lines carry no times either. The late line's times are in the
+  their lines carry no times either. A `<missed>` block whose oldest line
+  was sent more than two minutes before the block is handed on carries the
+  `discord:late` tag too. The late line's times are in the
   agent's time zone and style, with the date added for the `time` style, and
   in UTC ISO for `none`. They compare Discord's time with the clock of the
   machine discord-mcpl runs on, so a clock running more than two minutes

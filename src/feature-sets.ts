@@ -40,7 +40,7 @@ export const featureSets: NamedFeatureSetDeclaration[] = [
       ],
       tags: {
         'discord:late': {
-          desc: 'Handed on more than two minutes after Discord says it was sent; its text says when it was sent and received',
+          desc: 'Handed on more than two minutes after Discord says it was sent: a message, whose text then opens with when it was sent and received, or a <missed> block whose oldest line was',
         },
       },
       // RFC-001 rev 2 renamed `defaultTreatment` to `suggestedTreatment`, a hint a
