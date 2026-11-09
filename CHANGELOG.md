@@ -30,6 +30,16 @@ in the git log and PR descriptions.
   machine discord-mcpl runs on, so a clock running more than two minutes
   fast marks every message late.
 
+### Changed
+
+- **discord-mcpl needs discord.js 14.27.0 or later.** Its range was
+  `^14.16.0`. Below 14.17.0, discord.js ignores the ephemeral flag on a
+  deferred reply, so `/marks` and `/nudge` answer where the whole channel
+  sees them. Below 14.26.4, discord.js drops a message from a thread its
+  cache doesn't hold, so discord-mcpl doesn't receive it as it arrives.
+  Below 14.27.0, discord.js pins an undici release that published security
+  advisories cover; from 14.27.0 it can take a fixed one (6.29.1).
+
 ## 0.6.0 — 2026-10-30
 
 ### Added
