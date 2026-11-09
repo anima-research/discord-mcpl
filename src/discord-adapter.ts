@@ -387,13 +387,19 @@ function renderCustomEmojis(text: string): string {
 
 const REACTION_SNIPPET_MAX = 80;
 
-export function buildReactionSnippet(text: string | null | undefined): string | null {
+/** One line of a message, at most `max` code points counting the ellipsis.
+ *  It's cut by code point, since a cut through a surrogate pair would leave
+ *  text that isn't valid Unicode. */
+export function buildMessageSnippet(text: string | null | undefined, max: number): string | null {
   if (!text) return null;
   const collapsed = renderCustomEmojis(text).replace(/\s+/g, ' ').trim();
   if (!collapsed) return null;
-  return collapsed.length > REACTION_SNIPPET_MAX
-    ? `${collapsed.slice(0, REACTION_SNIPPET_MAX - 1)}…`
-    : collapsed;
+  const chars = Array.from(collapsed);
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : collapsed;
+}
+
+export function buildReactionSnippet(text: string | null | undefined): string | null {
+  return buildMessageSnippet(text, REACTION_SNIPPET_MAX);
 }
 
 interface ForwardSnapshot {
@@ -427,6 +433,13 @@ export function buildForwardedContent(
   return baseContent.trim().length > 0 ? `${baseContent}\n${forwarded}` : forwarded;
 }
 
+/** A message as it reached the agent, whichever way it went. */
+export interface SentMessage {
+  id: string;
+  cleanContent: string;
+  attachments?: Array<{ name: string }>;
+}
+
 export interface MessageEventInfo extends ThreadPlace {
   guildId: string | null;
   authorId?: string;
@@ -434,6 +447,8 @@ export interface MessageEventInfo extends ThreadPlace {
   dmRecipientId?: string;
   dmPartyUnknown?: string;
   authorName?: string;
+  channelName?: string | null;
+  guildName?: string | null;
   /** Edit time (ISO) when Discord supplies it: distinguishes one edit of a
    *  message from the next (RFC-006 occurrence identity). */
   editedAt?: string;
@@ -696,6 +711,7 @@ export class DiscordAdapter {
     channelId: string, messageId: string, newContent: string, isDM: boolean, info?: MessageEventInfo,
   ) => void;
   private deleteHandler?: (channelId: string, messageId: string, isDM: boolean, info?: MessageEventInfo) => void;
+  private ownMessageHandler?: (message: SentMessage) => void;
   private editAccept?: (channelId: string) => boolean;
   private deleteAccept?: (channelId: string) => boolean;
   private reactionHandler?: (ev: ReactionEvent) => void;
@@ -782,6 +798,12 @@ export class DiscordAdapter {
   ): void {
     this.editHandler = handler;
     this.editAccept = accept;
+  }
+
+  /** The bot's own messages aren't forwarded as creates, but the agent knows of
+   *  them, having written them. */
+  onOwnMessage(handler: (message: SentMessage) => void): void {
+    this.ownMessageHandler = handler;
   }
 
   onMessageDelete(
@@ -1141,7 +1163,7 @@ export class DiscordAdapter {
     userId: string,
     content: string,
     options?: { files?: OutgoingFile[] },
-  ): Promise<{ messageId: string; channelId: string; recipientName: string; report?: MentionsField }> {
+  ): Promise<{ messageId: string; channelId: string; recipientId: string; recipientName: string; report?: MentionsField }> {
     const resolvedId = await this.resolveRecipientId(userId);
     const user = await this.client.users.fetch(resolvedId);
     const dm = await user.createDM();
@@ -1166,7 +1188,7 @@ export class DiscordAdapter {
         posted.push(sent.id);
         lastId = sent.id;
       }
-      return { messageId: lastId, channelId: dm.id, recipientName, ...(report ? { report } : {}) };
+      return { messageId: lastId, channelId: dm.id, recipientId: user.id, recipientName, ...(report ? { report } : {}) };
     } catch (err) {
       if (err && typeof err === 'object') Object.assign(err, { dmChannel: { id: dm.id, recipientName } });
       throw err;
@@ -2233,6 +2255,8 @@ export class DiscordAdapter {
     }
     return {
       guildId: guildId ?? null,
+      channelName: this.knownName(message.channelId, (channel as { name?: unknown } | null | undefined)?.name),
+      guildName: guildId ? (this.client.guilds.cache.get(guildId)?.name ?? null) : null,
       ...this.threadPlace(channel, message.channelId),
       authorId,
       authorName,
@@ -2269,8 +2293,21 @@ export class DiscordAdapter {
     return pending;
   }
 
+  private noteOwnMessage(message: Message | PartialMessage): void {
+    try {
+      this.ownMessageHandler?.({
+        id: message.id,
+        cleanContent: resolveVisibleContent(message as Message),
+        attachments: mapAllAttachments(message),
+      });
+    } catch (err) {
+      dbg('gateway:own-message-error', { msgId: message.id, error: (err as Error).message });
+    }
+  }
+
   private async handleMessageUpdate(oldMsg: Message | PartialMessage, newMsg: Message | PartialMessage): Promise<void> {
     const decision = editForwardDecision(oldMsg, newMsg, { selfId: this.client.user?.id });
+    if (decision === 'self') this.noteOwnMessage(newMsg);
     if (decision !== 'forward') {
       if (decision !== 'no-content' && decision !== 'self') {
         dbg('messageUpdate:drop', { msgId: newMsg.id, channelId: newMsg.channelId, reason: decision });
@@ -2636,6 +2673,8 @@ export class DiscordAdapter {
           authorId: message.author.id,
           origin: 'live',
         });
+      } else if (dropReason === 'self-authored') {
+        this.noteOwnMessage(message);
       }
       return;
     }

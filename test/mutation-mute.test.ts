@@ -3,6 +3,7 @@ import * as assert from 'node:assert/strict';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
 import { toDescriptor } from '../src/channels.js';
+import { countEveryMessageAsSent } from './every-message-sent.js';
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -11,6 +12,7 @@ function fixture(t: TestContext) {
   const client = adapter.rawClient;
   t.after(() => client.destroy());
   const server = new DiscordMcplServer(adapter) as any;
+  countEveryMessageAsSent(server);
   const sent: any[] = [];
   server.conn = { sendRequest: (_method: string, params: unknown) => {
     sent.push(params);
