@@ -5,7 +5,106 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Changed
+
+- **discord-mcpl needs discord.js 14.27.0 or later.** Its range was
+  `^14.16.0`. Below 14.17.0, discord.js ignores the ephemeral flag on a
+  deferred reply, so `/marks` and `/nudge` answer where the whole channel
+  sees them. Below 14.26.4, discord.js drops a message from a thread its
+  cache doesn't hold, so discord-mcpl doesn't receive it as it arrives.
+  Below 14.27.0, discord.js pins an undici release that published security
+  advisories cover; from 14.27.0 it can take a fixed one (6.29.1).
+
+- **Edit and deletion notices say where the message was.** The `[message
+  edited]` and `[message deleted]` lines, and an edit that re-renders its
+  create, now always name the channel, in the form a message's own header
+  uses. An unnamed channel goes by its id.
+
+- **A deletion notice says how the message began.** Where the server has that
+  text, it quotes up to 50 code points of the message, or an attachment's name
+  when it has no text:
+  `[message deleted] [#general in Server] <id> by @name — how it began…`. The
+  reaction snippet shares the helper, and is now cut by code point rather
+  than UTF-16 unit, so a cut can't leave invalid text.
+
+- **A deletion is reported only if the agent was sent the message.** A message
+  counts as sent when it reached the host by any route: live, in a catch-up or
+  owed block, in a first DM's backscroll, in channel-open history, through
+  `fetch_history` or `fetch_around`, as a reaction's snippet or a `latestFrom`
+  excerpt, or when the agent wrote it. The server remembers the last 4096 of
+  these, in memory only, so the deletion of an older message, or of one from
+  before a restart, goes unreported too. A send that may have arrived counts as
+  sent, but adds nothing for a deletion to quote.
+
+- **The first reply in a DM the bot started comes without the
+  first-contact block.** The `<system>` block naming the sender and how
+  to answer, and the backscroll of earlier messages, come with a message
+  from a DM for which discord-mcpl holds no catch-up position. A post
+  that registers a DM, or goes into one already registered and kept, now
+  gives it a position, so the other party's first reply there comes
+  without them while that position is held, which across a restart needs
+  `DISCORD_WATERMARK_FILE`. A first message in a DM the bot didn't post
+  into first still brings both. A host's open with
+  `history.sinceLastSeen` reads the same position, so in a DM the bot's
+  post gave a position, it brings only the messages after that post,
+  where it brought the latest ones.
+
+- **Every message discord-mcpl renders names its id.** A message
+  delivered in an open channel or pushed from a closed one, an edit (both
+  the `[message edited]` notice and the re-rendered message that replaces
+  an unread one), a first DM's backscroll and the history a host's open
+  brings now carry `[id=<id>]` just before the sender's name, or before
+  the text where no name is known, the form catch-up lines already use; a
+  backscroll line puts the id beside its time, as a catch-up line does.
+  Discord keeps a message's id across edits, so an edit names the message
+  it changed. A reaction notice on the agent's own message now names that
+  message's id too, as `on your message <id>`, in the form a reaction on
+  another message already used (`on message <id>`). Nothing else on the
+  line changes: a live message gains no time, and the reply marker and
+  the delete notice are as they were. Tool descriptions don't change.
+
 ### Fixed
+
+- **A post into a place discord-mcpl serves names a channel the host
+  holds.** After a restart, discord-mcpl registered a DM only once its
+  other party wrote, so a `send_dm` to anyone who hadn't written since
+  answered with a channel the host didn't hold, and a host that reads a
+  send's place couldn't tell where it went. `send_message`,
+  `reply_message` and `send_dm` now register the place they posted into
+  before they answer, when discord-mcpl serves it: a channel or thread
+  the filters admit, or a DM whose recipient the DM list admits. A post
+  into a place they leave out still isn't registered. Once a post
+  registers a DM, its answer's `channelLabel` is the registered DM's,
+  naming the other party, where for a DM discord.js had recorded with
+  only the bot it named the bot. With `DISCORD_WATERMARK_FILE` set, the
+  DMs the file keeps are also registered at start: each is looked up on
+  Discord, one at a time, after the first MCPL host connects, and those
+  the DM list admits are registered together. A DM the bot posts into is
+  kept in the file once it registers, and if it has no catch-up position
+  yet, the post becomes its position, so a reply sent there while
+  discord-mcpl is down is caught up at the next start. A post into a
+  channel or thread whose facts discord-mcpl holds may be older than
+  Discord's doesn't register it.
+
+- **An id sent as a number is refused, not rounded.** A Discord id is past
+  2^53, where a JSON number can lose its last digits, so a tool call that
+  sent one unquoted could arrive with a different id:
+  `1309876543210987654` arrived as `1309876543210987800`. Tools such as
+  `delete_message` and `send_message` went ahead with that rounded number,
+  and a few others refused a number without saying why. Now a tool refuses
+  a number at any id argument it takes, doing nothing, and says which
+  argument it was and what it arrived as, and that those may not be the
+  digits sent, asking for the id again, taken from where it was read and
+  sent in quotes. The id arguments are
+  `channelId`, `messageId`, `userId`, `guildId`, `categoryId`, `before`,
+  `after` and `latestFrom`, which can carry a user id, and
+  `filters_update`'s `addGuilds`, `removeGuilds` and `setDmUsers`, where a
+  list holding a number is refused too. Small numbers are refused as well,
+  so calls like these, which worked before, now refuse: `fetch_history`
+  with a `before` or `after` of 0, which was dropped so the latest
+  messages came back, and `list_emojis` with a `guildId` of 0, which
+  listed every server's emojis. No tool's schema allowed a number at any
+  of them, so no tool description changes.
 
 - **A catch-up that leaves older messages out says so (#53).** After a
   restart, a channel's catch-up takes the newest `DISCORD_CATCHUP_LIMIT`

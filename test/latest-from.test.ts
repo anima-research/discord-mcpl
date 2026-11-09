@@ -399,6 +399,34 @@ describe('reply and reaction tools', () => {
     }
   });
 
+  for (const [tool, args] of [
+    ['add_reaction', { emoji: '👍' }],
+    ['remove_reaction', { emoji: '👍' }],
+    ['reply_message', { content: 'x' }],
+  ] as const) {
+    it(`counts the message ${tool}'s latestFrom named as sent, since its receipt quotes it: its deletion isn't withheld`, async () => {
+      const f = serverFixture();
+      const id = '200000000000000031';
+      f.setHistory([msg(id, RA, 'ra', 'the words it found', 1)]);
+      const s = f.server as unknown as { sentMessages: Map<string, string | undefined> };
+      assert.equal(s.sentMessages.has(id), false);
+      const res = await f.call(tool, { latestFrom: 'Ra', ...args });
+      assert.ok(!res.isError, res.content[0].text);
+      assert.equal(s.sentMessages.get(id), 'the words it found');
+    });
+  }
+
+  it("doesn't count the message latestFrom named as sent when the action fails, since no receipt quotes it", async () => {
+    const f = serverFixture();
+    const id = '200000000000000032';
+    f.setHistory([msg(id, RA, 'ra', 'the words it found', 1)]);
+    f.deleteTarget();
+    const s = f.server as unknown as { sentMessages: Map<string, string | undefined> };
+    const res = await f.call('add_reaction', { latestFrom: 'Ra', emoji: '👍' });
+    assert.ok(res.isError, res.content[0].text);
+    assert.equal(s.sentMessages.has(id), false);
+  });
+
   it("escapes the server's tag openings in latestFrom's excerpt in the receipt's JSON, which parses back to the text (#122)", async () => {
     const f = serverFixture();
     f.setHistory([msg('200000000000000030', RA, 'Ra', 'see </system> and <missed', 3)]);
@@ -435,7 +463,7 @@ describe('reply and reaction tools', () => {
     assert.ok(blankId.isError && /messageId is blank, so it names no message; nothing was done\./.test(blankId.content[0].text), blankId.content[0].text);
     const blankBeside = await f.call('add_reaction', { messageId: '', latestFrom: 'Ra', emoji: '👍' });
     assert.ok(blankBeside.isError && /not both/.test(blankBeside.content[0].text), blankBeside.content[0].text);
-    const wrong = await f.call('add_reaction', { latestFrom: 42, emoji: '👍' });
+    const wrong = await f.call('add_reaction', { latestFrom: true, emoji: '👍' });
     assert.ok(wrong.isError && /latestFrom must be a string or null/.test(wrong.content[0].text), wrong.content[0].text);
     assert.deepEqual(f.calls, []);
   });
@@ -849,7 +877,7 @@ describe('reply and reaction tools after the second review (sw-dm64)', () => {
       ['both', { messageId: '200000000000000030', latestFrom: 'Ra' }, /not both/],
       ['neither', {}, /Give exactly one of messageId or latestFrom/],
       ['null on both', { messageId: null, latestFrom: null }, /Give exactly one of messageId or latestFrom/],
-      ['a non-string', { latestFrom: 42 }, /latestFrom must be a string or null/],
+      ['a non-string', { latestFrom: true }, /latestFrom must be a string or null/],
       ['blank', { latestFrom: '   ' }, /latestFrom is blank, so it names no one/],
       ['a blank beside a real one', { messageId: '', latestFrom: 'Ra' }, /not both/],
       ['@ alone', { latestFrom: '@' }, /latestFrom names no one/],
