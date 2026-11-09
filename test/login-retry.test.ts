@@ -49,8 +49,10 @@ class FakeClient extends EventEmitter {
     return 'token';
   }
   async destroy(): Promise<void> { this.destroyed = true; }
-  // setupEvents() reads a few client fields when handlers fire; none fire here.
-  get ws() { return { status: 0, ping: -1 }; }
+  // The adapter listens on the gateway manager for raw dispatches and wraps the client's ThreadListSync action at
+  // construction; setupEvents() reads a few client fields when handlers fire, and none fire here.
+  readonly ws = Object.assign(new EventEmitter(), { status: 0, ping: -1 });
+  readonly actions = { ThreadListSync: { handle(): void {} } };
   get guilds() { return { cache: new Map() }; }
 }
 
