@@ -26,8 +26,6 @@ import {
   type GatewayThreadListSyncDispatchData,
   type TextBasedChannel,
   cleanContent as discordCleanContent,
-  REST,
-  Routes,
 } from 'discord.js';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { basename, resolve as resolvePath } from 'node:path';
@@ -186,9 +184,6 @@ export interface DiscordAdapterConfig {
   dmUsers?: string[];
   /** Test seam: builds the discord.js client (default: the real one). */
   clientFactory?: () => Client;
-  /** Test seam: resolves when Discord's gateway endpoint answers, throws
-   *  when it can't be reached (default: GET /gateway/bot). */
-  probeGateway?: () => Promise<void>;
 }
 
 export const DM_REFUSALS_HELD = 100;
@@ -683,7 +678,7 @@ export function applyMentionCandidates(
 /** The gateway closes Discord sends for a configuration no retry changes, as
  *  @discordjs/ws 1.2 rejects a shard's connect on them (its close-code switch,
  *  `dist/index.js`), each with what to fix. */
-const CONFIGURATION_CLOSES: Record<string, string> = {
+export const CONFIGURATION_CLOSES: Readonly<Record<string, string>> = {
   'Used disallowed intents':
     "turn on the bot's Server Members and Message Content intents in Discord's developer portal",
   'Used invalid intents': "this connector asks for intents Discord doesn't accept; update discord-mcpl",
@@ -703,7 +698,7 @@ export function refusal(err: unknown): string | null {
   if (e?.status === 401 || e?.code === 'TokenInvalid' || message === 'Authentication failed') {
     return `Discord refused the bot token (${message}): check DISCORD_TOKEN`;
   }
-  const closed = CONFIGURATION_CLOSES[message];
+  const closed = Object.prototype.hasOwnProperty.call(CONFIGURATION_CLOSES, message) ? CONFIGURATION_CLOSES[message] : undefined;
   if (closed) return `Discord closed the gateway (${message}): ${closed}`;
   if (typeof e?.status === 'number' && e.status >= 400 && e.status < 500 && e.status !== 429) {
     return `Discord refused the connector's request (${message}): check the bot's application in Discord's developer portal`;
@@ -714,7 +709,6 @@ export function refusal(err: unknown): string | null {
 export class DiscordAdapter {
   private client: Client;
   private readonly clientFactory: () => Client;
-  private readonly probeGatewayFn: () => Promise<void>;
   /** whenReady() callers. Owned here, not by a client, so they survive a
    *  client replacement (see connectWithRetry). */
   private readyWaiters: Array<() => void> = [];
@@ -791,7 +785,6 @@ export class DiscordAdapter {
       ],
       partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
     }));
-    this.probeGatewayFn = config.probeGateway ?? (() => this.defaultProbeGateway());
     this.client = this.clientFactory();
     this.installThreadSyncScope();
     this.setupEvents();
@@ -823,9 +816,8 @@ export class DiscordAdapter {
    *  a later successful login on the same client receives messages but
    *  reports isReady() false forever (every send then fails "not connected"),
    *  won't reconnect after a later drop, and has its cache sweepers stopped
-   *  (2026-09-25 and 2026-09-26, connectors booted while DNS was down). So:
-   *  probe the gateway endpoint first, leaving the client untouched while the
-   *  network is down, and if a login fails anyway, replace the client. */
+   *  (2026-09-25 and 2026-09-26, connectors booted while DNS was down). So a
+   *  failed login replaces the client before the next attempt. */
   async connectWithRetry(opts: { initialDelayMs?: number; maxDelayMs?: number } = {}): Promise<void> {
     this.connectStarted = true;
     let delay = opts.initialDelayMs ?? 5_000;
@@ -835,17 +827,6 @@ export class DiscordAdapter {
       delay = Math.min(delay * 2, maxDelay);
     };
     for (let attempt = 1; ; attempt++) {
-      try {
-        await this.probeGatewayFn();
-      } catch (err) {
-        const refused = refusal(err);
-        if (refused) { this.connectEnded = true; throw new Error(refused); }
-        console.error(
-          `[discord-mcpl] Discord unreachable (attempt ${attempt}): ${(err as Error).message} — retrying in ${Math.round(delay / 1000)}s`,
-        );
-        await wait();
-        continue;
-      }
       try {
         await this.connect();
         return;
@@ -865,7 +846,7 @@ export class DiscordAdapter {
   /** A failed login leaves the client destroyed for good: build a new one
    *  with the same handlers. Logins fail only before the gateway's first
    *  READY, and voice output takes `rawClient` after it, so nothing holds a
-   *  replaced client. The probe keeps replacement rare. */
+   *  replaced client. */
   private replaceClient(): void {
     const old = this.client;
     old.removeAllListeners();
@@ -874,13 +855,6 @@ export class DiscordAdapter {
     this.installThreadSyncScope();
     this.setupEvents();
     dbg('gateway:client-replaced', {});
-  }
-
-  /** GET /gateway/bot with a standalone REST client, so a failure can't
-   *  touch the gateway client. Throws when Discord can't be reached. */
-  private async defaultProbeGateway(): Promise<void> {
-    const rest = new REST({ version: '10', retries: 0, timeout: 15_000 }).setToken(this.token);
-    await rest.get(Routes.gatewayBot());
   }
 
   /** True from connectWithRetry's start until the gateway is READY, and false

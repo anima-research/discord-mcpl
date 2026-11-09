@@ -7,17 +7,18 @@
  * The destroyed manager also refuses to reconnect its shards after a later
  * drop, and destroy() stops the cache sweepers.
  *
- * Fix: probe the gateway endpoint before any login (an unreachable network
- * never touches the client), and if a login fails anyway, replace the client.
+ * Fix: a failed login replaces the client before the next attempt.
  * whenReady() is owned by the adapter, so waiters survive a replacement.
  */
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import * as net from 'node:net';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { Client, GatewayIntentBits, Status } from 'discord.js';
 
-const { DiscordAdapter } = await import('../src/discord-adapter.js');
+const { DiscordAdapter, CONFIGURATION_CLOSES } = await import('../src/discord-adapter.js');
 
 describe('the library behaviour behind the bug', () => {
   it('a failed login leaves the client destroyed: isReady() stays false even at status Ready', async () => {
@@ -41,6 +42,16 @@ describe('the library behaviour behind the bug', () => {
   });
 });
 
+describe("the gateway's messages the refusals match", () => {
+  it('the installed @discordjs/ws still rejects a shard\'s connect with each message refusal() matches', () => {
+    const require = createRequire(import.meta.url);
+    const ws = readFileSync(require.resolve('@discordjs/ws', { paths: [require.resolve('discord.js')] }), 'utf8');
+    for (const message of ['Authentication failed', ...Object.keys(CONFIGURATION_CLOSES)]) {
+      assert.ok(ws.includes(`new Error("${message}")`), `@discordjs/ws no longer says "${message}"`);
+    }
+  });
+});
+
 /** A stand-in for discord.js Client with the same lifecycle rules:
  *  a failed login destroys it for good. */
 class FakeClient extends EventEmitter {
@@ -48,14 +59,14 @@ class FakeClient extends EventEmitter {
   destroyed = false;
   ready = false;
   logins = 0;
-  constructor(private readonly plan: { failLogin: boolean }) {
+  constructor(private readonly fail: (() => Error) | null) {
     super();
     FakeClient.made.push(this);
   }
   isReady(): boolean { return !this.destroyed && this.ready; }
   async login(): Promise<string> {
     this.logins++;
-    if (this.plan.failLogin) { this.destroyed = true; throw new Error('getaddrinfo ENOTFOUND discord.com'); }
+    if (this.fail) { this.destroyed = true; throw this.fail(); }
     // As a real client can, it turns ready only after login resolves.
     setImmediate(() => { this.ready = true; this.emit('ready', this); });
     return 'token';
@@ -73,120 +84,79 @@ function within<T>(p: Promise<T>, ms = 3_000): Promise<T> {
   return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`still waiting after ${ms} ms`)), ms).unref())]);
 }
 
-function adapterWith(opts: { probe: () => Promise<void>; failLogins: number }) {
+const unreachable = () => new Error('getaddrinfo ENOTFOUND discord.com');
+
+/** An adapter whose clients' logins fail with each of `failures` in turn, then succeed. */
+function adapterWith(failures: Array<() => Error>) {
   FakeClient.made = [];
   let built = 0;
   const adapter = new DiscordAdapter({
     token: 'not-used',
-    clientFactory: () => new FakeClient({ failLogin: built++ < opts.failLogins }) as unknown as Client,
-    probeGateway: opts.probe,
+    clientFactory: () => new FakeClient(failures[built++] ?? null) as unknown as Client,
   });
   return adapter;
 }
 
 describe('connectWithRetry', () => {
-  it('network down at boot: never logs in until the gateway is reachable, then connects cleanly', async () => {
-    let probes = 0;
-    const loginsAtFailedProbes: number[] = [];
-    const adapter = adapterWith({
-      probe: async () => {
-        if (++probes < 3) {
-          loginsAtFailedProbes.push(FakeClient.made.reduce((n, c) => n + c.logins, 0));
-          throw new Error('getaddrinfo ENOTFOUND discord.com');
-        }
-      },
-      failLogins: 0,
-    });
+  it('network down at boot: each failed login gets a fresh client, and the connect completes once Discord answers', async () => {
+    const adapter = adapterWith([unreachable, unreachable]);
     const waiter = adapter.whenReady(); // registered while down, as index.ts does
     await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
     await within(waiter);
-    assert.equal(probes, 3);
-    assert.deepEqual(loginsAtFailedProbes, [0, 0], 'no login before or during a failed probe');
-    assert.equal(FakeClient.made.length, 1, 'the client was never destroyed, so never replaced');
-    assert.equal(FakeClient.made[0]!.logins, 1, 'no login while the network was down');
-    assert.equal(adapter.isConnected, true);
-  });
-
-  it('a login that fails anyway gets a fresh client; waiters from before the swap still resolve', async () => {
-    const adapter = adapterWith({ probe: async () => {}, failLogins: 1 });
-    const waiter = adapter.whenReady();
-    await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
-    await within(waiter);
-    assert.equal(FakeClient.made.length, 2);
-    assert.equal(FakeClient.made[0]!.destroyed, true);
-    assert.equal(adapter.isConnected, true, 'the connected check reads the live client, not the destroyed one');
-    assert.equal((adapter as unknown as { rawClient: unknown }).rawClient, FakeClient.made[1]);
+    assert.equal(FakeClient.made.length, 3);
+    assert.deepEqual(FakeClient.made.map((c) => [c.logins, c.destroyed]), [[1, true], [1, true], [1, false]]);
+    assert.equal(adapter.isConnected, true, 'the connected check reads the live client, not a destroyed one');
+    assert.equal((adapter as unknown as { rawClient: unknown }).rawClient, FakeClient.made[2]);
   });
 
   it('whenReady() after connecting resolves immediately', async () => {
-    const adapter = adapterWith({ probe: async () => {}, failLogins: 0 });
+    const adapter = adapterWith([]);
     await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
     await within(adapter.whenReady());
   });
-});
 
-describe('a token Discord refuses', () => {
-  const refused = () => Object.assign(new Error('401: Unauthorized'), { status: 401 });
-
-  it('ends the connect at the probe with an error naming DISCORD_TOKEN, with no login and no retry', async () => {
-    let probes = 0;
-    const adapter = adapterWith({ probe: async () => { probes++; throw refused(); }, failLogins: 0 });
-    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /DISCORD_TOKEN/);
-    assert.equal(probes, 1);
-    assert.equal(FakeClient.made[0]!.logins, 0);
-  });
-
-  it('ends the connect at login with an error naming DISCORD_TOKEN, with no fresh client', async () => {
-    FakeClient.made = [];
-    const client = new FakeClient({ failLogin: false });
-    client.login = async () => { client.logins++; client.destroyed = true; throw Object.assign(new Error('An invalid token was provided.'), { code: 'TokenInvalid' }); };
-    const adapter = new DiscordAdapter({ token: 'not-used', clientFactory: () => client as unknown as Client, probeGateway: async () => {} });
-    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /DISCORD_TOKEN/);
-    assert.equal(client.logins, 1);
-    assert.equal(FakeClient.made.length, 1);
-  });
-});
-
-describe('other refusals no wait would change', () => {
-  it('a probe answered with a 4xx other than 429 ends the connect, naming the developer portal, with no login', async () => {
-    let probes = 0;
-    const adapter = adapterWith({ probe: async () => { probes++; throw Object.assign(new Error('403: Forbidden'), { status: 403 }); }, failLogins: 0 });
-    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /403: Forbidden.*developer portal/);
-    assert.equal(probes, 1);
-    assert.equal(FakeClient.made[0]!.logins, 0);
-  });
-
-  it('a probe answered with a 5xx or a 429 is retried', async () => {
-    let probes = 0;
-    const adapter = adapterWith({
-      probe: async () => {
-        probes++;
-        if (probes === 1) throw Object.assign(new Error('503: Service Unavailable'), { status: 503 });
-        if (probes === 2) throw Object.assign(new Error('429: Too Many Requests'), { status: 429 });
-      },
-      failLogins: 0,
-    });
+  it('a login failing with a 5xx or a 429 is retried', async () => {
+    const adapter = adapterWith([
+      () => Object.assign(new Error('503: Service Unavailable'), { status: 503 }),
+      () => Object.assign(new Error('429: Too Many Requests'), { status: 429 }),
+    ]);
     await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
-    assert.equal(probes, 3);
+    assert.equal(FakeClient.made.length, 3);
     assert.equal(adapter.isConnected, true);
   });
+});
 
-  it("a login closed for intents Discord doesn't allow ends the connect, naming the intents, with no fresh client", async () => {
-    FakeClient.made = [];
-    const client = new FakeClient({ failLogin: false });
-    client.login = async () => { client.logins++; client.destroyed = true; throw new Error('Used disallowed intents'); };
-    const adapter = new DiscordAdapter({ token: 'not-used', clientFactory: () => client as unknown as Client, probeGateway: async () => {} });
-    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /Used disallowed intents.*Server Members and Message Content/);
-    assert.equal(client.logins, 1);
-    assert.equal(FakeClient.made.length, 1);
+describe('refusals no wait would change', () => {
+  const refuses = async (error: () => Error, pattern: RegExp) => {
+    const adapter = adapterWith([error]);
+    await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), pattern);
+    assert.equal(FakeClient.made.length, 1, 'no fresh client, so no retry');
+    assert.equal(FakeClient.made[0]!.logins, 1);
+  };
+
+  it('a token refused at login ends the connect, naming DISCORD_TOKEN', async () => {
+    await refuses(() => Object.assign(new Error('An invalid token was provided.'), { code: 'TokenInvalid' }), /DISCORD_TOKEN/);
+  });
+
+  it('a login answered with a 4xx other than 429 ends the connect, naming the developer portal', async () => {
+    await refuses(() => Object.assign(new Error('403: Forbidden'), { status: 403 }), /403: Forbidden.*developer portal/);
+  });
+
+  it("a login closed for intents Discord doesn't allow ends the connect, naming the intents", async () => {
+    await refuses(() => new Error('Used disallowed intents'), /Used disallowed intents.*Server Members and Message Content/);
+  });
+
+  it('a message that only matches an inherited key is retried, not refused', async () => {
+    const adapter = adapterWith([() => new Error('constructor')]);
+    await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
+    assert.equal(FakeClient.made.length, 2);
   });
 });
 
 describe('connecting', () => {
-  it('is false before a connect starts, true while the gateway is unreachable, and false once it is ready', async () => {
-    let probes = 0;
+  it('is false before a connect starts, true while logins fail, and false once it is ready', async () => {
     let during: boolean | undefined;
-    const adapter = adapterWith({ probe: async () => { if (++probes < 2) { during = adapter.connecting; throw new Error('getaddrinfo ENOTFOUND discord.com'); } }, failLogins: 0 });
+    const adapter = adapterWith([() => { during = adapter.connecting; return unreachable(); }]);
     assert.equal(adapter.connecting, false);
     await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
     assert.equal(during, true);
@@ -194,15 +164,10 @@ describe('connecting', () => {
     assert.equal(adapter.isConnected, true);
   });
 
-  it('is false once a refused token has ended the connect', async () => {
-    let probes = 0;
+  it('is false once a refusal has ended the connect', async () => {
     let during: boolean | undefined;
-    const adapter = adapterWith({
-      probe: async () => { probes++; during = adapter.connecting; throw Object.assign(new Error('401: Unauthorized'), { status: 401 }); },
-      failLogins: 0,
-    });
+    const adapter = adapterWith([() => { during = adapter.connecting; return Object.assign(new Error('An invalid token was provided.'), { code: 'TokenInvalid' }); }]);
     await assert.rejects(within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 })), /DISCORD_TOKEN/);
-    assert.equal(probes, 1);
     assert.equal(during, true);
     assert.equal(adapter.connecting, false);
   });

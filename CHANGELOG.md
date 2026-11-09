@@ -20,8 +20,8 @@ in the git log and PR descriptions.
   unable to send.** discord.js destroys a client whose login fails, and a
   later successful login on the same client reports `isReady()` false
   forever: messages arrived but every publish failed "not connected". The
-  connector now probes the gateway endpoint before each login attempt and
-  replaces the client if a login fails anyway.
+  connector now replaces the client after a failed login, before the next
+  attempt.
 
 ### Changed
 
