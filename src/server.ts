@@ -133,8 +133,9 @@ const INSPECTION_TOOLS: ReadonlySet<string> = new Set(['fetch_history', 'fetch_a
 const TOOL_NAMES: ReadonlySet<string> = new Set(toolDefinitions.map((t) => t.name));
 
 /** Tools that read or change only this connector's own state, so they run
- *  before Discord is ready. filters_update's one read of Discord, widening an
- *  unrestricted guild filter, refuses on its own. */
+ *  before Discord is ready. filters_update refuses on its own where it needs
+ *  Discord: changing an unrestricted guild filter, or setting the DM notice
+ *  with no DISCORD_DM_NOTICES_FILE. */
 const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   'filters_get', 'filters_update', 'list_subscriptions', 'channel_missed', 'set_reaction_visibility',
   'mute_channel', 'unmute_channel',
@@ -2239,6 +2240,11 @@ export class DiscordMcplServer {
     const removeGuilds = listOf('removeGuilds', ids('server'), id) ?? [];
     const setDmUsers = listOf('setDmUsers', ids('user'), id);
     const setDmNotice = (args.setDmNotice ?? undefined) as boolean | undefined;
+    // Without DISCORD_DM_NOTICES_FILE, the notice file is named by the bot's id, which Discord's READY gives.
+    if (setDmNotice !== undefined && !process.env.DISCORD_DM_NOTICES_FILE?.trim()) {
+      const refused = this.notConnectedYet('filters_update');
+      if (refused) throw new Error(refused);
+    }
     const applyNotice = async (notes: string[]): Promise<void> => {
       if (setDmNotice === undefined) return;
       const unconfirmed = await this.dmNoticeState().setEnabled(setDmNotice);
@@ -2286,7 +2292,7 @@ export class DiscordMcplServer {
     const notes: string[] = [];
 
     if ((addGuilds.length || removeGuilds.length) && !next.guildIds?.length) {
-      // The guilds Discord has sent are none before its READY.
+      // Changing an unrestricted list starts from the guilds Discord has sent, which are none before its READY.
       const refused = this.notConnectedYet('filters_update');
       if (refused) throw new Error(refused);
       next.guildIds = (await this.discord.listGuilds()).map((g) => g.id);

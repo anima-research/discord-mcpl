@@ -267,6 +267,17 @@ describe('filters_update while Discord is still connecting', () => {
     assert.equal(s.fileText(), before);
   });
 
+  it('refuses a DM notice change with no DISCORD_DM_NOTICES_FILE, since the notice file is named by the bot\'s id', async (t) => {
+    const previous = process.env.DISCORD_DM_NOTICES_FILE;
+    delete process.env.DISCORD_DM_NOTICES_FILE;
+    t.after(() => { if (previous !== undefined) process.env.DISCORD_DM_NOTICES_FILE = previous; });
+    const s = serverOver(t, { guildIds: ['guild-1'] });
+    s.connecting();
+    const result = await s.update({ setDmNotice: true });
+    assert.equal(result.refused, true);
+    assert.match(result.text, /^filters_update didn't run, so nothing was sent or changed: Discord isn't connected yet/);
+  });
+
   it('changes a listed server list, which needs nothing from Discord', async (t) => {
     const s = serverOver(t, { guildIds: ['guild-1'] });
     s.connecting();
