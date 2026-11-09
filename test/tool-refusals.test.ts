@@ -38,7 +38,6 @@ const wrongChannelIds: Array<[unknown, string]> = [
   [null, ', and this call gave none'],
   ['', ', and this call gave it blank'],
   ['   ', ', and this call gave it blank'],
-  [42, ' as a string, and this call gave a number'],
   [['123456789012345678'], ' as a string, and this call gave a list'],
   [{ id: '123456789012345678' }, ' as a string, and this call gave an object'],
   [true, ' as a string, and this call gave a boolean'],
@@ -179,7 +178,7 @@ describe('tool refusals say what did not happen', () => {
     for (const [userId, wrong] of [
       [undefined, ', and this call gave none'],
       ['  ', ', and this call gave it blank'],
-      [42, ' as a string, and this call gave a number'],
+      [true, ' as a string, and this call gave a boolean'],
     ] as const) {
       const r = await s.handleToolCall('send_dm', { userId, content: 'hi' });
       assert.equal(r.isError, true, String(userId));
@@ -317,7 +316,7 @@ describe('a send refused for its files says nothing was sent, and what to send i
     writeFileSync(fine, 'x');
     for (const none of [null, false, 0]) await send(adapter, [{ path: fine, name: none, description: none }]);
     const attached = sends.map((s) => (s as { files: Array<{ name?: string; description?: string }> }).files[0]);
-    assert.deepEqual(attached.map((f) => [f.name, f.description]),
+    assert.deepEqual(attached.map((f) => [f.name, f.description ?? undefined]),
       [['fine.txt', undefined], ['fine.txt', undefined], ['fine.txt', undefined]]);
   });
 

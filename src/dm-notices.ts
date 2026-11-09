@@ -28,7 +28,7 @@ export function snowflakeAt(ms: number): string {
 }
 
 /** When Discord assigned a snowflake, as epoch ms. */
-function snowflakeTime(id: string): number {
+export function snowflakeTime(id: string): number {
   return Number((BigInt(id) >> 22n) + DISCORD_EPOCH_MS);
 }
 
