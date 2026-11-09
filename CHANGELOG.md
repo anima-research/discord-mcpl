@@ -5,6 +5,50 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Changed
+
+- **discord-mcpl needs discord.js 14.27.0 or later.** Its range was
+  `^14.16.0`. Below 14.17.0, discord.js ignores the ephemeral flag on a
+  deferred reply, so `/marks` and `/nudge` answer where the whole channel
+  sees them. Below 14.26.4, discord.js drops a message from a thread its
+  cache doesn't hold, so discord-mcpl doesn't receive it as it arrives.
+  Below 14.27.0, discord.js pins an undici release that published security
+  advisories cover; from 14.27.0 it can take a fixed one (6.29.1).
+
+- **Edit and deletion notices say where the message was.** The `[message
+  edited]` and `[message deleted]` lines, and an edit that re-renders its
+  create, now always name the channel, in the form a message's own header
+  uses. An unnamed channel goes by its id.
+
+- **A deletion notice says how the message began.** Where the server has that
+  text, it quotes up to 50 code points of the message, or an attachment's name
+  when it has no text:
+  `[message deleted] [#general in Server] <id> by @name — how it began…`. The
+  reaction snippet shares the helper, and is now cut by code point rather
+  than UTF-16 unit, so a cut can't leave invalid text.
+
+- **A deletion is reported only if the agent was sent the message.** A message
+  counts as sent when it reached the host by any route: live, in a catch-up or
+  owed block, in a first DM's backscroll, in channel-open history, through
+  `fetch_history` or `fetch_around`, as a reaction's snippet or a `latestFrom`
+  excerpt, or when the agent wrote it. The server remembers the last 4096 of
+  these, in memory only, so the deletion of an older message, or of one from
+  before a restart, goes unreported too. A send that may have arrived counts as
+  sent, but adds nothing for a deletion to quote.
+
+- **The first reply in a DM the bot started comes without the
+  first-contact block.** The `<system>` block naming the sender and how
+  to answer, and the backscroll of earlier messages, come with a message
+  from a DM for which discord-mcpl holds no catch-up position. A post
+  that registers a DM, or goes into one already registered and kept, now
+  gives it a position, so the other party's first reply there comes
+  without them while that position is held, which across a restart needs
+  `DISCORD_WATERMARK_FILE`. A first message in a DM the bot didn't post
+  into first still brings both. A host's open with
+  `history.sinceLastSeen` reads the same position, so in a DM the bot's
+  post gave a position, it brings only the messages after that post,
+  where it brought the latest ones.
+
 ### Fixed
 
 - **A post into a place discord-mcpl serves names a channel the host
@@ -27,21 +71,6 @@ in the git log and PR descriptions.
   discord-mcpl is down is caught up at the next start. A post into a
   channel or thread whose facts discord-mcpl holds may be older than
   Discord's doesn't register it.
-
-### Changed
-
-- **The first reply in a DM the bot started comes without the
-  first-contact block.** The `<system>` block naming the sender and how
-  to answer, and the backscroll of earlier messages, come with a message
-  from a DM for which discord-mcpl holds no catch-up position. A post
-  that registers a DM, or goes into one already registered and kept, now
-  gives it a position, so the other party's first reply there comes
-  without them while that position is held, which across a restart needs
-  `DISCORD_WATERMARK_FILE`. A first message in a DM the bot didn't post
-  into first still brings both. A host's open with
-  `history.sinceLastSeen` reads the same position, so in a DM the bot's
-  post gave a position, it brings only the messages after that post,
-  where it brought the latest ones.
 
 ## 0.6.0 — 2026-10-30
 
