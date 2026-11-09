@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { ChannelType, type Client } from 'discord.js';
 import { DiscordAdapter } from '../src/discord-adapter.js';
 import { DiscordMcplServer } from '../src/server.js';
+import { countEveryMessageAsSent } from './every-message-sent.js';
 
 const askDiscord = async (id: string): Promise<unknown> =>
   ({ id, type: ChannelType.DM, recipientIds: [id.replace(/^dm-/, '')], isDMBased: () => true });
@@ -26,6 +27,7 @@ function fixture(t: TestContext, dmUsers?: string[], fetchChannel = askDiscord) 
       return o?.force ? fetchChannel(id) : { id, type: ChannelType.DM, recipientIds: ['the-bot'], isDMBased: () => true };
     };
   const server = new DiscordMcplServer(adapter) as unknown as Record<string, unknown> & { setupDiscordForwarding(): void };
+  countEveryMessageAsSent(server);
   const pushes: Array<{ origin?: Record<string, unknown>; payload?: { content?: Array<{ text?: string }> } }> = [];
   server.conn = {
     sendRequest: async (_m: string, params: unknown) => { pushes.push(params as (typeof pushes)[number]); return {}; },
@@ -70,7 +72,7 @@ describe('the DM allowlist on edits and deletes', () => {
     f.emit('messageDelete', dm('friend', 'm-partial', false));
     await f.settle();
     assert.equal(f.pushes.length, 1);
-    assert.match(f.pushes[0].payload?.content?.[0]?.text ?? '', /^\[message deleted\] m-partial/);
+    assert.match(f.pushes[0].payload?.content?.[0]?.text ?? '', /^\[message deleted\] \[DM\] m-partial/);
   });
 
   it("never forwards a refused sender's edit, and forwards an allowed user's", async (t) => {
@@ -129,7 +131,7 @@ describe('the DM allowlist on edits and deletes', () => {
     f.emit('messageDelete', byAuthor('friend', 'a-friend'));
     await f.settle();
     assert.equal(f.pushes.length, 1, "only the listed author's");
-    assert.match(f.pushes[0].payload?.content?.[0]?.text ?? '', /^\[message deleted\] a-friend/);
+    assert.match(f.pushes[0].payload?.content?.[0]?.text ?? '', /^\[message deleted\] \[DM\] a-friend/);
     assert.deepEqual(f.fetched, [], 'the author decides, so nothing is looked up');
   });
 
@@ -176,7 +178,7 @@ describe('the DM allowlist on edits and deletes', () => {
     f.emit('messageDelete', own('stranger', 'b-stranger'));
     await f.settle();
     assert.equal(f.pushes.length, 1, "only the allowed user's DM");
-    assert.match(f.pushes[0].payload?.content?.[0]?.text ?? '', /^\[message deleted\] b-friend/);
+    assert.match(f.pushes[0].payload?.content?.[0]?.text ?? '', /^\[message deleted\] \[DM\] b-friend/);
     assert.deepEqual(f.fetched, [], 'both channels carry their recipient');
   });
 

@@ -67,6 +67,12 @@ describe('buildReactionSnippet', () => {
     assert.equal(snippet, 'a'.repeat(79) + '…');
   });
 
+  it("doesn't cut through an emoji", () => {
+    const snippet = buildReactionSnippet('a'.repeat(78) + '😀😀😀');
+    assert.equal(snippet, 'a'.repeat(78) + '😀…');
+    assert.doesNotMatch(snippet ?? '', /\p{Cs}/u, 'no lone surrogate');
+  });
+
   it('renders custom-emoji tokens down to :name:', () => {
     assert.equal(
       buildReactionSnippet('nice <:blobheart:12345> work'),
