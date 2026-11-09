@@ -5,6 +5,34 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Fixed
+
+- **After a restart, a channel the host re-opens gets the rest of what it
+  missed.** When the catch-up sweep reads a channel as closed that the host
+  hasn't yet opened or closed, and that hasn't been muted since the server
+  started, it delivers its mentions with their nearby messages, as before.
+  When that leaves out some of the messages there that the filters admitted,
+  it now remembers the span it read and which messages it delivered, until
+  the host first opens or closes the channel. An open reads that span again,
+  after its answer, and delivers the messages it didn't, as Discord has them
+  then, as a second `<missed>` block that says they're the rest. It leaves
+  out any that an open's history answer carried or that were delivered live
+  meanwhile. When the catch-up left older messages out there, that block
+  carries `older="left out"` and `after` too, as the first does. Its
+  messages count as sent as the first block's do, so the deletion of one is
+  reported. A close, a mute, the channel's deletion, or discord-mcpl ceasing
+  to serve the channel (a thread archived, a guild left) drops the span at
+  once. The filters, and whether `discord.messaging` is on, are checked when
+  the block goes out, and a line on stderr says how many messages the
+  filters withheld. If the open can't read the span again, or the host
+  refuses the block or its send fails, a line on stderr names the channel,
+  and the messages aren't sent again. If discord-mcpl restarts before the
+  open, they aren't delivered. Until now, when the sweep read a channel
+  before the host's open of it was handled, as can happen with a host that
+  re-opens its channels after `channels/register` is answered, such as
+  agent-framework, those messages were lost: the sweep had moved the
+  catch-up position past them.
+
 ## 0.7.0 — 2026-11-09
 
 ### Changed
@@ -132,31 +160,6 @@ in the git log and PR descriptions.
   so of two messages sent in one millisecond it could save the older as
   the position and deliver the newer again at the next start. It now
   orders them by their ids.
-- **After a restart, a channel the host re-opens gets the rest of what it
-  missed.** When the catch-up sweep reads a channel as closed that the host
-  hasn't yet opened or closed, and that hasn't been muted since the server
-  started, it delivers its mentions with their nearby messages, as before.
-  When that leaves out some of the messages there that the filters admitted,
-  it now remembers the span it read and which messages it delivered, until
-  the host first opens or closes the channel. An open reads that span again,
-  after its answer, and delivers the messages it didn't, as Discord has them
-  then, as a second `<missed>` block that says they're the rest. It leaves
-  out any that an open's history answer carried or that were delivered live
-  meanwhile. When the catch-up left older messages out there, that block
-  carries `older="left out"` and `after` too, as the first does. Its
-  messages count as sent as the first block's do, so the deletion of one is
-  reported. A close, a mute, the channel's deletion, or discord-mcpl ceasing
-  to serve the channel (a thread archived, a guild left) drops the span at
-  once. The filters, and whether `discord.messaging` is on, are checked when
-  the block goes out, and a line on stderr says how many messages the
-  filters withheld. If the open can't read the span again, or the host
-  refuses the block or its send fails, a line on stderr names the channel,
-  and the messages aren't sent again. If discord-mcpl restarts before the
-  open, they aren't delivered. Until now, when the sweep read a channel
-  before the host's open of it was handled, as can happen with a host that
-  re-opens its channels after `channels/register` is answered, such as
-  agent-framework, those messages were lost: the sweep had moved the
-  catch-up position past them.
 
 ## 0.6.0 — 2026-10-30
 
