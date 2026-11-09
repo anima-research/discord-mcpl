@@ -43,7 +43,7 @@ describe('the library behaviour behind the bug', () => {
 });
 
 describe("the gateway's messages the refusals match", () => {
-  it('the installed @discordjs/ws still rejects a shard\'s connect with each message refusal() matches', () => {
+  it('the installed @discordjs/ws still constructs an error with each message refusal() matches', () => {
     const require = createRequire(import.meta.url);
     const ws = readFileSync(require.resolve('@discordjs/ws', { paths: [require.resolve('discord.js')] }), 'utf8');
     for (const message of ['Authentication failed', ...Object.keys(CONFIGURATION_CLOSES)]) {
