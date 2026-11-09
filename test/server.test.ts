@@ -4402,7 +4402,8 @@ describe('the messages a closed catch-up sweep left out', () => {
     const reg = await nextWithin(client);
     if (reg.type !== 'request' || reg.request.method !== method.CHANNELS_REGISTER) assert.fail('expected the registration');
     const savedPosition = () => (JSON.parse(readFileSync(wmPath, 'utf8')) as { watermarks: Record<string, string> }).watermarks.c1;
-    return { client, discord, registration: reg.request, savedPosition, wire, reads };
+    const claims = (server as unknown as { leftOut: Map<string, { shown: Set<string> }> }).leftOut;
+    return { client, discord, registration: reg.request, savedPosition, wire, reads, claims };
   }
 
   async function positionSaved(savedPosition: () => string, id: string): Promise<void> {
@@ -4652,6 +4653,57 @@ describe('the messages a closed catch-up sweep left out', () => {
     stand.fetchHistory = read;
     await open(client);
     await nothingMissedBefore(client, discord);
+  });
+
+  it('delivers nothing when the server forgets the channel while the open is reading the rest again', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, wire } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    const stand = discord as unknown as { fetchHistory: (channelId: string, options?: ReadOptions) => Promise<Missed[]> };
+    const read = stand.fetchHistory;
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    t.after(() => release());
+    stand.fetchHistory = async (channelId, options) => {
+      entered();
+      await released;
+      return read(channelId, options);
+    };
+
+    await open(client);
+    await reading;
+    discord.simulateThreadUpdate({ id: 'c1', guildId: 'g1', guildName: 'Test Guild', type: 'thread', name: 'general', parentId: 'c0', archived: true });
+    release();
+    await answerRead(client);
+    await answerRead(client);
+    assert.ok(!wire.some((m) => m.method === method.PUSH_EVENT && JSON.stringify(m.params).includes('now that this channel is open')), 'no rest was pushed');
+  });
+
+  it('keeps no claim for a channel whose first block delivered everything the sweep read', { timeout: 15_000 }, async (t) => {
+    const { client, registration, claims } = await restarted(t, missed(3, 102));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    await answerRead(client);
+    assert.equal(claims.has('c1'), false);
+  });
+
+  it("doesn't keep the id of a live message newer than what the sweep read for the rest", { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration, claims } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    await answerRead(client);
+    discord.simulateMessage({
+      id: '200', content: '<@bot_123> later', cleanContent: '@bot later', authorId: 'u2', authorName: 'Bob', isBot: false,
+      channelId: 'c1', channelName: 'general', guildId: 'g1', guildName: 'Test Guild', mentions: ['bot_123'], attachments: [],
+      timestamp: new Date(),
+    });
+    const live = await nextWithin(client, 5000);
+    if (live.type !== 'request') assert.fail(`expected the live mention, got a ${live.type}`);
+    client.sendResponse(live.request.id, {});
+    assert.ok(claims.has('c1'), 'the rest still waits for an open');
+    assert.equal(claims.get('c1')!.shown.has('200'), false);
   });
 
   it('leaves out of the rest a message forwarded live while the sweep was still reading', { timeout: 15_000 }, async (t) => {
