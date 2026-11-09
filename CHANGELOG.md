@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.7.0 — 2026-11-09
+
 ### Changed
 
 - **discord-mcpl needs discord.js 14.27.0 or later.** Its range was
