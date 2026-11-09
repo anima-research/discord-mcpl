@@ -130,6 +130,20 @@ const packageJson: typeof import('../package.json') = JSON.parse(
 
 const INSPECTION_TOOLS: ReadonlySet<string> = new Set(['fetch_history', 'fetch_around']);
 
+const TOOL_NAMES: ReadonlySet<string> = new Set(toolDefinitions.map((t) => t.name));
+
+/** Tools that read or change only this connector's own state, so they run
+ *  before Discord is ready. filters_update refuses on its own where it needs
+ *  Discord: changing an unrestricted guild filter, or setting the DM notice
+ *  with no DISCORD_DM_NOTICES_FILE. */
+const LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  'filters_get', 'filters_update', 'list_subscriptions', 'channel_missed', 'set_reaction_visibility',
+  'mute_channel', 'unmute_channel',
+]);
+
+const namesChannel = (args: Record<string, unknown>): boolean =>
+  typeof args.channelId === 'string' && parseChannelRef(args.channelId)?.kind === 'name';
+
 export const ID_ARGUMENTS: readonly string[] = [
   'channelId', 'messageId', 'userId', 'guildId', 'categoryId', 'before', 'after', 'latestFrom',
   'addGuilds', 'removeGuilds', 'setDmUsers',
@@ -1449,6 +1463,8 @@ export class DiscordMcplServer {
           }),
         ]);
         if (this.conn !== conn) return;
+        if (this.discord.connecting) await this.discord.whenReady();
+        if (this.conn !== conn) return;
         if (this.mcplEnabled) {
           try {
             await this.syncChannelsWithHost();
@@ -1813,8 +1829,15 @@ export class DiscordMcplServer {
       };
     }
 
+    // A local tool needs Discord too when it names a channel, which only Discord's channel list resolves.
+    if (TOOL_NAMES.has(name) && (!LOCAL_TOOLS.has(name) || namesChannel(args))) {
+      const refused = this.notConnectedYet(name);
+      if (refused) return { content: [textContent(refused)], isError: true };
+    }
+
     let explain: ExplainContext = {};
-    if (typeof args.channelId === 'string' && args.channelId.trim()) {
+    // An unknown or retired tool gets its own answer, so its channel isn't resolved.
+    if (TOOL_NAMES.has(name) && typeof args.channelId === 'string' && args.channelId.trim()) {
       const given = args.channelId;
       const path: AddressingPath = isSnowflake(given.trim()) ? 'explicit-id' : 'name-resolved';
       const noResolver = typeof this.discord.resolveChannelRef !== 'function';
@@ -2298,6 +2321,11 @@ export class DiscordMcplServer {
     const removeGuilds = listOf('removeGuilds', ids('server'), id) ?? [];
     const setDmUsers = listOf('setDmUsers', ids('user'), id);
     const setDmNotice = (args.setDmNotice ?? undefined) as boolean | undefined;
+    // Without DISCORD_DM_NOTICES_FILE, the notice file is named by the bot's id, which Discord's READY gives.
+    if (setDmNotice !== undefined && !process.env.DISCORD_DM_NOTICES_FILE?.trim()) {
+      const refused = this.notConnectedYet('filters_update');
+      if (refused) throw new Error(refused);
+    }
     const applyNotice = async (notes: string[]): Promise<void> => {
       if (setDmNotice === undefined) return;
       const unconfirmed = await this.dmNoticeState().setEnabled(setDmNotice);
@@ -2345,6 +2373,9 @@ export class DiscordMcplServer {
     const notes: string[] = [];
 
     if ((addGuilds.length || removeGuilds.length) && !next.guildIds?.length) {
+      // Changing an unrestricted list starts from the guilds Discord has sent, which are none before its READY.
+      const refused = this.notConnectedYet('filters_update');
+      if (refused) throw new Error(refused);
       next.guildIds = (await this.discord.listGuilds()).map((g) => g.id);
       notes.push(
         'Guild filter was unrestricted; materialized it as the list of all current guilds before applying your change.',
@@ -3678,6 +3709,8 @@ export class DiscordMcplServer {
   }
 
   private async handleChannelOpen(params: ChannelOpenRequest): Promise<ChannelOpenResponse> {
+    const refused = this.notConnectedYet('channels/open');
+    if (refused) throw new RequestRefusal(ERR_CHANNEL_OPEN_FAILED, refused);
     const target = resolveOpenTarget(params, this.channelManager.getAll());
     if (target.kind === 'refused') throw new RequestRefusal(target.code, target.reason);
     const parsed = parseMcplChannelId(target.kind === 'registered' ? target.channel.id : target.id);
@@ -3866,6 +3899,8 @@ export class DiscordMcplServer {
     if (!parsed) {
       return { acknowledged: false, reason: `Invalid Discord channel ID: ${params.channelId}` };
     }
+    const refused = this.notConnectedYet('channels/acknowledge');
+    if (refused) return { acknowledged: false, reason: refused };
     const representation = params.value?.trim() || '👀';
     try {
       await this.discord.addReaction(parsed.channelId, params.messageId, representation);
@@ -3908,6 +3943,17 @@ export class DiscordMcplServer {
     }
   }
 
+  /** Before Discord's first READY, a request that needs Discord is answered at
+   *  once, never held: requests are answered one at a time, so a held one would
+   *  hold every request behind it. The answer says nothing ran. */
+  private notConnectedYet(what: string): string | null {
+    if (!this.discord.connecting) return null;
+    return (
+      `${what} didn't run, so nothing was sent or changed: Discord isn't connected yet ` +
+      '(this connector is still logging in, and the network may be down). Try again in a minute.'
+    );
+  }
+
   private async handlePublish(params: ChannelsPublishParams): Promise<ChannelsPublishResult & Partial<MentionsField>> {
     const parsed = parseMcplChannelId(params.channelId);
     if (!parsed) {
@@ -3925,6 +3971,8 @@ export class DiscordMcplServer {
     }
 
     dbg('handlePublish', { channelId: params.channelId, textLen: text.length, preview: text.slice(0, 80) });
+    const refused = this.notConnectedYet('channels/publish');
+    if (refused) throw new Error(refused);
     const result = await this.discord.sendMessage(parsed.channelId, text);
     this.stateTracker.recordSent(result.messageId, parsed.channelId, text);
     dbg('handlePublish:sent', { channelId: params.channelId, messageId: result.messageId });
@@ -4141,12 +4189,18 @@ export class DiscordMcplServer {
   private dmNoticesOpening: Promise<void> | null = null;
   private sweepDecisionWaitMs = 30_000;
 
+  /** Opens the DM notice file. DISCORD_DM_NOTICES_FILE names it, or else the
+   *  bot's id does, which Discord's READY gives. */
+  async openDmNotices(): Promise<void> {
+    this.dmNoticeState();
+    await this.dmNoticesOpening;
+  }
+
   async setupDmRefusals(): Promise<void> {
     this.discord.onDmRefused((ev) => {
       void this.handleDmRefusal(ev).settled;
     });
-    this.dmNoticeState();
-    await this.dmNoticesOpening;
+    await this.openDmNotices();
   }
 
   private async awaitSweepDecisions(channelId: string, decided: Promise<unknown>[]): Promise<void> {

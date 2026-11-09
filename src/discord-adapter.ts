@@ -182,6 +182,8 @@ export interface DiscordAdapterConfig {
   guildIds?: string[];
   guildChannels?: Record<string, string[]>;
   dmUsers?: string[];
+  /** Test seam: builds the discord.js client (default: the real one). */
+  clientFactory?: () => Client;
 }
 
 export const DM_REFUSALS_HELD = 100;
@@ -688,8 +690,46 @@ export function applyMentionCandidates(
   };
 }
 
+/** The gateway closes Discord sends for a configuration no retry changes, as
+ *  @discordjs/ws 1.2 rejects a shard's connect on them (its close-code switch,
+ *  `dist/index.js`), each with what to fix. */
+export const CONFIGURATION_CLOSES: Readonly<Record<string, string>> = {
+  'Used disallowed intents':
+    "turn on the bot's Server Members and Message Content intents in Discord's developer portal",
+  'Used invalid intents': "this connector asks for intents Discord doesn't accept; update discord-mcpl",
+  'Sharding is required':
+    "the bot is in more servers than one gateway connection may serve, and this connector doesn't shard",
+  'Used an invalid API version': "this connector's Discord API version is no longer accepted; update discord-mcpl",
+};
+
+/** What to fix, when Discord has answered with a refusal no wait would change;
+ *  null for a failure worth retrying (no answer, a 5xx, a 408 or a 429). A
+ *  refusal is a refused token (discord.js's TokenInvalid, which login makes of
+ *  a 401, or the gateway's authentication close), a gateway close for
+ *  configuration, or any other 4xx answer, whose DiscordAPIError carries
+ *  `status`. */
+export function refusal(err: unknown): string | null {
+  const e = err as { status?: unknown; code?: unknown; message?: unknown } | null;
+  const message = typeof e?.message === 'string' ? e.message : String(err);
+  if (e?.code === 'TokenInvalid' || message === 'Authentication failed') {
+    return `Discord refused the bot token (${message}): check DISCORD_TOKEN`;
+  }
+  const closed = Object.prototype.hasOwnProperty.call(CONFIGURATION_CLOSES, message) ? CONFIGURATION_CLOSES[message] : undefined;
+  if (closed) return `Discord closed the gateway (${message}): ${closed}`;
+  if (typeof e?.status === 'number' && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
+    return `Discord refused the connector's request (${message}): check the bot's application in Discord's developer portal`;
+  }
+  return null;
+}
+
 export class DiscordAdapter {
   private client: Client;
+  private readonly clientFactory: () => Client;
+  /** whenReady() callers. Owned here, not by a client, so they survive a
+   *  client replacement (see connectWithRetry). */
+  private readyWaiters: Array<() => void> = [];
+  private connectStarted = false;
+  private connectEnded = false;
 
   get rawClient(): Client {
     return this.client;
@@ -744,7 +784,7 @@ export class DiscordAdapter {
       this.dmUsers = new Set(config.dmUsers);
     }
 
-    this.client = new Client({
+    this.clientFactory = config.clientFactory ?? (() => new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
@@ -761,8 +801,8 @@ export class DiscordAdapter {
         GatewayIntentBits.GuildVoiceStates,
       ],
       partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
-    });
-
+    }));
+    this.client = this.clientFactory();
     this.installThreadSyncScope();
     this.setupEvents();
   }
@@ -782,6 +822,68 @@ export class DiscordAdapter {
 
   get isConnected(): boolean {
     return this.client.isReady();
+  }
+
+  /** Log in, retrying with backoff until the gateway is READY: an unreachable
+   *  network (sleep, VPN, captive wifi) is a wait, not a crash. It rejects only
+   *  when Discord answers with a refusal no wait would change (see `refusal`),
+   *  with a message naming what to fix.
+   *
+   *  discord.js destroys a client whose login() fails, and never clears that:
+   *  a later successful login on the same client receives messages but
+   *  reports isReady() false forever (every send then fails "not connected"),
+   *  won't reconnect after a later drop, and has its cache sweepers stopped
+   *  (2026-09-25 and 2026-09-26, connectors booted while DNS was down). So a
+   *  failed login replaces the client before the next attempt. */
+  async connectWithRetry(opts: { initialDelayMs?: number; maxDelayMs?: number } = {}): Promise<void> {
+    this.connectStarted = true;
+    let delay = opts.initialDelayMs ?? 5_000;
+    const maxDelay = opts.maxDelayMs ?? 60_000;
+    const wait = async () => {
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, maxDelay);
+    };
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.connect();
+        return;
+      } catch (err) {
+        const refused = refusal(err);
+        if (refused) { this.connectEnded = true; throw new Error(refused); }
+        console.error(
+          `[discord-mcpl] Discord login failed (attempt ${attempt}): ${(err as Error).message} — ` +
+            `starting a fresh client, retrying in ${Math.round(delay / 1000)}s`,
+        );
+        this.replaceClient();
+        await wait();
+      }
+    }
+  }
+
+  /** A failed login leaves the client destroyed for good: build a new one
+   *  with the same handlers. Logins fail only before the gateway's first
+   *  READY, and voice output takes `rawClient` after it, so nothing holds a
+   *  replaced client. */
+  private replaceClient(): void {
+    const old = this.client;
+    old.removeAllListeners();
+    void Promise.resolve(old.destroy()).catch(() => {});
+    this.client = this.clientFactory();
+    this.installThreadSyncScope();
+    this.setupEvents();
+    dbg('gateway:client-replaced', {});
+  }
+
+  /** True from connectWithRetry's start until the gateway is READY, and false
+   *  once a refusal has ended it. */
+  get connecting(): boolean {
+    return this.connectStarted && !this.connectEnded && !this.client.isReady();
+  }
+
+  /** Resolves once the gateway is READY (immediately if it already is). */
+  whenReady(): Promise<void> {
+    if (this.client.isReady()) return Promise.resolve();
+    return new Promise((resolve) => this.readyWaiters.push(resolve));
   }
 
   get botUserId(): string | null {
@@ -2523,6 +2625,9 @@ export class DiscordAdapter {
     });
 
     this.client.on('ready', () => {
+      const waiters = this.readyWaiters;
+      this.readyWaiters = [];
+      for (const w of waiters) w();
       this.readyHandler?.();
       for (const guild of this.client.guilds.cache.values()) {
         void this.warmGuildMemberCache(guild);

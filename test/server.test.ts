@@ -62,6 +62,7 @@ class MockDiscordAdapter {
   private nextMessageId = 1;
 
   get isConnected(): boolean { return true; }
+  whenReady(): Promise<void> { return Promise.resolve(); }
   get botUserId(): string | null { return 'bot_123'; }
 
   onMessage(handler: (msg: DiscordMessageData) => void): void {
@@ -4198,6 +4199,109 @@ describe('U+2028, U+2029 and a reset on the wire', () => {
     const next = await connect();
     const answer = await mcpHandshake(next.conn);
     assert.ok(answer.serverInfo, 'the next client is answered');
+  });
+});
+
+describe('while Discord is still connecting', () => {
+  /** An adapter whose connect is under way until becomeReady(), as connectWithRetry's is. */
+  class ConnectingAdapter extends MockDiscordAdapter {
+    connecting = true;
+    get isConnected(): boolean { return !this.connecting; }
+    waiters: Array<() => void> = [];
+    whenReady(): Promise<void> {
+      return this.connecting ? new Promise((resolve) => this.waiters.push(resolve)) : Promise.resolve();
+    }
+    becomeReady(): void {
+      this.connecting = false;
+      for (const w of this.waiters.splice(0)) w();
+    }
+  }
+
+  async function boot(t: TestContext) {
+    const { client, serverConn } = await createTestPair();
+    const discord = new ConnectingAdapter();
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const served = server.serve(serverConn);
+    await mcplHandshake(client);
+    t.after(async () => { client.close(); await served; });
+    return { client, discord };
+  }
+
+  const didntRun = (what: string) => new RegExp(`^${what} didn't run, so nothing was sent or changed: Discord isn't connected yet`);
+
+  async function call(client: McplConnection, name: string, args: Record<string, unknown>) {
+    return (await client.sendRequest('tools/call', { name, arguments: args })) as { content: Array<{ text: string }>; isError?: boolean };
+  }
+
+  it('answers a Discord tool at once that it didn\'t run, and sends nothing; a ping sent behind it is answered', async (t) => {
+    const { client, discord } = await boot(t);
+    const started = Date.now();
+    // Both sent before either answers, so the ping queues behind the call. A call that waited for Discord would hold
+    // both, as the 15 s wait this replaced did.
+    const [result] = await Promise.all([
+      call(client, 'send_message', { channelId: 'discord:g1:c1', content: 'hello' }),
+      client.sendRequest('ping', {}),
+    ]);
+    assert.ok(Date.now() - started < 5_000, `answered after ${Date.now() - started} ms`);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]!.text, didntRun('send_message'));
+    assert.deepEqual(discord.sentMessages, []);
+  });
+
+  it('runs a tool that reads only its own state, but refuses one naming a channel by name', async (t) => {
+    const { client } = await boot(t);
+    const local = await call(client, 'list_subscriptions', {});
+    assert.notEqual(local.isError, true, local.content[0]!.text);
+    const byName = await call(client, 'mute_channel', { channelId: '#general' });
+    assert.equal(byName.isError, true);
+    assert.match(byName.content[0]!.text, didntRun('mute_channel'));
+  });
+
+  it('answers an unknown or retired tool with its own answer, a channel given by name included', async (t) => {
+    const { client } = await boot(t);
+    const unknown = await call(client, 'no_such_tool', { channelId: '#general' });
+    assert.equal(unknown.isError, true);
+    assert.match(unknown.content[0]!.text, /There's no Discord tool "no_such_tool"/);
+    const retired = await call(client, 'subscribe_channel', { channelId: '#general' });
+    assert.equal(retired.isError, true);
+    assert.match(retired.content[0]!.text, /subscribe_channel is retired/);
+  });
+
+  it('refuses a publish, an open and an acknowledgement at once, saying none ran', async (t) => {
+    const { client, discord } = await boot(t);
+    await assert.rejects(
+      client.sendRequest(method.CHANNELS_PUBLISH, { channelId: 'discord:g1:c1', content: [{ type: 'text', text: 'hi' }] }),
+      (err: { message?: string }) => didntRun('channels/publish').test(String(err.message)),
+    );
+    await assert.rejects(
+      client.sendRequest(method.CHANNELS_OPEN, { type: 'discord', address: { guildId: 'g1', channelId: 'c1' } }),
+      (err: { message?: string }) => didntRun('channels/open').test(String(err.message)),
+    );
+    const ack = (await client.sendRequest('channels/acknowledge', { channelId: 'discord:g1:c1', messageId: 'm1' })) as {
+      acknowledged: boolean; reason?: string;
+    };
+    assert.equal(ack.acknowledged, false);
+    assert.match(String(ack.reason), didntRun('channels/acknowledge'));
+    assert.deepEqual(discord.sentMessages, []);
+    assert.deepEqual(discord.reactions, []);
+  });
+
+  it('registers channels with the host only once Discord is ready', async (t) => {
+    const { client, discord } = await boot(t);
+    let arrived = false;
+    const first = client.nextMessage();
+    void first.then(() => { arrived = true; }, () => {});
+    // The start-up parks on whenReady() once the host's policy is answered.
+    const deadline = Date.now() + 5_000;
+    while (discord.waiters.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(discord.waiters.length, 1, 'the start-up waits for Discord');
+    // Long enough for anything already written to cross the socket.
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(arrived, false, 'nothing registered while connecting');
+    discord.becomeReady();
+    const reg = await Promise.race([first, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no register after ready')), 5_000))]);
+    assert.equal(reg.type === 'request' ? reg.request.method : reg.type, method.CHANNELS_REGISTER);
+    if (reg.type === 'request') client.sendResponse(reg.request.id, {});
   });
 });
 
