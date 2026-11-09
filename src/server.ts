@@ -280,9 +280,9 @@ type GuildDelivery = { id: string; registered: true } | { id: string | undefined
 
 interface LeftOut {
   settled: Promise<void>;
-  kept: { messages: HistoryMessage[]; meta: ChannelMeta | null; guildId: string | null } | null;
+  kept: { messages: HistoryMessage[]; meta: ChannelMeta | null; guildId: string | null; olderAfter: string | null } | null;
   shown: Set<string>;
-  keep(messages: HistoryMessage[], meta: ChannelMeta | null, guildId: string | null): void;
+  keep(messages: HistoryMessage[], meta: ChannelMeta | null, guildId: string | null, olderAfter: string | null): void;
   settle(): void;
 }
 
@@ -3112,8 +3112,8 @@ export class DiscordMcplServer {
       settle,
       kept: null,
       shown: new Set(),
-      keep: (messages, meta, guildId) => {
-        if (messages.length > 0) claim.kept = { messages, meta, guildId };
+      keep: (messages, meta, guildId, olderAfter) => {
+        if (messages.length > 0) claim.kept = { messages, meta, guildId, olderAfter };
         settle();
       },
     };
@@ -3137,21 +3137,25 @@ export class DiscordMcplServer {
     if (this.leftOut.get(channelId) !== claim) return;
     this.leftOut.delete(channelId);
     if (!claim.kept || !isEnabled('discord.messaging', this.enabledFeatureSets)) return;
-    const { meta, guildId } = claim.kept;
+    const { meta, guildId, olderAfter } = claim.kept;
     const rest = claim.kept.messages.filter(
       (m) => !claim.shown.has(m.id) && this.discord.historyIngressReason(channelId, guildId, m.authorId) === null,
     );
     if (rest.length === 0) return;
-    const attrs = [...this.missedPlaceAttrs(meta, channelId, false), `count="${rest.length}"`, 'reason="backscroll"'];
+    const attrs = [...this.missedPlaceAttrs(meta, channelId, false), `count="${rest.length}"`];
+    if (olderAfter !== null) attrs.push('older="left out"', `after=${quotedLabel(olderAfter)}`);
+    attrs.push('reason="backscroll"');
     const block = [`<missed ${attrs.join(' ')}>`, ...rest.map((m) => this.missedLine(m, '')), '</missed>'].join('\n');
     const mcplChannelId = guildId ? this.registerGuildDelivery(guildId, channelId).id : undefined;
     try {
-      await conn.sendRequest(method.PUSH_EVENT, this.missedPush(
+      const answer = await conn.sendRequest(method.PUSH_EVENT, this.missedPush(
         channelId, meta, mcplChannelId, `discord_missed_${channelId}_${rest[rest.length - 1].id}_opened`,
         { isMention: false, isDM: false }, `${LEFT_OUT_NOTE}${block}`,
       ));
+      this.noteSendOutcome(pushOutcome(answer), rest);
     } catch (err) {
       dbg('left-out:send-failed', { channelId, error: errorText(err) });
+      this.noteSendOutcome(sendErrorOutcome(err), rest);
     }
   }
 
@@ -3336,7 +3340,7 @@ export class DiscordMcplServer {
       }
       if (kept.length === 0 && !olderLeftOut) {
         await advance();
-        claim?.keep(msgs, meta, guildId);
+        claim?.keep(msgs, meta, guildId, null);
         continue;
       }
       const hadMention = isDM || mentionCount > 0;
@@ -3372,7 +3376,7 @@ export class DiscordMcplServer {
         continue;
       }
       await advance();
-      claim?.keep(msgs.filter((m) => !kept.includes(m)), meta, guildId);
+      claim?.keep(msgs.filter((m) => !kept.includes(m)), meta, guildId, olderLeftOut ? watermark : null);
       if (kept.length > 0) delivered++;
     }
 
