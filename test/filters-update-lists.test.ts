@@ -66,7 +66,7 @@ function serverOver(t: TestContext, filters: DiscordFilters, botGuilds: string[]
   };
   // Mark a connect under way, as connectWithRetry does, with the client not ready.
   const connecting = () => { (adapter as unknown as { connectStarted: boolean }).connectStarted = true; };
-  return { path, delivered, post, postDm, update, connecting, fileText: () => readFileSync(path, 'utf8') };
+  return { server, path, delivered, post, postDm, update, connecting, fileText: () => readFileSync(path, 'utf8') };
 }
 
 describe('filters_update narrows the server list and never empties it', () => {
@@ -276,6 +276,28 @@ describe('filters_update while Discord is still connecting', () => {
     const result = await s.update({ setDmNotice: true });
     assert.equal(result.refused, true);
     assert.match(result.text, /^filters_update didn't run, so nothing was sent or changed: Discord isn't connected yet/);
+  });
+
+  it('reports a notice file DISCORD_DM_NOTICES_FILE names, opened before the host is served', async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'discord-dm-notices-'));
+    const file = join(dir, 'dm-notices.json');
+    writeFileSync(file, JSON.stringify({ version: 1, floorId: '1000000000000000000', enabled: true, senders: {} }));
+    const previous = process.env.DISCORD_DM_NOTICES_FILE;
+    process.env.DISCORD_DM_NOTICES_FILE = file;
+    t.after(() => {
+      if (previous === undefined) delete process.env.DISCORD_DM_NOTICES_FILE;
+      else process.env.DISCORD_DM_NOTICES_FILE = previous;
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const s = serverOver(t, { guildIds: ['guild-1'] });
+    s.connecting();
+    await s.server.openDmNotices();
+    const executeToolCall = (s.server as unknown as {
+      executeToolCall(name: string, args: Record<string, unknown>): Promise<{ dmNotice: { enabled: boolean | null; persisted: boolean } }>;
+    }).executeToolCall.bind(s.server);
+    const shown = await executeToolCall('filters_get', {});
+    assert.equal(shown.dmNotice.enabled, true);
+    assert.equal(shown.dmNotice.persisted, true);
   });
 
   it('changes a listed server list, which needs nothing from Discord', async (t) => {

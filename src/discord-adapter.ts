@@ -688,10 +688,11 @@ export const CONFIGURATION_CLOSES: Readonly<Record<string, string>> = {
 };
 
 /** What to fix, when Discord has answered with a refusal no wait would change;
- *  null for a failure worth retrying (no answer, a 5xx or a 429). A refusal is
- *  a refused token (discord.js's TokenInvalid, which login makes of a 401, or
- *  the gateway's authentication close), a gateway close for configuration, or
- *  any other 4xx answer, whose DiscordAPIError carries `status`. */
+ *  null for a failure worth retrying (no answer, a 5xx, a 408 or a 429). A
+ *  refusal is a refused token (discord.js's TokenInvalid, which login makes of
+ *  a 401, or the gateway's authentication close), a gateway close for
+ *  configuration, or any other 4xx answer, whose DiscordAPIError carries
+ *  `status`. */
 export function refusal(err: unknown): string | null {
   const e = err as { status?: unknown; code?: unknown; message?: unknown } | null;
   const message = typeof e?.message === 'string' ? e.message : String(err);
@@ -700,7 +701,7 @@ export function refusal(err: unknown): string | null {
   }
   const closed = Object.prototype.hasOwnProperty.call(CONFIGURATION_CLOSES, message) ? CONFIGURATION_CLOSES[message] : undefined;
   if (closed) return `Discord closed the gateway (${message}): ${closed}`;
-  if (typeof e?.status === 'number' && e.status >= 400 && e.status < 500 && e.status !== 429) {
+  if (typeof e?.status === 'number' && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
     return `Discord refused the connector's request (${message}): check the bot's application in Discord's developer portal`;
   }
   return null;

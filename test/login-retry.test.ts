@@ -112,16 +112,21 @@ describe('connectWithRetry', () => {
   it('whenReady() after connecting resolves immediately', async () => {
     const adapter = adapterWith([]);
     await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
-    await within(adapter.whenReady());
+    const first = await Promise.race([
+      adapter.whenReady().then(() => 'ready'),
+      new Promise((r) => setImmediate(() => r('next turn'))),
+    ]);
+    assert.equal(first, 'ready', 'resolves before the event loop turns');
   });
 
-  it('a login failing with a 5xx or a 429 is retried', async () => {
+  it('a login failing with a 5xx, a 408 or a 429 is retried', async () => {
     const adapter = adapterWith([
       () => Object.assign(new Error('503: Service Unavailable'), { status: 503 }),
+      () => Object.assign(new Error('408: Request Timeout'), { status: 408 }),
       () => Object.assign(new Error('429: Too Many Requests'), { status: 429 }),
     ]);
     await within(adapter.connectWithRetry({ initialDelayMs: 1, maxDelayMs: 2 }));
-    assert.equal(FakeClient.made.length, 3);
+    assert.equal(FakeClient.made.length, 4);
     assert.equal(adapter.isConnected, true);
   });
 });

@@ -3997,12 +3997,18 @@ export class DiscordMcplServer {
   private dmNoticesOpening: Promise<void> | null = null;
   private sweepDecisionWaitMs = 30_000;
 
+  /** Opens the DM notice file. DISCORD_DM_NOTICES_FILE names it, or else the
+   *  bot's id does, which Discord's READY gives. */
+  async openDmNotices(): Promise<void> {
+    this.dmNoticeState();
+    await this.dmNoticesOpening;
+  }
+
   async setupDmRefusals(): Promise<void> {
     this.discord.onDmRefused((ev) => {
       void this.handleDmRefusal(ev).settled;
     });
-    this.dmNoticeState();
-    await this.dmNoticesOpening;
+    await this.openDmNotices();
   }
 
   private async awaitSweepDecisions(channelId: string, decided: Promise<unknown>[]): Promise<void> {

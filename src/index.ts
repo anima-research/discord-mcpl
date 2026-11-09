@@ -53,7 +53,10 @@ async function main(): Promise<void> {
     // Voice is built from the ready client, before the handshake, so a voice
     // box connects first, and a failed login ends the process.
     await discord.connect().catch((err) => {
-      throw new Error(refusal(err) ?? (err as Error).message);
+      throw new Error(
+        refusal(err) ??
+          `Discord login failed (${(err as Error).message}): with voice configured, discord-mcpl needs Discord to start`,
+      );
     });
     try {
       const { createVoiceOutput } = await import('./voice.js');
@@ -72,7 +75,10 @@ async function main(): Promise<void> {
   }
 
   const server = new DiscordMcplServer(discord, voice);
-  // The DM notice file is named by the bot's id, which Discord's READY gives.
+  // A notice file DISCORD_DM_NOTICES_FILE names opens before the host is
+  // served. One named by the bot's id waits for Discord's READY, which gives
+  // the id.
+  if (process.env.DISCORD_DM_NOTICES_FILE?.trim()) await server.openDmNotices();
   void discord.whenReady().then(() => server.setupDmRefusals()).catch((err) => {
     console.error('[discord-mcpl] DM refusal setup failed:', (err as Error).message);
   });

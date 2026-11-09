@@ -3847,7 +3847,8 @@ describe('while Discord is still connecting', () => {
     const deadline = Date.now() + 5_000;
     while (discord.waiters.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
     assert.equal(discord.waiters.length, 1, 'the start-up waits for Discord');
-    await new Promise((r) => setImmediate(r));
+    // Long enough for anything already written to cross the socket.
+    await new Promise((r) => setTimeout(r, 100));
     assert.equal(arrived, false, 'nothing registered while connecting');
     discord.becomeReady();
     const reg = await Promise.race([first, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no register after ready')), 5_000))]);
