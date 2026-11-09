@@ -110,7 +110,7 @@ discord-mcpl reads its configuration from environment variables, and only `DISCO
 
 | Variable | What it does | When unset |
 |---|---|---|
-| `DISCORD_GUILD_ID` | Comma-separated Discord servers the agent hears from. An entry is a server ID, which admits all its channels, or `serverId:channelId+channelId`, which admits only those channels and their threads. Listing a category admits the channels under it. | Every server the bot is in. |
+| `DISCORD_GUILD_ID` | Comma-separated Discord servers the agent hears from. An entry is a server ID, which admits all its channels, or `serverId:channelId+channelId`, which admits only those channels and their threads. Listing a category admits the channels under it, and listing a thread admits that thread. | Every server the bot is in. |
 | `DISCORD_DM_USERS` | Comma-separated IDs of the users who may DM the agent. discord-mcpl doesn't deliver a DM from anyone else. The list filters incoming DMs only, not reads. | Anyone. |
 | `DISCORD_FILTERS_FILE` | A JSON file holding the same filters, plus the reaction-suppression list below. If the file is missing at startup, discord-mcpl creates it from the two variables above. If it exists, it replaces them. Edits take effect within about 3 seconds, and `filters_update` can change its server and DM lists. A file that can't be parsed at startup is left as it is, and the two variables apply until it's fixed. A bad edit later keeps the filters already in force. | The two variables above apply, and change only at a restart. |
 

@@ -989,7 +989,7 @@ export class DiscordAdapter {
     const listed = [...this.stale].filter(([id, mark]) => {
       if (guildId !== undefined && mark.guildId !== guildId) return false;
       const channel = this.client.guilds.cache.get(mark.guildId)?.channels.cache.get(id);
-      return channel !== undefined && !channel.isThread();
+      return channel !== undefined && (guildId !== undefined || !channel.isThread());
     });
     await Promise.all(listed.map(([id]) => this.refetchChannel(id).catch((err: unknown) => {
       dbg('stale:refresh-failed', { channelId: id, error: (err as Error).message });
@@ -1707,7 +1707,9 @@ export class DiscordAdapter {
   }
 
   /** GUILD_CREATE lists every channel of a guild and updates follow, so the
-   *  guild's own cache is whole while the guild is available. */
+   *  guild's own cache is whole while the guild is available. A thread a
+   *  guild's return left out stays out of the guild's cache even once Discord
+   *  reports it active again, so threads are read from the client's cache. */
   async listChannels(guildId: string): Promise<DiscordChannelInfo[]> {
     const guild = await this.client.guilds.fetch(guildId);
     if (!guild?.channels) {
@@ -1737,6 +1739,20 @@ export class DiscordAdapter {
           ...(topic ? { topic } : {}),
         });
       }
+    });
+    this.client.channels.cache.forEach((c) => {
+      if (!c.isThread() || c.guildId !== guildId) return;
+      if (this.isStale(c.id)) return;
+      if (c.parentId === null || !guild.channels.cache.has(c.parentId) || this.isStale(c.parentId)) return;
+      if (!this.channelAllowed(guildId, c.id, c.parentId)) return;
+      if (c.archived) return;
+      result.push({
+        id: c.id,
+        name: c.name,
+        type: mapChannelType(c.type),
+        parentId: c.parentId,
+        label: mcplChannelId(guildId, c.id),
+      });
     });
     return result;
   }
@@ -2451,6 +2467,15 @@ export class DiscordAdapter {
       if (facts) this.threadUpdateHandler?.(facts);
     });
 
+    // Discord sends a thread's creation report when the bot is added to a
+    // thread, not only when it's made, with the thread as Discord has it now.
+    // For a thread the client already holds, discord.js applies it right
+    // after this, in the same tick once the client is ready, and emits no
+    // threadCreate, so facts read here are from before it.
+    this.client.ws.on(GatewayDispatchEvents.ThreadCreate, (data: { id?: unknown }) => {
+      if (typeof data?.id === 'string') this.stale.delete(data.id);
+    });
+
     this.client.on('threadDelete', (thread) => {
       this.stale.delete(thread.id);
       if (thread.guildId) this.threadDeleteHandler?.(thread.guildId, thread.id);
@@ -3061,8 +3086,8 @@ function noMessagesHere(channel: { type: number; guildId?: string | null }, chan
     );
   }
   const after = holdsPosts(channel.type)
-    ? " Its posts are threads, and no tool here lists them, so a post's id comes only from a message posted in it or a link to it. " +
-      "A post's messages are written through that id, and read through it where the configured channel filters allow."
+    ? ` Its posts are threads. The active ones the configured channel filters allow are the threads list_channels for server ${channel.guildId} shows with ${channelId} as their parent. An archived post isn't listed, so its id comes from where it was shown, such as a message posted in it or a link to it. ` +
+      "A post's messages are written through its id, and read through it where the configured channel filters allow."
     : channel.type === 4
       ? ` The channels in it that the configured channel filters allow are the ones list_channels for server ${channel.guildId} shows with ${channelId} as their parent.`
       : ' It lists servers, and nothing here can read it or send to it.';
