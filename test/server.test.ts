@@ -4627,6 +4627,33 @@ describe('the messages a closed catch-up sweep left out', () => {
     assert.ok(lines.some((l) => l.includes('channel c1') && l.includes('Missing Access')), lines.join('\n'));
   });
 
+  it('delivers nothing when the host closes the channel while the open is reading the rest again, though it opens it again', { timeout: 15_000 }, async (t) => {
+    const { client, discord, registration } = await restarted(t, missed(10, 101));
+    client.sendResponse(registration.id, {});
+    await nextPush(client);
+    const stand = discord as unknown as { fetchHistory: (channelId: string, options?: ReadOptions) => Promise<Missed[]> };
+    const read = stand.fetchHistory;
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    t.after(() => release());
+    stand.fetchHistory = async (channelId, options) => {
+      entered();
+      await released;
+      return read(channelId, options);
+    };
+
+    await open(client);
+    await reading;
+    await close(client);
+    release();
+    await answerRead(client);
+    stand.fetchHistory = read;
+    await open(client);
+    await nothingMissedBefore(client, discord);
+  });
+
   it('leaves out of the rest a message forwarded live while the sweep was still reading', { timeout: 15_000 }, async (t) => {
     const { client, discord, registration } = await restarted(t, missed(3));
     const { reading, release } = holdTheSweepsRead(discord);

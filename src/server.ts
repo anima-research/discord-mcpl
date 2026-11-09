@@ -278,11 +278,21 @@ function knowsLessThan(d: ChannelDescriptor, known: ChannelDescriptor): boolean 
 
 type GuildDelivery = { id: string; registered: true } | { id: string | undefined; registered: false };
 
+interface LeftOutSpan {
+  oldest: string;
+  newest: string;
+  delivered: Set<string>;
+  meta: ChannelMeta | null;
+  guildId: string | null;
+  olderAfter: string | null;
+}
+
 interface LeftOut {
   settled: Promise<void>;
-  kept: { messages: HistoryMessage[]; meta: ChannelMeta | null; guildId: string | null; olderAfter: string | null } | null;
+  span: LeftOutSpan | null;
   shown: Set<string>;
-  keep(messages: HistoryMessage[], meta: ChannelMeta | null, guildId: string | null, olderAfter: string | null): void;
+  taken: boolean;
+  keep(span: LeftOutSpan): void;
   settle(): void;
 }
 
@@ -3110,10 +3120,11 @@ export class DiscordMcplServer {
     const claim: LeftOut = {
       settled,
       settle,
-      kept: null,
+      span: null,
       shown: new Set(),
-      keep: (messages, meta, guildId, olderAfter) => {
-        if (messages.length > 0) claim.kept = { messages, meta, guildId, olderAfter };
+      taken: false,
+      keep: (span) => {
+        claim.span = span;
         settle();
       },
     };
@@ -3134,13 +3145,49 @@ export class DiscordMcplServer {
 
   private async deliverLeftOut(conn: McplConnection, channelId: string, claim: LeftOut): Promise<void> {
     await claim.settled;
+    if (this.leftOut.get(channelId) !== claim || claim.taken) return;
+    claim.taken = true;
+    const span = claim.span;
+    if (!span || !isEnabled('discord.messaging', this.enabledFeatureSets)) {
+      this.leftOut.delete(channelId);
+      return;
+    }
+    let read: HistoryMessage[];
+    try {
+      read = await this.discord.fetchHistory(channelId, {
+        limit: this.catchupLimit,
+        after: (BigInt(span.oldest) - 1n).toString(),
+        before: (BigInt(span.newest) + 1n).toString(),
+      });
+    } catch (err) {
+      if (this.leftOut.get(channelId) === claim) this.leftOut.delete(channelId);
+      console.error(
+        `[discord-mcpl] Catch-up couldn't read again the missed messages it left out of channel ${channelId}'s ` +
+          `first delivery (${errorText(err)}), so they weren't delivered at its first open. They stay on Discord.`,
+      );
+      return;
+    }
     if (this.leftOut.get(channelId) !== claim) return;
     this.leftOut.delete(channelId);
-    if (!claim.kept || !isEnabled('discord.messaging', this.enabledFeatureSets)) return;
-    const { meta, guildId, olderAfter } = claim.kept;
-    const rest = claim.kept.messages.filter(
-      (m) => !claim.shown.has(m.id) && this.discord.historyIngressReason(channelId, guildId, m.authorId) === null,
-    );
+    if (!isEnabled('discord.messaging', this.enabledFeatureSets)) return;
+    const { meta, guildId, olderAfter } = span;
+    const botId = this.discord.botUserId;
+    const withheld = new Map<string, number>();
+    const rest = read
+      .filter((m) => !span.delivered.has(m.id) && !claim.shown.has(m.id))
+      .filter((m) => m.authorId !== botId && !m.content.startsWith(CHX_NOOP_PREFIX))
+      .filter((m) => {
+        const reason = this.discord.historyIngressReason(channelId, guildId, m.authorId);
+        if (reason && reason !== 'self-authored') withheld.set(reason, (withheld.get(reason) ?? 0) + 1);
+        return reason === null;
+      })
+      .sort((a, b) => a.id.localeCompare(b.id, 'en-US-u-kn-true'));
+    for (const [reason, count] of withheld) {
+      console.error(
+        `[discord-mcpl] Catch-up withheld ${count} of the missed messages it left out of channel ${channelId}'s ` +
+          `first delivery, at its first open: ${reason} (the live filters refuse them)`,
+      );
+    }
     if (rest.length === 0) return;
     const attrs = [...this.missedPlaceAttrs(meta, channelId, false), `count="${rest.length}"`];
     if (olderAfter !== null) attrs.push('older="left out"', `after=${quotedLabel(olderAfter)}`);
@@ -3152,10 +3199,20 @@ export class DiscordMcplServer {
         channelId, meta, mcplChannelId, `discord_missed_${channelId}_${rest[rest.length - 1].id}_opened`,
         { isMention: false, isDM: false }, `${LEFT_OUT_NOTE}${block}`,
       ));
-      this.noteSendOutcome(pushOutcome(answer), rest);
+      const outcome = pushOutcome(answer);
+      this.noteSendOutcome(outcome, rest);
+      if (outcome.kind === 'rejected') {
+        console.error(
+          `[discord-mcpl] The host refused the ${rest.length} missed message(s) catch-up left out of channel ` +
+            `${channelId}'s first delivery, at its first open: ${outcome.reason}`,
+        );
+      }
     } catch (err) {
-      dbg('left-out:send-failed', { channelId, error: errorText(err) });
       this.noteSendOutcome(sendErrorOutcome(err), rest);
+      console.error(
+        `[discord-mcpl] Sending the ${rest.length} missed message(s) catch-up left out of channel ${channelId}'s ` +
+          `first delivery, at its first open, failed: ${errorText(err)}`,
+      );
     }
   }
 
@@ -3241,6 +3298,7 @@ export class DiscordMcplServer {
       const olderLeftOut = msgs.length > this.catchupLimit;
       msgs.sort((a, b) => a.id.localeCompare(b.id, 'en-US-u-kn-true'));
       if (olderLeftOut) msgs = msgs.slice(msgs.length - this.catchupLimit);
+      const spanRead = msgs.length > 0 ? { oldest: msgs[0].id, newest: msgs[msgs.length - 1].id } : null;
       msgs = msgs.filter((m) => m.authorId !== botId && !m.content.startsWith(CHX_NOOP_PREFIX));
       if (msgs.length === 0) continue;
 
@@ -3322,6 +3380,15 @@ export class DiscordMcplServer {
         continue;
       }
 
+      const holdTheRest = (delivered: Set<string>) => {
+        if (!claim) return;
+        if (spanRead && msgs.some((m) => !delivered.has(m.id))) {
+          claim.keep({ ...spanRead, delivered, meta, guildId, olderAfter: olderLeftOut ? watermark : null });
+        } else {
+          claim.settle();
+        }
+      };
+
       const VICINITY = 7;
       const keepAll = isDM || isSubscribed;
       const mentionCount = msgs.filter((m) => m.mentionsBot).length;
@@ -3340,7 +3407,7 @@ export class DiscordMcplServer {
       }
       if (kept.length === 0 && !olderLeftOut) {
         await advance();
-        claim?.keep(msgs, meta, guildId, null);
+        holdTheRest(new Set());
         continue;
       }
       const hadMention = isDM || mentionCount > 0;
@@ -3376,7 +3443,7 @@ export class DiscordMcplServer {
         continue;
       }
       await advance();
-      claim?.keep(msgs.filter((m) => !kept.includes(m)), meta, guildId, olderLeftOut ? watermark : null);
+      holdTheRest(new Set(kept.map((m) => m.id)));
       if (kept.length > 0) delivered++;
     }
 
@@ -4760,6 +4827,7 @@ export class DiscordMcplServer {
       });
       return;
     }
+    this.leftOut.get(msg.channelId)?.shown.add(msg.id);
 
     this.ensureSubscriptionsLoaded();
     this.ensureWatermarkLoaded();

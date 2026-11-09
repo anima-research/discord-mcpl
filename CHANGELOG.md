@@ -133,20 +133,27 @@ in the git log and PR descriptions.
 - **After a restart, a channel the host re-opens gets the rest of what it
   missed.** When the catch-up sweep reads a channel as closed that the host
   hasn't yet opened or closed, and that hasn't been muted since the server
-  started, it delivers its mentions with their nearby messages, as before,
-  and now keeps the other messages it read there that the filters admitted
-  until the host first opens or closes the channel. An open delivers them,
-  after its answer, as a second `<missed>` block that says they're the rest,
-  leaving out any that an open's history answer carried. When the catch-up
-  left older messages out there, that block carries `older="left out"` and
-  `after` too, as the first does. Its messages count as sent as the first
-  block's do, so the deletion of one is reported. A close, a mute or the
-  channel's deletion drops them at once. The filters, and whether
-  `discord.messaging` is on, are checked when the block goes out. Until now,
-  when the sweep read a channel before the host's open of it was handled, as
-  can happen with a host that re-opens its channels after
-  `channels/register` is answered, such as agent-framework, those messages
-  were lost: the sweep had moved the catch-up position past them.
+  started, it delivers its mentions with their nearby messages, as before.
+  When that leaves some of what it read there undelivered, it now remembers
+  the span it read and which messages it delivered, until the host first
+  opens or closes the channel. An open reads that span again, after its
+  answer, and delivers the messages it didn't, as Discord has them then, as
+  a second `<missed>` block that says they're the rest. It leaves out any
+  that an open's history answer carried or that were delivered live
+  meanwhile. When the catch-up left older messages out there, that block
+  carries `older="left out"` and `after` too, as the first does. Its
+  messages count as sent as the first block's do, so the deletion of one is
+  reported. A close, a mute or the channel's deletion drops the span at
+  once. The filters, and whether `discord.messaging` is on, are checked when
+  the block goes out, and a line on stderr says how many messages the
+  filters withheld. If the open can't read the span again, or the host
+  refuses the block or its send fails, a line on stderr names the channel,
+  and the messages stay on Discord. If discord-mcpl restarts before the
+  open, they aren't delivered. Until now, when the sweep read a channel
+  before the host's open of it was handled, as can happen with a host that
+  re-opens its channels after `channels/register` is answered, such as
+  agent-framework, those messages were lost: the sweep had moved the
+  catch-up position past them.
 
 ## 0.6.0 — 2026-10-30
 
