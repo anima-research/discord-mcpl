@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.7.1 — 2026-11-10
+
 ### Changed
 
 - **Rendered messages no longer carry `[id=<id>]`.** 0.7.0 put a message's
