@@ -5,6 +5,22 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Changed
+
+- **Rendered messages no longer carry `[id=<id>]`.** 0.7.0 put a message's
+  id just before the sender's name on every message discord-mcpl renders:
+  a message delivered in an open channel or pushed from a closed one, an
+  edit (both the `[message edited]` notice and the re-rendered message
+  that replaces an unread one), a first DM's backscroll and the history a
+  host's open brings. It also named the agent's own message in a reaction
+  notice (`on your message <id>`). That is taken back (#144 is reverted):
+  each of those lines reads as it did in 0.6.0, so an agent that reads its
+  channels in context no longer gets a 17 to 19 digit id in front of every
+  message. A catch-up line keeps the id it already had, an edit or
+  deletion notice still says where it happened, and a reaction on another
+  message still names it (`on message <id>`). The 0.7.0 entry below
+  describes that release as it shipped.
+
 ## 0.7.0 — 2026-11-09
 
 ### Changed
