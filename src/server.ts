@@ -1930,6 +1930,12 @@ export class DiscordMcplServer {
         const shifted = this.markOutboundSend(channelId);
         await this.registerPostedPlace(channelId, result.messageId);
         const receipt = await this.augmentSendResult(result.messageId, channelId, shifted);
+        if (result.replyTargetMissing) {
+          return withMentions({
+            ...receipt,
+            unthreaded: `Message ${replyTo} wasn't found in this channel (deleted, a wrong id, or in another channel), so this was posted as a plain message, not a reply.`,
+          }, result.report);
+        }
         return withMentions(target ? { ...receipt, target } : receipt, result.report);
       }
 

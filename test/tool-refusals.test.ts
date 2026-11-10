@@ -385,7 +385,7 @@ describe('a send refused for its files says nothing was sent, and what to send i
     writeFileSync(path, 'x');
     const r = await s.handleToolCall('reply_message', { channelId: channel.id, messageId: '223456789012345678', files: [{ path }] });
     assert.notEqual(r.isError, true, r.content[0].text);
-    assert.deepEqual(sends, [{ content: undefined, files: [{ name: 'a.txt' }], reply: { messageReference: '223456789012345678' } }]);
+    assert.deepEqual(sends, [{ content: undefined, files: [{ name: 'a.txt' }], reply: { messageReference: '223456789012345678', failIfNotExists: false } }]);
   });
 
   it('files with content left out, null or false go as one message of files alone, through the real sendMessage and sendDM', async (t) => {

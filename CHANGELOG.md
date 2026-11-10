@@ -27,6 +27,13 @@ in the git log and PR descriptions.
 
 ### Changed
 
+- **A reply by `messageId` to a message that isn't found now posts** (#58).
+  The message may be deleted, the id wrong, or the message in another
+  channel. Such a reply used to fail the whole send with "Unknown message".
+  It now posts as a plain message, and the result's `unthreaded` says the
+  target wasn't found. A `latestFrom` reply to a message that's gone still
+  fails, since the server chose its target. `reply_message`'s description
+  now says so.
 - **discord-mcpl needs discord.js 14.27.0 or later.** Its range was
   `^14.16.0`. Below 14.17.0, discord.js ignores the ephemeral flag on a
   deferred reply, so `/marks` and `/nudge` answer where the whole channel

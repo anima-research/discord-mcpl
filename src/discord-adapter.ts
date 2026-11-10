@@ -1076,7 +1076,7 @@ export class DiscordAdapter {
     channelId: string,
     content: string,
     options?: { replyTo?: string; files?: OutgoingFile[]; requireReplyTarget?: boolean },
-  ): Promise<{ messageId: string; report?: MentionsField }> {
+  ): Promise<{ messageId: string; report?: MentionsField; replyTargetMissing?: true }> {
     const channel = await this.channelById(channelId);
     if (!channel) throw channelUnusable(channelId, 'nothing was sent');
     if (!('send' in channel)) throw noMessagesHere(channel, channelId, 'nothing was sent');
@@ -1085,16 +1085,16 @@ export class DiscordAdapter {
     const chunks = this.splitForDiscord(resolved);
     if (chunks.length === 0 && attachments.length > 0) chunks.push('');
     let lastId = '';
+    let replyTargetMissing: true | undefined;
     const posted: string[] = [];
     for (let i = 0; i < chunks.length; i++) {
       const isLast = i === chunks.length - 1;
       const sent = await (channel as TextChannel | DMChannel).send({
         content: chunks[i] || undefined,
         // discord.js sends fail_if_not_exists from the client's failIfNotExists
-        // option, true by default, so a reply to a message that's gone fails
-        // rather than posting unthreaded.
+        // option, true by default, so each reply states it.
         reply: i === 0 && options?.replyTo
-          ? { messageReference: options.replyTo, ...(options.requireReplyTarget ? { failIfNotExists: true } : {}) }
+          ? { messageReference: options.replyTo, failIfNotExists: options.requireReplyTarget === true }
           : undefined,
         files: isLast && attachments.length > 0 ? attachments : undefined,
         // Each part carries a nonce of its own that Discord enforces: the REST
@@ -1109,8 +1109,14 @@ export class DiscordAdapter {
       });
       posted.push(sent.id);
       lastId = sent.id;
+      // Discord drops the reference when it posts a reply unthreaded.
+      if (i === 0 && options?.replyTo && !sent.reference) replyTargetMissing = true;
     }
-    return { messageId: lastId, ...(report ? { report } : {}) };
+    return {
+      messageId: lastId,
+      ...(report ? { report } : {}),
+      ...(replyTargetMissing ? { replyTargetMissing } : {}),
+    };
   }
 
   private async resolveRecipientId(recipient: string): Promise<string> {
