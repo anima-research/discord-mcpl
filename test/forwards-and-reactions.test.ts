@@ -82,67 +82,69 @@ describe('buildReactionSnippet', () => {
 });
 
 describe('buildForwardedContent', () => {
+  const same = (text: string) => text;
+
   it('returns the base content untouched when there are no snapshots', () => {
-    assert.equal(buildForwardedContent('hi', []), 'hi');
-    assert.equal(buildForwardedContent('', []), '');
+    assert.equal(buildForwardedContent('hi', [], same), 'hi');
+    assert.equal(buildForwardedContent('', [], same), '');
   });
 
   it('renders a bare forward (no outer content) from its snapshot', () => {
     assert.equal(
-      buildForwardedContent('', [{ content: 'the original text' }]),
+      buildForwardedContent('', [{ content: 'the original text' }], same),
       '[forwarded message] the original text',
     );
   });
 
   it('appends the forward below outer content when both exist', () => {
     assert.equal(
-      buildForwardedContent('look at this:', [{ content: 'original' }]),
+      buildForwardedContent('look at this:', [{ content: 'original' }], same),
       'look at this:\n[forwarded message] original',
     );
   });
 
   it('notes attachments on an attachment-only forward', () => {
     assert.equal(
-      buildForwardedContent('', [{ content: '', attachments: { size: 2 } }]),
+      buildForwardedContent('', [{ content: '', attachments: { size: 2 } }], same),
       '[forwarded message] [2 attachments]',
     );
     assert.equal(
-      buildForwardedContent('', [{ content: null, attachments: { size: 1 } }]),
+      buildForwardedContent('', [{ content: null, attachments: { size: 1 } }], same),
       '[forwarded message] [1 attachment]',
     );
   });
 
   it('notes an embed-only forward instead of rendering silence', () => {
     assert.equal(
-      buildForwardedContent('', [{ content: '', embeds: { length: 1 } }]),
+      buildForwardedContent('', [{ content: '', embeds: { length: 1 } }], same),
       '[forwarded message] [embed]',
     );
   });
 
   it('keeps text AND attachment note when a forward has both', () => {
     assert.equal(
-      buildForwardedContent('', [{ content: 'caption', attachments: { size: 1 } }]),
+      buildForwardedContent('', [{ content: 'caption', attachments: { size: 1 } }], same),
       '[forwarded message] [1 attachment] caption',
     );
   });
 
   it('falls back to an explicit no-content marker', () => {
     assert.equal(
-      buildForwardedContent('', [{ content: '' }]),
+      buildForwardedContent('', [{ content: '' }], same),
       '[forwarded message] [no text content]',
     );
   });
 
   it('renders multiple snapshots one per line', () => {
     assert.equal(
-      buildForwardedContent('', [{ content: 'one' }, { content: 'two' }]),
+      buildForwardedContent('', [{ content: 'one' }, { content: 'two' }], same),
       '[forwarded message] one\n[forwarded message] two',
     );
   });
 
   it('renders custom-emoji tokens in the forwarded body down to :name:', () => {
     assert.equal(
-      buildForwardedContent('', [{ content: 'so true <:blobheart:12345>' }]),
+      buildForwardedContent('', [{ content: 'so true <:blobheart:12345>' }], same),
       '[forwarded message] so true :blobheart:',
     );
   });
