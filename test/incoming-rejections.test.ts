@@ -1863,7 +1863,6 @@ describe('late deliveries', () => {
       assert.ok(textOf(sent[0]).startsWith(line), textOf(sent[0]));
       assert.ok(tagsOf(sent[0]).includes('discord:late'), tagsOf(sent[0]).join(', '));
       assert.ok(!tagsOf(sent[0]).includes('chat:late'), tagsOf(sent[0]).join(', '));
-      assert.equal(timesOf(sent[0]).sentAt, new Date(SENT).toISOString());
       assert.equal(timesOf(sent[0]).receivedAt, new Date(received).toISOString());
     });
 
@@ -1874,7 +1873,6 @@ describe('late deliveries', () => {
       assert.equal(sent[0].method, lane);
       assert.doesNotMatch(textOf(sent[0]), /delayed delivery/);
       assert.ok(!tagsOf(sent[0]).includes('discord:late'));
-      assert.equal(timesOf(sent[0]).sentAt, undefined);
       assert.equal(timesOf(sent[0]).receivedAt, undefined);
     });
   }

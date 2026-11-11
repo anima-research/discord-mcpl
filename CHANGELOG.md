@@ -14,7 +14,7 @@ in the git log and PR descriptions.
   on a line of its own just before the message and its `[replying to …]`
   line if it has one, after any notice or backscroll that comes with it, and
   a `discord:late` tag, which `discord.messaging`'s tag ontology declares,
-  and `sentAt`/`receivedAt` metadata, on
+  and `receivedAt` metadata beside the event's `timestamp`, on
   `channels/incoming` and `push/event` alike, so it can't read as
   just-arrived and gates can route on it. "Received" is when discord-mcpl
   first handed the message on, after fetching its attachments, and a resend

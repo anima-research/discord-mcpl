@@ -4741,7 +4741,7 @@ export class DiscordMcplServer {
       msg.attachments.length > 0 ? await this.buildAttachmentBlocks(msg.attachments) : [];
     const receivedAt = new Date();
     const lateLine = lateDeliveryLine(msg.timestamp, receivedAt, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
-    const late = lateLine ? { sentAt: msg.timestamp.toISOString(), receivedAt: receivedAt.toISOString() } : {};
+    const late = lateLine ? { receivedAt: receivedAt.toISOString() } : {};
     const renderedContent = `${prefixBlock}${lateLine}${replyMarker}${location}${nameValue(msg.authorName)}: ${senderText(msg.cleanContent)}`;
 
     const guildDelivery = isDM
