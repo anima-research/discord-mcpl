@@ -11,6 +11,7 @@ import {
   ERR_CHECKPOINT_NOT_FOUND,
 } from '@animalabs/mcpl-core';
 import { formatAgentDateTime, resolveAgentTimeZone, resolveTimestampStyle } from './timezone.js';
+import { LATE_DELIVERY_THRESHOLD_MS, isLateDelivery, lateDeliveryLine, receivedAttribute } from './late-delivery.js';
 
 import type {
   JsonRpcRequest,
@@ -267,6 +268,12 @@ function addressTags(flags: { isExplicitMention: boolean; isReplyToBot: boolean;
  *  (the host documents it as "Occurred in a thread"). */
 function threadTags(thread: ThreadPlace): string[] {
   return thread.threadId ? ['chat:thread'] : [];
+}
+
+function blockTags(thread: ThreadPlace, lines: Array<{ timestamp: Date }>): { tags?: string[] } {
+  const oldest = lines.reduce((min, m) => Math.min(min, m.timestamp.getTime()), Infinity);
+  const tags = [...threadTags(thread), ...(isLateDelivery(new Date(oldest), new Date()) ? ['discord:late'] : [])];
+  return tags.length > 0 ? { tags } : {};
 }
 
 function knowsLessThan(d: ChannelDescriptor, known: ChannelDescriptor): boolean {
@@ -576,7 +583,7 @@ interface CreateMemory {
   done: boolean;
   /** Coalescing scope the create used (RFC-006): a channel id, or null for feature-set scope. */
   scope?: string | null;
-  render?: { prefix: string; replyMarker: string; authorName: string; attachments: ContentBlock[] };
+  render?: { prefix: string; editLateLine: string; replyMarker: string; authorName: string; attachments: ContentBlock[] };
   /** The messages the create carries, a first DM's backscroll included: they count as sent once the host takes it. */
   carries?: SentMessage[];
   edits: number;
@@ -3015,14 +3022,15 @@ export class DiscordMcplServer {
       attrs.push(`count="${found.length}"`, 'reason="undelivered"');
       const lines = found.map(({ m, owed }) => this.missedLine(m,
         `${m.mentionsBot ? ' (mention)' : ''}${owed.edit ? ' (edited)' : ''}${owed.uncertain ? ' (may have arrived already)' : ''}`));
-      const block = [
-        `<missed ${attrs.join(' ')}>`,
+      const blockWith = (head: string[]) => [
+        `<missed ${head.join(' ')}>`,
         "[The host didn't take these messages when they were sent; this is how Discord has them now.]",
         ...lines,
         '</missed>',
       ].join('\n');
-      const payloadText = `${closedNote}${block}`;
-      const digest = createHash('sha256').update(payloadText).digest('hex').slice(0, 16);
+      const digest = createHash('sha256').update(`${closedNote}${blockWith(attrs)}`).digest('hex').slice(0, 16);
+      const received = receivedAttribute(new Date(), AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
+      const payloadText = `${closedNote}${blockWith(received ? [...attrs, received] : attrs)}`;
       const revs = new Map(found.map(({ owed }) => [owed, this.owedRevs.get(owed) ?? 0]));
       const sentBeforeReady = conn !== this.readyConn;
       let outcome: SendOutcome;
@@ -3042,7 +3050,7 @@ export class DiscordMcplServer {
             isMention: hadMention,
             isDM,
           } as Record<string, unknown>,
-          ...(threadTags(thread).length > 0 ? { tags: threadTags(thread) } : {}),
+          ...blockTags(thread, found.map(({ m }) => m)),
           payload: { content: [textContent(payloadText)] },
         } satisfies PushEventParams));
       } catch (err) {
@@ -3234,6 +3242,8 @@ export class DiscordMcplServer {
       if (!keepAll) attrs.push(`lines="${kept.length}"`);
       if (olderLeftOut) attrs.push('older="left out"', `after=${quotedLabel(watermark)}`);
       attrs.push(`reason="${isDM ? 'dm' : hadMention ? 'mention' : 'backscroll'}"`);
+      const received = receivedAttribute(new Date(), AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
+      if (received) attrs.push(received);
       const lines = kept.map((m) => this.missedLine(m, m.mentionsBot ? ' (mention)' : ''));
       const block = [
         `<missed ${attrs.join(' ')}>`,
@@ -3264,7 +3274,7 @@ export class DiscordMcplServer {
             isMention: hadMention,
             isDM,
           } as Record<string, unknown>,
-          ...(threadTags(thread).length > 0 ? { tags: threadTags(thread) } : {}),
+          ...blockTags(thread, kept),
           payload: { content: [textContent(`${closedNote}${block}`)] },
         } satisfies PushEventParams);
         this.noteSendOutcome(pushOutcome(answer), kept);
@@ -4061,7 +4071,7 @@ export class DiscordMcplServer {
     const render = this.hostCoalescing?.pushEvents ? mem?.render : undefined;
     const location = noticeLocation(channelId, isDM, info);
     const content: ContentBlock[] = render
-      ? [textContent(`${render.prefix}${render.replyMarker}${location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
+      ? [textContent(`${render.prefix}${render.editLateLine}${render.replyMarker}${location}${nameValue(render.authorName)} [edited]: ${senderText(info?.cleanContent ?? newContent)}`), ...render.attachments]
       : [textContent(`[message edited] ${location}${who}${senderText(newContent)}`)];
     const params: CoalescedPushEventParams = {
       featureSet: 'discord.messaging',
@@ -4721,7 +4731,6 @@ export class DiscordMcplServer {
     const replyMarker = msg.replyToId
       ? `[replying to ${msg.replyToUserName ? `@${nameValue(msg.replyToUserName)}` : 'unknown author'}]\n`
       : '';
-    const renderedContent = `${prefixBlock}${replyMarker}${location}${nameValue(msg.authorName)}: ${senderText(msg.cleanContent)}`;
     if (isDM || !this.deletedLately(guildId, msg.channelId)) this.forwardedWatermark.set(msg.channelId, msg.id);
     if (isDM) this.dmChannelIds.add(msg.channelId);
     this.saveWatermark();
@@ -4730,6 +4739,10 @@ export class DiscordMcplServer {
 
     const attachmentBlocks =
       msg.attachments.length > 0 ? await this.buildAttachmentBlocks(msg.attachments) : [];
+    const receivedAt = new Date();
+    const lateLine = lateDeliveryLine(msg.timestamp, receivedAt, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
+    const late = lateLine ? { receivedAt: receivedAt.toISOString() } : {};
+    const renderedContent = `${prefixBlock}${lateLine}${replyMarker}${location}${nameValue(msg.authorName)}: ${senderText(msg.cleanContent)}`;
 
     const guildDelivery = isDM
       ? undefined
@@ -4750,6 +4763,7 @@ export class DiscordMcplServer {
     const eventTags: string[] = (() => {
       const t = new Set<string>(addressTags(flags, isDM, isBot));
       for (const tag of threadTags(msg)) t.add(tag);
+      if (lateLine) t.add('discord:late');
       for (const a of msg.attachments) {
         const ct = (a.contentType || '').toLowerCase();
         if (ct.startsWith('image/')) t.add('chat:has-image');
@@ -4760,7 +4774,11 @@ export class DiscordMcplServer {
     })();
 
     mem.render = {
-      prefix: prefixBlock, replyMarker, authorName: msg.authorName,
+      prefix: prefixBlock,
+      editLateLine: lateDeliveryLine(
+        msg.timestamp, receivedAt, AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE, LATE_DELIVERY_THRESHOLD_MS, 'edit of a late delivery',
+      ),
+      replyMarker, authorName: msg.authorName,
       attachments: rememberedAttachments(attachmentBlocks),
     };
     mem.carries = [...carriedBackscroll, msg];
@@ -4796,6 +4814,7 @@ export class DiscordMcplServer {
             isReplyToBot,
             isBot,
             isDM,
+            ...late,
           },
           tags: eventTags,
       };
@@ -4864,6 +4883,7 @@ export class DiscordMcplServer {
           isReplyToBot,
           isBot,
           isDM,
+          ...late,
           ...(missed
             ? { missedMessages: missed.messages, missedCharacters: missed.characters }
             : {}),

@@ -2603,6 +2603,7 @@ it('a mention in a thread that is neither open nor subscribed carries the note o
 });
 
 it("a message addressed only by the role Discord created for the bot carries the note, and one mentioning another role the bot has isn't delivered", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: T + 5_000 });
   const BOT_ROLE = '100000000000000007';
   const TEAM = '100000000000000008';
   const f = fixture(t, {
@@ -2712,6 +2713,7 @@ it('no note on a mention whose closed thread was subscribed while its attachment
 });
 
 it('no note on a mention whose registered thread was archived while its attachments were fetched', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: T + 5_000 });
   const f = fixture(t);
   f.server.registerGuildDelivery(G, TH);
   const { held, release } = holder(t);

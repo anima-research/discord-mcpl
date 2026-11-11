@@ -38,6 +38,11 @@ export const featureSets: NamedFeatureSetDeclaration[] = [
         'chat:edited', 'chat:deleted', 'chat:reaction', 'chat:reaction-remove',
         'chat:has-image', 'chat:has-audio', 'chat:has-file',
       ],
+      tags: {
+        'discord:late': {
+          desc: 'Handed on more than two minutes after Discord says it was sent: a message, whose text then opens with when it was sent and received, or a <missed> block whose oldest line was',
+        },
+      },
       // RFC-001 rev 2 renamed `defaultTreatment` to `suggestedTreatment`, a hint a
       // host applies only on explicit acceptance (SPEC §16.5). The pinned
       // @animalabs/mcpl-core still types the old name (mcpl-core-ts#6 renames it),

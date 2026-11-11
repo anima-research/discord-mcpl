@@ -28,6 +28,7 @@ import type {
 
 import { DiscordMcplServer, ID_ARGUMENTS, serveStdio, serveTcp } from '../src/server.js';
 import { toolDefinitions } from '../src/tools.js';
+import { formatAgentDateTime, resolveAgentTimeZone, resolveTimestampStyle } from '../src/timezone.js';
 import { countEveryMessageAsSent } from './every-message-sent.js';
 import { agentJson, senderText } from '../src/source-header.js';
 import { parseChannelRef } from '../src/channel-names.js';
@@ -377,6 +378,12 @@ describe('DiscordMcplServer', () => {
       'chat:edited', 'chat:deleted', 'chat:reaction', 'chat:reaction-remove',
       'chat:has-image', 'chat:has-audio', 'chat:has-file',
     ].sort());
+  });
+
+  it("declares discord.messaging's own discord:late tag, which a late delivery carries", () => {
+    const messaging = featureSets.find((fs) => fs.name === 'discord.messaging') as unknown as { tagOntology?: { tags?: Record<string, { desc?: string }> } };
+    assert.deepEqual(Object.keys(messaging.tagOntology?.tags ?? {}), ['discord:late']);
+    assert.ok(messaging.tagOntology?.tags?.['discord:late']?.desc);
   });
 
   it('MCPL handshake exposes feature sets and channels', async () => {
@@ -2349,6 +2356,37 @@ describe('DiscordMcplServer', () => {
     }
   });
 
+  for (const [oldestAgo, late] of [[10 * 60_000, true], [0, false]] as const) {
+    it(`a catch-up block whose oldest line was sent ${oldestAgo / 60_000} minutes before it is handed on is ${late ? '' : 'not '}tagged discord:late`, async () => {
+      const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-sweep-late-${oldestAgo}.json`);
+      writeFileSync(wmPath, JSON.stringify({ watermarks: { c1: '100' }, dmChannels: [] }));
+      process.env.DISCORD_WATERMARK_FILE = wmPath;
+      try {
+        const { client, serverConn, discord } = await createTestPair();
+        const now = Date.now();
+        discord.historyToReturn = [
+          { id: '101', authorId: 'u1', authorName: 'Alice', isBot: false, content: 'earlier', cleanContent: 'earlier', attachments: [], mentionsBot: false, timestamp: new Date(now - oldestAgo), reactions: [] },
+          { id: '102', authorId: 'u2', authorName: 'Bob', isBot: false, content: '<@bot_123> ping', cleanContent: '@bot ping', attachments: [], mentionsBot: true, timestamp: new Date(now), reactions: [] },
+        ];
+        const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+        const serverPromise = server.serve(serverConn);
+        await mcplHandshake(client);
+        const regMsg = await client.nextMessage();
+        if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
+        const missed = await client.nextMessage();
+        const p = missed.type === 'request' ? missed.request.params as PushEventParams : undefined;
+        if (missed.type === 'request') client.sendResponse(missed.request.id, {});
+        client.close();
+        await serverPromise;
+        assert.equal(p?.eventId, 'discord_missed_c1_102');
+        assert.equal((p?.tags ?? []).includes('discord:late'), late, JSON.stringify(p?.tags));
+      } finally {
+        delete process.env.DISCORD_WATERMARK_FILE;
+        if (existsSync(wmPath)) unlinkSync(wmPath);
+      }
+    });
+  }
+
   it('reconnect sweep delivers missed mentions with nearby context from a non-subscribed channel', async () => {
     const wmPath = join(tmpdir(), `discord-mcpl-wm-${process.pid}-sweep.json`);
     writeFileSync(wmPath, JSON.stringify({ watermarks: { c1: '100' }, dmChannels: [] }));
@@ -2364,6 +2402,7 @@ describe('DiscordMcplServer', () => {
         ] },
       ];
       const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+      const before = Date.now();
       const serverPromise = server.serve(serverConn);
 
       await mcplHandshake(client);
@@ -2373,6 +2412,7 @@ describe('DiscordMcplServer', () => {
       if (regMsg.type === 'request') client.sendResponse(regMsg.request.id, {});
 
       const missed = await client.nextMessage();
+      const after = Date.now();
       assert.equal(missed.type, 'request');
       if (missed.type === 'request') {
         assert.equal(missed.request.method, method.PUSH_EVENT);
@@ -2385,6 +2425,15 @@ describe('DiscordMcplServer', () => {
         assert.ok(text.includes('count="1"'), 'only one delivered line is a mention');
         assert.ok(text.includes('lines="2"'), 'the nearby context line is included');
         assert.ok(text.includes('reason="mention"'));
+        const style = resolveTimestampStyle();
+        const shown = new Set<string>();
+        for (let ms = before - (before % 1000); ms <= after; ms += 1000) {
+          shown.add(formatAgentDateTime(new Date(ms), resolveAgentTimeZone(), style));
+        }
+        const received = /^<missed [^>]*reason="mention"(?: received="([^"]+)")?>/m.exec(text);
+        assert.ok(received, text);
+        if (formatAgentDateTime(new Date(), resolveAgentTimeZone(), style)) assert.ok(shown.has(received[1] ?? ''), `received ${received[1]} not within the sweep: ${[...shown].join(', ')}`);
+        else assert.equal(received[1], undefined);
         assert.ok(text.includes('Bob'), 'mention author present');
         assert.ok(text.includes('just chatting'), 'nearby non-mention context included');
         assert.ok(text.includes('[reactions: 👍 x2 (incl. me), :blob: x1]'), 'current reaction state on the mention line');
