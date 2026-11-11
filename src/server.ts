@@ -43,7 +43,7 @@ import type {
 
 import type { ChannelFacts, DiscordAdapter, DiscordMessageData, DiscordAttachment, HistoryMessage, OutgoingFile, ReactionSummary, MessageEventInfo, DmRefusal, DmSendFailure, MentionsField, PostedParts, SentMessage, ThreadPlace } from './discord-adapter.js';
 import { LATEST_FROM_WINDOW, attachmentUrlExpiry, buildMessageSnippet, holdsNoMessages, isListedKind, kindOfValue } from './discord-adapter.js';
-import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, type DmNoticeDecision } from './dm-notices.js';
+import { DM_NOTICE_TEXT, DmNoticeState, resolveDmNoticesPath, snowflakeTime, type DmNoticeDecision } from './dm-notices.js';
 
 const LATEST_FROM_EXCERPT = 80;
 import type { ChatInputCommandInteraction } from 'discord.js';
@@ -130,6 +130,17 @@ const packageJson: typeof import('../package.json') = JSON.parse(
 );
 
 const INSPECTION_TOOLS: ReadonlySet<string> = new Set(['fetch_history', 'fetch_around']);
+
+export const ID_ARGUMENTS: readonly string[] = [
+  'channelId', 'messageId', 'userId', 'guildId', 'categoryId', 'before', 'after', 'latestFrom',
+  'addGuilds', 'removeGuilds', 'setDmUsers',
+];
+
+const holdsNumber = (value: unknown): boolean =>
+  typeof value === 'number' || (Array.isArray(value) && value.some((item) => typeof item === 'number'));
+
+const listed = (items: string[]): string =>
+  items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items.join('');
 
 const withMentions = <T extends object>(result: T, report: MentionsField | undefined): T | (T & MentionsField) =>
   report ? { ...result, ...report } : result;
@@ -656,6 +667,7 @@ export class DiscordMcplServer {
     { anchorId: string; talliedThrough: string; messages: number; characters: number }
   >();
   private watermarkLoaded = false;
+  private keptDmsLookedUp = false;
   private watermarkSaveFailure: string | null = null;
   private sweepDone = false;
 
@@ -1450,6 +1462,9 @@ export class DiscordMcplServer {
           } catch (err) {
             console.error('[discord-mcpl] Channel registration failed:', errorText(err));
           }
+          void this.registerKeptDms().catch((err) => {
+            console.error('[discord-mcpl] Registering the kept DMs failed:', errorText(err));
+          });
         }
         this.markReady(conn);
         void this.deliverOwed(conn).catch((err) => {
@@ -1791,6 +1806,20 @@ export class DiscordMcplServer {
       };
     }
 
+    const declared = toolDefinitions.find((tool) => tool.name === name)?.inputSchema.properties ?? {};
+    const numbered = ID_ARGUMENTS.filter((key) => Object.hasOwn(declared, key) && holdsNumber(args[key]));
+    if (numbered.length > 0) {
+      return {
+        content: [textContent(
+          'Nothing was done: ids must be strings in quotes, since a number past 2^53 can lose its last digits. ' +
+            `This call sent a number at ${listed(numbered)}, which arrived as ` +
+            `${listed(numbered.map((key) => JSON.stringify(args[key])))}. ` +
+            'Those may not be the digits you sent: take the id again from where you read it, not from this message, and send it in quotes.',
+        )],
+        isError: true,
+      };
+    }
+
     let explain: ExplainContext = {};
     if (typeof args.channelId === 'string' && args.channelId.trim()) {
       const given = args.channelId;
@@ -1883,6 +1912,7 @@ export class DiscordMcplServer {
         }
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
+        await this.registerPostedPlace(channelId, result.messageId);
         return withMentions(await this.augmentSendResult(result.messageId, channelId, shifted), result.report);
       }
 
@@ -1905,6 +1935,7 @@ export class DiscordMcplServer {
         this.noteTarget(target);
         this.stateTracker.recordSent(result.messageId, channelId, content);
         const shifted = this.markOutboundSend(channelId);
+        await this.registerPostedPlace(channelId, result.messageId);
         const receipt = await this.augmentSendResult(result.messageId, channelId, shifted);
         return withMentions(target ? { ...receipt, target } : receipt, result.report);
       }
@@ -1930,6 +1961,7 @@ export class DiscordMcplServer {
           throw err;
         }
         const shifted = this.markOutboundSend(result.channelId);
+        await this.registerPostedPlace(result.channelId, result.messageId, { id: result.recipientId, name: result.recipientName });
         return withMentions(
           await this.augmentSendResult(result.messageId, result.channelId, shifted, { recipientName: result.recipientName }),
           result.report,
@@ -3082,7 +3114,7 @@ export class DiscordMcplServer {
       let msgs: Awaited<ReturnType<typeof this.discord.fetchHistory>>;
       try {
         msgs = await this.discord.fetchHistory(channelId, {
-          limit: this.catchupLimit,
+          limit: this.catchupLimit + 1,
           after: watermark,
         });
       } catch (err) {
@@ -3098,7 +3130,9 @@ export class DiscordMcplServer {
         }
         continue;
       }
-      msgs.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+      const olderLeftOut = msgs.length > this.catchupLimit;
+      msgs.sort((a, b) => a.id.localeCompare(b.id, 'en-US-u-kn-true'));
+      if (olderLeftOut) msgs = msgs.slice(msgs.length - this.catchupLimit);
       msgs = msgs.filter((m) => m.authorId !== botId && !m.content.startsWith(CHX_NOOP_PREFIX));
       if (msgs.length === 0) continue;
 
@@ -3196,7 +3230,7 @@ export class DiscordMcplServer {
         }
         kept = [...keepIdx].sort((a, b) => a - b).map((i) => msgs[i]);
       }
-      if (kept.length === 0) {
+      if (kept.length === 0 && !olderLeftOut) {
         await advance();
         continue;
       }
@@ -3206,6 +3240,7 @@ export class DiscordMcplServer {
       const attrs = this.missedPlaceAttrs(meta, channelId, isDM);
       attrs.push(`count="${keepAll ? kept.length : mentionCount}"`);
       if (!keepAll) attrs.push(`lines="${kept.length}"`);
+      if (olderLeftOut) attrs.push('older="left out"', `after=${quotedLabel(watermark)}`);
       attrs.push(`reason="${isDM ? 'dm' : hadMention ? 'mention' : 'backscroll'}"`);
       const received = receivedAttribute(new Date(), AGENT_TIME_ZONE, AGENT_TIMESTAMP_STYLE);
       if (received) attrs.push(received);
@@ -3249,7 +3284,7 @@ export class DiscordMcplServer {
         continue;
       }
       await advance();
-      delivered++;
+      if (kept.length > 0) delivered++;
     }
 
     await this.backfillMissedTallies();
@@ -3507,6 +3542,99 @@ export class DiscordMcplServer {
       && this.shouldEnterContext(channelId, { isMention: true, isDM: false, guildId })
       && !this.shouldEnterContext(channelId, { isDM: false, guildId })
       ? CLOSED_CHANNEL_NOTE : '';
+  }
+
+  private async registerPostedPlace(
+    channelId: string,
+    messageId: string,
+    recipient?: { id?: string; name?: string },
+  ): Promise<void> {
+    try {
+      if (recipient) {
+        if (recipient.id && recipient.name && this.discord.dmUserAdmitted(recipient.id)) {
+          this.registerDmPost(channelId, messageId, { id: recipient.id, name: recipient.name });
+        }
+        return;
+      }
+      const facts = this.discord.getCachedChannelFacts(channelId);
+      if (facts) {
+        const postedAt = /^\d{17,20}$/.test(messageId) ? snowflakeTime(messageId) : undefined;
+        this.registerGuildDelivery(facts.guildId, channelId, { postedAt });
+        return;
+      }
+      this.ensureWatermarkLoaded();
+      if (this.channelManager.get(mcplChannelId('dm', channelId)) && this.dmChannelIds.has(channelId)) {
+        this.keepPostedDm(channelId, messageId);
+        return;
+      }
+      const found = await this.discord.lookUpServedChannel('dm', channelId);
+      if (found?.kind === 'dm') {
+        this.registerDmPost(channelId, messageId, { id: found.recipientId, name: found.recipientName });
+      } else if (found?.kind === 'uncertain') {
+        console.error(
+          `[discord-mcpl] Couldn't register channel ${channelId} after a post into it: Discord's facts for it couldn't be read. ` +
+            'The post went out, and its answer names the channel.',
+        );
+      }
+    } catch (err) {
+      console.error(
+        `[discord-mcpl] Couldn't register channel ${channelId} after a post into it (${errorText(err)}). ` +
+          'The post went out, and its answer names the channel.',
+      );
+    }
+  }
+
+  private registerDmPost(channelId: string, messageId: string, peer: { id: string; name: string }): void {
+    this.ensureWatermarkLoaded();
+    this.registerDmDelivery(channelId, peer);
+    this.keepPostedDm(channelId, messageId);
+  }
+
+  private keepPostedDm(channelId: string, messageId: string): void {
+    const kept = this.dmChannelIds.has(channelId);
+    const placed = this.forwardedWatermark.has(channelId);
+    if (kept && placed) return;
+    this.dmChannelIds.add(channelId);
+    if (!placed) this.forwardedWatermark.set(channelId, messageId);
+    this.saveWatermark();
+  }
+
+  private async registerKeptDms(): Promise<void> {
+    if (this.keptDmsLookedUp) return;
+    this.keptDmsLookedUp = true;
+    this.ensureWatermarkLoaded();
+    const found: Array<{ channelId: string; descriptor: ChannelDescriptor; recipientId: string }> = [];
+    for (const channelId of [...this.dmChannelIds]) {
+      if (this.channelManager.get(mcplChannelId('dm', channelId))) continue;
+      let looked: Awaited<ReturnType<DiscordAdapter['lookUpServedChannel']>>;
+      try {
+        looked = await this.discord.lookUpServedChannel('dm', channelId);
+      } catch (err) {
+        console.error(`[discord-mcpl] Kept DM ${channelId} wasn't registered at start: its lookup failed (${errorText(err)}).`);
+        continue;
+      }
+      if (looked?.kind === 'dm') {
+        found.push({
+          channelId,
+          descriptor: toDmDescriptor(channelId, looked.recipientName, false, this.backscrollLimitFor(channelId), looked.recipientId),
+          recipientId: looked.recipientId,
+        });
+        continue;
+      }
+      console.error(
+        `[discord-mcpl] Kept DM ${channelId} wasn't registered at start: ` +
+          (looked
+            ? "Discord's facts for it couldn't be read. It registers when a message arrives in it or the bot posts there."
+            : "Discord doesn't know it, it isn't a DM, or the DM list leaves its recipient out."),
+      );
+    }
+    const still = found.filter(({ channelId, descriptor, recipientId }) => {
+      if (this.channelManager.get(descriptor.id)) return false;
+      if (this.discord.dmUserAdmitted(recipientId)) return true;
+      console.error(`[discord-mcpl] Kept DM ${channelId} wasn't registered at start: the DM list left its recipient out during the lookups.`);
+      return false;
+    });
+    if (still.length > 0) this.registerChannels(still.map(({ descriptor }) => descriptor));
   }
 
   private registerDmDelivery(channelId: string, peer: { id?: string; name?: string }): string | undefined {

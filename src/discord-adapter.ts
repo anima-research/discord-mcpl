@@ -1163,7 +1163,7 @@ export class DiscordAdapter {
     userId: string,
     content: string,
     options?: { files?: OutgoingFile[] },
-  ): Promise<{ messageId: string; channelId: string; recipientName: string; report?: MentionsField }> {
+  ): Promise<{ messageId: string; channelId: string; recipientId: string; recipientName: string; report?: MentionsField }> {
     const resolvedId = await this.resolveRecipientId(userId);
     const user = await this.client.users.fetch(resolvedId);
     const dm = await user.createDM();
@@ -1188,7 +1188,7 @@ export class DiscordAdapter {
         posted.push(sent.id);
         lastId = sent.id;
       }
-      return { messageId: lastId, channelId: dm.id, recipientName, ...(report ? { report } : {}) };
+      return { messageId: lastId, channelId: dm.id, recipientId: user.id, recipientName, ...(report ? { report } : {}) };
     } catch (err) {
       if (err && typeof err === 'object') Object.assign(err, { dmChannel: { id: dm.id, recipientName } });
       throw err;

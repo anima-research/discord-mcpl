@@ -26,7 +26,8 @@ import type {
   ChannelsPublishResult,
 } from '@animalabs/mcpl-core';
 
-import { DiscordMcplServer, serveStdio, serveTcp } from '../src/server.js';
+import { DiscordMcplServer, ID_ARGUMENTS, serveStdio, serveTcp } from '../src/server.js';
+import { toolDefinitions } from '../src/tools.js';
 import { formatAgentDateTime, resolveAgentTimeZone, resolveTimestampStyle } from '../src/timezone.js';
 import { countEveryMessageAsSent } from './every-message-sent.js';
 import { agentJson, senderText } from '../src/source-header.js';
@@ -4020,6 +4021,115 @@ describe("a sender's words and names can't take the server's place in what the a
   });
 });
 
+describe('an id sent as a number', () => {
+  const WRITTEN = '1309876543210987654';
+  const ARRIVED = String(JSON.parse(WRITTEN));
+  const NOT_IDS = ['content', 'emoji', 'name', 'limit', 'files', 'visible', 'setDmNotice'];
+  const idCases = toolDefinitions.flatMap((tool) =>
+    Object.keys(tool.inputSchema.properties).filter((key) => ID_ARGUMENTS.includes(key)).map((key) => ({ tool, key })));
+  const refusal = (keys: string, arrived: string) =>
+    'Nothing was done: ids must be strings in quotes, since a number past 2^53 can lose its last digits. ' +
+    `This call sent a number at ${keys}, which arrived as ${arrived}. ` +
+    'Those may not be the digits you sent: take the id again from where you read it, not from this message, and send it in quotes.';
+
+  function watched() {
+    const discord = new MockDiscordAdapter();
+    discord.facts.c1 = { id: 'c1', guildId: 'g1', guildName: 'Test Server', type: 'text', name: 'general' };
+    const calls: string[] = [];
+    let counting = false;
+    const proxy = new Proxy(discord, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function'
+          ? (...a: unknown[]) => {
+            if (counting) calls.push(String(property));
+            return (value as (...x: unknown[]) => unknown).apply(target, a);
+          }
+          : value;
+      },
+    });
+    const server = new DiscordMcplServer(proxy as unknown as DiscordAdapter) as unknown as {
+      handleToolCall(name: string, args: Record<string, unknown>): Promise<{ content: Array<{ text?: string }>; isError?: boolean }>;
+    };
+    const call = async (name: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> => {
+      counting = true;
+      try {
+        const result = await server.handleToolCall(name, args);
+        return { text: result.content[0]?.text ?? '', isError: result.isError };
+      } finally {
+        counting = false;
+      }
+    };
+    return { discord, calls, call };
+  }
+
+  it('every argument any tool takes is classed either as an id argument or as not one', () => {
+    const keys = [...new Set(toolDefinitions.flatMap((tool) => Object.keys(tool.inputSchema.properties)))];
+    assert.deepEqual(keys.filter((key) => ID_ARGUMENTS.includes(key) === NOT_IDS.includes(key)), []);
+  });
+
+  it('is refused at every id argument of every tool, alone or in a list, naming it and what arrived, before anything is done', async () => {
+    assert.ok(idCases.length > 0);
+    const { calls, call } = watched();
+    for (const { tool, key } of idCases) {
+      for (const list of [false, true]) {
+        const args: Record<string, unknown> = {};
+        for (const required of tool.inputSchema.required ?? []) args[required] = required === 'channelId' ? 'c1' : 'x';
+        args[key] = list ? [JSON.parse(WRITTEN)] : JSON.parse(WRITTEN);
+        const result = await call(tool.name, args);
+        const which = `${tool.name} ${key}${list ? ' in a list' : ''}`;
+        assert.equal(result.isError, true, `${which}: ${result.text}`);
+        assert.equal(result.text, refusal(key, list ? `[${ARRIVED}]` : ARRIVED), which);
+        assert.deepEqual(calls, [], `${which}: the adapter was called`);
+      }
+    }
+  });
+
+  it('names every id sent as a number, small ones included', async () => {
+    const { calls, call } = watched();
+    const result = await call('delete_message', { channelId: 42, messageId: JSON.parse(WRITTEN) });
+    assert.equal(result.isError, true, result.text);
+    assert.equal(result.text, refusal('channelId and messageId', `42 and ${ARRIVED}`));
+    assert.deepEqual(calls, []);
+  });
+
+  it('refuses a 0 sent as a number, so a cursor or server is never dropped as if it were missing', async () => {
+    const { calls, call } = watched();
+    for (const [name, key, args] of [
+      ['fetch_history', 'before', { channelId: 'c1', before: 0 }],
+      ['fetch_history', 'after', { channelId: 'c1', after: 0 }],
+      ['list_emojis', 'guildId', { guildId: 0 }],
+    ] as const) {
+      const result = await call(name, { ...args });
+      assert.equal(result.isError, true, `${name} ${key}: ${result.text}`);
+      assert.equal(result.text, refusal(key, '0'), `${name} ${key}`);
+    }
+    assert.deepEqual(calls, []);
+  });
+
+  it('refuses a list that holds a number among strings', async () => {
+    const { calls, call } = watched();
+    const result = await call('filters_update', { addGuilds: ['123', JSON.parse(WRITTEN)] });
+    assert.equal(result.isError, true, result.text);
+    assert.equal(result.text, refusal('addGuilds', `["123",${ARRIVED}]`));
+    assert.deepEqual(calls, []);
+  });
+
+  it('leaves a number alone under a name the tool does not take, as before', async () => {
+    const { discord, call } = watched();
+    const result = await call('send_message', { channelId: 'c1', content: 'x', messageId: JSON.parse(WRITTEN) });
+    assert.equal(result.isError ?? false, false, result.text);
+    assert.deepEqual(discord.sentMessages.map((m) => [m.channelId, m.content]), [['c1', 'x']]);
+  });
+
+  it('as a string, the same id reaches Discord exactly as written', async () => {
+    const { discord, call } = watched();
+    const result = await call('delete_message', { channelId: 'c1', messageId: WRITTEN });
+    assert.equal(result.isError ?? false, false, result.text);
+    assert.deepEqual(discord.deletedMessages, [{ channelId: 'c1', messageId: WRITTEN }]);
+  });
+});
+
 describe('U+2028, U+2029 and a reset on the wire', () => {
   const SEPARATED = 'one\u2028two\u2029three';
   const NAMED = 'Bob\u2028Smith\u2029Jr';
@@ -4125,5 +4235,147 @@ describe('U+2028, U+2029 and a reset on the wire', () => {
     const next = await connect();
     const answer = await mcpHandshake(next.conn);
     assert.ok(answer.serverInfo, 'the next client is answered');
+  });
+});
+
+describe('the DMs the watermark file keeps are registered after the first host connects', () => {
+  it('announces each kept DM the DM list admits, in one channels/changed after channels/register', { timeout: 10_000 }, async (t) => {
+    const path = join(tmpdir(), `dm-kept-${process.pid}-${Date.now()}.json`);
+    writeFileSync(path, JSON.stringify({ dmChannels: ['dmkept1'] }));
+    const before = process.env.DISCORD_WATERMARK_FILE;
+    process.env.DISCORD_WATERMARK_FILE = path;
+    t.after(() => {
+      if (before === undefined) delete process.env.DISCORD_WATERMARK_FILE;
+      else process.env.DISCORD_WATERMARK_FILE = before;
+      if (existsSync(path)) unlinkSync(path);
+    });
+    const { client, serverConn, discord } = await createTestPair();
+    const order: string[] = [];
+    Object.assign(discord, {
+      dmUserAdmitted: () => true,
+      lookUpServedChannel: async (guildSegment: string, channelId: string) => {
+        order.push('lookup');
+        return guildSegment === 'dm' && channelId === 'dmkept1' ? { kind: 'dm', recipientId: 'u_kay', recipientName: 'Kay' } : null;
+      },
+      fetchHistory: async () => [],
+    });
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
+    await mcplHandshake(client);
+    for (;;) {
+      const msg = await client.nextMessage();
+      if (msg.type === 'request') {
+        client.sendResponse(msg.request.id, {});
+        if (msg.request.method === method.CHANNELS_REGISTER) order.push('register answered');
+        continue;
+      }
+      if (msg.type !== 'notification' || msg.notification.method !== method.CHANNELS_CHANGED) continue;
+      const added = (msg.notification.params as { added?: Array<{ id: string; label?: string }> }).added ?? [];
+      assert.deepEqual(added.map((d) => [d.id, d.label]), [['discord:dm:dmkept1', 'DM: Kay']]);
+      assert.deepEqual(order, ['register answered', 'lookup'], 'the kept DM is looked up only once the host has answered channels/register');
+      break;
+    }
+  });
+});
+
+describe('a DM the bot posts into first', () => {
+  const POST = '1300000000000000000';
+  const REPLY = '1300000000000000100';
+  const dmFrom = (id: string, authorId: string, authorName: string, channelId: string, text: string): DiscordMessageData => ({
+    id, content: text, cleanContent: text, authorId, authorName, isBot: false, channelId, channelName: null,
+    guildId: null, guildName: null, mentions: [], attachments: [], timestamp: new Date(),
+  } as unknown as DiscordMessageData);
+  const postsDm = (discord: MockDiscordAdapter, channelId: string) => Object.assign(discord, {
+    sendDM: async () => ({ messageId: POST, channelId, recipientId: 'u_bob', recipientName: 'Bob' }),
+    dmUserAdmitted: () => true,
+    lookUpServedChannel: async () => ({ kind: 'dm', recipientId: 'u_bob', recipientName: 'Bob' }),
+  });
+  async function nextPushText(client: McplConnection): Promise<string> {
+    for (;;) {
+      const m = await nextWithin(client);
+      if (m.type !== 'request') continue;
+      const { id, method: name, params } = m.request;
+      if (name === method.CHANNELS_INCOMING) {
+        const messages = (params as ChannelsIncomingParams).messages;
+        client.sendResponse(id, { results: messages.map((x) => ({ messageId: x.messageId, accepted: true })) });
+        return (messages[0].content[0] as { text?: string }).text ?? '';
+      }
+      client.sendResponse(id, name === method.PUSH_EVENT ? { accepted: true } : {});
+      if (name === method.PUSH_EVENT) return ((params as PushEventParams).payload.content[0] as { text?: string }).text ?? '';
+    }
+  }
+
+  it('a reply sent there while the bot was down is caught up at the next start', { timeout: 20_000 }, async (t) => {
+    const path = join(tmpdir(), `dm-posted-first-${process.pid}-${Date.now()}.json`);
+    writeFileSync(path, '{}');
+    const before = process.env.DISCORD_WATERMARK_FILE;
+    process.env.DISCORD_WATERMARK_FILE = path;
+    t.after(() => {
+      if (before === undefined) delete process.env.DISCORD_WATERMARK_FILE;
+      else process.env.DISCORD_WATERMARK_FILE = before;
+      if (existsSync(path)) unlinkSync(path);
+    });
+    const first = new MockDiscordAdapter();
+    postsDm(first, 'dm77');
+    const running = new DiscordMcplServer(first as unknown as DiscordAdapter) as unknown as {
+      handleToolCall(name: string, args: Record<string, unknown>): Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
+    };
+    const sent = await running.handleToolCall('send_dm', { userId: 'u_bob', content: 'hello' });
+    assert.ok(!sent.isError, sent.content[0]?.text);
+
+    const { client, serverConn, discord } = await createTestPair();
+    postsDm(discord, 'dm77');
+    discord.cachedChannelMeta = { dm77: { name: null, guildId: null, guildName: null, isDM: true } } as never;
+    discord.historyToReturn = [
+      { id: REPLY, authorId: 'u_bob', authorName: 'Bob', isBot: false, content: 'got it while you were away', cleanContent: 'got it while you were away', attachments: [], mentionsBot: false, timestamp: new Date(), reactions: [] },
+    ];
+    const restarted = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = restarted.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
+    await mcplHandshake(client);
+    for (;;) {
+      const text = await nextPushText(client);
+      if (text.includes('got it while you were away')) break;
+    }
+  });
+
+  it("the other party's first reply there comes without the first-contact block, while a DM nobody posted into still gets block and backscroll", { timeout: 20_000 }, async (t) => {
+    const { client, serverConn, discord } = await createTestPair();
+    postsDm(discord, 'dm88');
+    const server = new DiscordMcplServer(discord as unknown as DiscordAdapter);
+    const serverPromise = server.serve(serverConn);
+    t.after(async () => {
+      client.close();
+      await serverPromise;
+    });
+    await mcplHandshake(client);
+    const reg = await nextWithin(client);
+    if (reg.type === 'request') client.sendResponse(reg.request.id, {});
+    const sent = await (server as unknown as {
+      handleToolCall(name: string, args: Record<string, unknown>): Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
+    }).handleToolCall('send_dm', { userId: 'u_bob', content: 'hello' });
+    assert.ok(!sent.isError, sent.content[0]?.text);
+    discord.historyToReturn = [
+      { id: '1299999999999999000', authorId: 'u_cy', authorName: 'Cy', isBot: false, content: 'earlier word', cleanContent: 'earlier word', attachments: [], mentionsBot: false, timestamp: new Date(1700000000000), reactions: [] },
+    ];
+    discord.simulateMessage(dmFrom(REPLY, 'u_bob', 'Bob', 'dm88', 'thanks'));
+    const reply = await nextPushText(client);
+    assert.ok(reply.endsWith('Bob: thanks'), reply);
+    assert.ok(!reply.includes('<system>Direct message'), reply);
+    assert.ok(!reply.includes('<backscroll'), reply);
+    discord.simulateDelete('dm88', '1299999999999999000', true, { guildId: null, authorName: 'Cy' });
+    discord.simulateDelete('dm88', REPLY, true, { guildId: null, authorName: 'Bob' });
+    assert.equal(await nextPushText(client), `[message deleted] [DM] ${REPLY} by @Bob — thanks`, 'no backscroll brought the earlier message, so its deletion is withheld');
+    discord.simulateMessage(dmFrom('1300000000000000200', 'u_cy', 'Cy', 'dm99', 'hi there'));
+    const fresh = await nextPushText(client);
+    assert.ok(fresh.includes('<system>Direct message from @Cy'), fresh);
+    assert.ok(fresh.includes('<backscroll dm="true" count="1">'), fresh);
   });
 });
