@@ -92,7 +92,7 @@ async function catchUp(t: TestContext, o: {
 
 const open = (sent: number, more: Partial<ChannelSpec> = {}): ChannelSpec => ({ id: P, name: 'before', open: true, sent, ...more });
 const notOpen = (sent: number, more: Partial<ChannelSpec> = {}): ChannelSpec => ({ id: P, name: 'before', open: false, sent, ...more });
-const block = (text: string) => text.slice(text.indexOf('<missed '));
+const block = (text: string) => text.slice(text.indexOf('<missed ')).replace(/^(<missed [^>\n]*?) received="[^"]*"/, '$1');
 const opening = (text: string) => block(text).split('\n')[0];
 const lines = (text: string) => block(text).split('\n').slice(1, -1).map((line) => line.replace(/^\[.* id=\d+\] /, ''));
 const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `bob: m${from + i}`);
