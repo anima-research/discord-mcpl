@@ -166,6 +166,10 @@ interface ActiveUtterance {
   queuedAt: number;
   clearedAt: number | null;
   holdTimer: ReturnType<typeof setTimeout> | null;
+  /** The delay the hold timer was ARMED with: expire() floors against this,
+   * not cfg.maxHoldMs, which is a by-reference view a caller could mutate
+   * between open() and the timer firing. */
+  holdMs: number | null;
   /** Flattened provider alignment, stream-absolute ms (voice-kit contract). */
   aChars: string[];
   aStartMs: number[];
@@ -237,13 +241,14 @@ export class VoiceOutput {
     const utt: ActiveUtterance = {
       tts: null, ttsDead: false, out, channelId,
       sentText: '', pendingText: '', billedChars: 0,
-      cleared: false, queuedAt: Date.now(), clearedAt: null, holdTimer: null,
+      cleared: false, queuedAt: Date.now(), clearedAt: null, holdTimer: null, holdMs: null,
       aChars: [], aStartMs: [], aDurMs: [], audioMs: 0, done: false,
     };
     if (this.active.size < PRE_OPEN_MAX) this.openProviderStream(utt);
     this.sink.play({ id: inferenceId, stream: out });
     const maxHold = this.cfg.maxHoldMs;
     if (maxHold != null && maxHold > 0) {
+      utt.holdMs = maxHold;
       utt.holdTimer = setTimeout(() => this.expire(inferenceId), maxHold);
       utt.holdTimer.unref?.();
     }
@@ -320,9 +325,14 @@ export class VoiceOutput {
     if (!utt.done) this.skipped.add(inferenceId);
     utt.tts?.abort();
     utt.out.end();
+    // Node's timer wheel runs on the monotonic clock and can fire early as
+    // measured by Date.now(); the floor keeps an expired receipt from claiming
+    // less hold than it expired under. Floor against the delay the timer was
+    // ARMED with (R1-1): cfg is a live reference a caller can mutate.
+    const heldMs = Math.max(utt.holdMs ?? 0, Date.now() - utt.queuedAt);
     this.report({
       inferenceId, channelId: utt.channelId, status: 'expired',
-      playedMs: 0, queuedMs: Date.now() - utt.queuedAt, billedChars: utt.billedChars,
+      playedMs: 0, queuedMs: heldMs, billedChars: utt.billedChars,
       voicedText: '', unvoicedText: utt.sentText, estimated: false,
     });
   }

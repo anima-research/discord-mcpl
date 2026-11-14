@@ -317,6 +317,26 @@ test('an expiry the event loop runs late reports the time the utterance actually
   assert.equal(reports[0]!.queuedMs, 35, 'the measured wait, not the configured hold');
 });
 
+test('an expiry the timer wheel fires early reports the hold it expired under', (t) => {
+  // Mock only setTimeout (the epoch-keyed full mock clock cannot fire a timer
+  // early) and stub Date.now through the test context: the timer fires with
+  // the wall clock 1 ms short and no real time passes (R1-2).
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const provider = new FakeProvider();
+  const sink = new FakeSink();
+  const out = new VoiceOutput({ textChannels: null, maxHoldMs: 20 }, provider, VOICE, sink, () => {});
+  const reports: UtteranceReport[] = [];
+  out.onReport((r) => reports.push(r));
+  let wall = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => wall);
+  out.handleChunk('inf1', 'discord:g:100', 'too late');
+  wall += 19;
+  t.mock.timers.tick(20);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0]!.status, 'expired');
+  assert.equal(reports[0]!.queuedMs, 20, 'the configured hold, not the early-fired measurement');
+});
+
 test('cleared beats expiry: a cleared utterance is never expired', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const provider = new FakeProvider();

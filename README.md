@@ -194,7 +194,7 @@ Voice is off unless `DISCORD_VOICE_CHANNEL_ID` is set, and setting it requires t
 | `ELEVENLABS_API_KEY` | The ElevenLabs API key for speech synthesis. | Required for voice. |
 | `DISCORD_VOICE_TEXT_CHANNELS` | Comma-separated IDs of the text channels whose replies are spoken. | Every channel's replies, DMs included. |
 | `DISCORD_VOICE_VAD_DB` | The loudness, in dBFS, at or above which someone in the voice channel counts as speaking. | -45 |
-| `DISCORD_VOICE_MAX_HOLD_MS` | The longest a reply waits for silence. discord-mcpl drops a reply that waits longer, unspoken, and tells the agent it wasn't heard. | Replies wait as long as it takes. |
+| `DISCORD_VOICE_MAX_HOLD_MS` | The longest a reply waits for silence. discord-mcpl drops a reply that waits longer, unspoken, and tells the agent it wasn't heard. Whole milliseconds, 1 to 2147483647 (Node's timer ceiling); larger values are clamped. | Replies wait as long as it takes. |
 
 The smallest registry names one voice:
 
