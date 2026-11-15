@@ -320,7 +320,7 @@ test('an expiry the event loop runs late reports the time the utterance actually
 test('an expiry the timer wheel fires early reports the hold it expired under', (t) => {
   // Mock only setTimeout (the epoch-keyed full mock clock cannot fire a timer
   // early) and stub Date.now through the test context: the timer fires with
-  // the wall clock 1 ms short and no real time passes (R1-2).
+  // the wall clock 1 ms short and no real time passes.
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const provider = new FakeProvider();
   const sink = new FakeSink();
