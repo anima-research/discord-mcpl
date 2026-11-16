@@ -177,7 +177,7 @@ function errorText(err: unknown): string {
 }
 
 function unstickOutcomeLine(answer: unknown): string | undefined {
-  if (!isJsonObject(answer)) return undefined;
+  if (!isJsonObject(answer) || answer.ok !== true) return undefined;
   const cause = isJsonObject(answer.cause) ? answer.cause : undefined;
   if (answer.outcome === 'gave-up' && typeof cause?.category === 'string' && cause.category !== '') {
     return `The provider refused each rerun. Category: \`${cause.category}\`.`;
@@ -1354,11 +1354,11 @@ export class DiscordMcplServer {
         await interaction.editReply(`⚠️ Unstick failed: ${result?.error ?? 'unknown error'}`);
         return;
       }
+      if (result.outcome === true && typeof result.agentName === 'string' && result.agentName !== '') outcomeOf = result.agentName;
       await interaction.editReply(
         `🔧 Unsticking the agent — rewinding blocked turn(s) and re-running ` +
           `(up to **${result.cap ?? max ?? 3}**). I'll post the result here.`,
       );
-      if (result.outcome === true && typeof result.agentName === 'string' && result.agentName !== '') outcomeOf = result.agentName;
     } catch (err) {
       dbg('slash:unstick-failed', { error: (err as Error).message });
       await interaction.editReply(`⚠️ Unstick failed: ${(err as Error).message}`);
