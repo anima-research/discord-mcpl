@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.8.0 — 2026-11-16
+
 ### Added
 
 - **`/unstick` tells the person who ran it how the unstick went, in a
