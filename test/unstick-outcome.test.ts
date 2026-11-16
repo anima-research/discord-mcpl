@@ -31,8 +31,9 @@ function host(ack: unknown, ...answers: unknown[]) {
   return { conn, sent, outcomeRequests: () => sent.filter((s) => s.params.command === 'unstick-outcome') };
 }
 
-function interaction(opts: { createdAgoMs?: number; refuseFollowUp?: boolean } = {}) {
-  const out: { edits: string[]; followUps: Array<{ content: string; flags?: unknown }> } = { edits: [], followUps: [] };
+function interaction(opts: { createdAgoMs?: number; refuseFollowUp?: boolean; refuseFirstEdit?: boolean } = {}) {
+  const out: { edits: string[]; followUps: Array<{ content: string; flags?: unknown }>; followUpAttempts: number } = { edits: [], followUps: [], followUpAttempts: 0 };
+  let refuseEdit = opts.refuseFirstEdit ?? false;
   return {
     out,
     value: {
@@ -42,9 +43,16 @@ function interaction(opts: { createdAgoMs?: number; refuseFollowUp?: boolean } =
       channelId: 'c1',
       options: { getInteger: () => null, getString: () => null },
       deferReply: async () => {},
-      editReply: async (o: string) => { out.edits.push(o); },
+      editReply: async (o: string) => {
+        if (refuseEdit) {
+          refuseEdit = false;
+          throw new Error('Service Unavailable');
+        }
+        out.edits.push(o);
+      },
       reply: async () => {},
       followUp: async (o: { content: string; flags?: unknown }) => {
+        out.followUpAttempts++;
         if (opts.refuseFollowUp) throw new Error('Unknown interaction');
         out.followUps.push(o);
       },
@@ -72,14 +80,15 @@ const ACK = { ok: true, started: true, cap: 3, outcome: true, agentName: 'reside
 const EPHEMERAL = 64;
 
 describe('/unstick outcome to the person who ran it', () => {
-  it('asks for the outcome of the agent that the acknowledgement names, within the token', async () => {
+  it('asks for the outcome of the agent that the acknowledgement names, within the token', async (ctx) => {
+    ctx.mock.timers.enable({ apis: ['Date'], now: Date.parse('2030-07-01T12:00:00.000Z') });
     const h = host(ACK, () => ({ ok: true, outcome: 'cleared', rewinds: 1 }));
     const i = interaction({ createdAgoMs: 60_000 });
     await run(h.conn, i);
     const asks = h.outcomeRequests();
     assert.equal(asks.length, 1);
     assert.deepEqual(asks[0].params, { command: 'unstick-outcome', agentName: 'resident-a' });
-    assert.ok(asks[0].timeout! <= TOKEN_MS - 60_000 && asks[0].timeout! > TOKEN_MS - 70_000, `timeout ${asks[0].timeout}`);
+    assert.equal(asks[0].timeout, TOKEN_MS - 60_000);
     assert.match(i.out.edits[0], /I'll post the result here\./);
     assert.deepEqual(i.out.followUps, []);
   });
@@ -121,6 +130,7 @@ describe('/unstick outcome to the person who ran it', () => {
   it('sends nothing for no outcome, or for an answer that names no known end or cause', async () => {
     for (const answer of [
       { ok: false, error: 'no unstick outcome for resident-a' },
+      { ok: false, outcome: 'turn-failed', rewinds: 1, cause: { kind: 'failure', type: 'api_error', status: 503 } },
       { ok: true, outcome: 'gave-up', rewinds: 3 },
       { ok: true, outcome: 'gave-up', rewinds: 3, cause: { kind: 'refusal' } },
       { ok: true, outcome: 'gave-up', rewinds: 3, cause: { kind: 'refusal', category: '' } },
@@ -152,6 +162,7 @@ describe('/unstick outcome to the person who ran it', () => {
       const i2 = interaction({ refuseFollowUp: true });
       await run(refused.conn, i2);
       assert.equal(refused.outcomeRequests().length, 1);
+      assert.equal(i2.out.followUpAttempts, 1);
       assert.equal(i2.out.edits.length, 1);
       await new Promise((r) => setTimeout(r, 20));
       assert.deepEqual(unhandled, []);
@@ -160,8 +171,13 @@ describe('/unstick outcome to the person who ran it', () => {
     }
   });
 
-  it('asks again after a failed turn, and sends a line only when it differs from the last one sent', async () => {
-    const failed = (type: string, status: number) => ({ ok: true, outcome: 'turn-failed', rewinds: 1, cause: { kind: 'failure', type, status } });
+  it('asks again after a failed turn, and sends a line only when it differs from the last one sent', async (ctx) => {
+    const t0 = Date.parse('2030-07-01T12:00:00.000Z');
+    ctx.mock.timers.enable({ apis: ['Date'], now: t0 });
+    const failed = (type: string, status: number) => () => {
+      ctx.mock.timers.setTime(Date.now() + 60_000);
+      return { ok: true, outcome: 'turn-failed', rewinds: 1, cause: { kind: 'failure', type, status } };
+    };
     const h = host(ACK, failed('overloaded_error', 529), failed('overloaded_error', 529), failed('api_error', 503),
       { ok: true, outcome: 'gave-up', rewinds: 3, cause: { kind: 'refusal', category: 'cyber' } });
     const i = interaction();
@@ -169,7 +185,7 @@ describe('/unstick outcome to the person who ran it', () => {
     const asks = h.outcomeRequests();
     assert.equal(asks.length, 4);
     for (const ask of asks) assert.deepEqual(ask.params, { command: 'unstick-outcome', agentName: 'resident-a' });
-    for (let n = 1; n < asks.length; n++) assert.ok(asks[n].timeout! <= asks[n - 1].timeout!, `timeout ${n}`);
+    assert.deepEqual(asks.map((a) => a.timeout), [0, 1, 2, 3].map((n) => TOKEN_MS - 1_000 - n * 60_000));
     const goesOn = ' The unstick stays in force: the agent\'s next turn continues it, and its result comes in the channel.';
     assert.deepEqual(i.out.followUps.map((f) => f.content), [
       `The rerun's turn failed. Type: \`overloaded_error\`, HTTP 529.${goesOn}`,
@@ -186,8 +202,18 @@ describe('/unstick outcome to the person who ran it', () => {
     assert.equal(h.outcomeRequests().length, 1);
     assert.equal(i.out.followUps.length, 1);
     const refused = host(ACK, failed, failed);
-    await run(refused.conn, interaction({ refuseFollowUp: true }));
+    const refusedInteraction = interaction({ refuseFollowUp: true });
+    await run(refused.conn, refusedInteraction);
     assert.equal(refused.outcomeRequests().length, 1);
+    assert.equal(refusedInteraction.out.followUpAttempts, 1);
+  });
+
+  it('asks for the outcome even when the edit that acknowledges the unstick fails', async () => {
+    const h = host(ACK, { ok: true, outcome: 'gave-up', rewinds: 3, cause: { kind: 'refusal', category: 'cyber' } });
+    const i = interaction({ refuseFirstEdit: true });
+    await run(h.conn, i);
+    assert.equal(h.outcomeRequests().length, 1);
+    assert.deepEqual(i.out.followUps, [{ content: 'The provider refused each rerun. Category: `cyber`.', flags: EPHEMERAL }]);
   });
 
   it('writes no category, type or status to the debug log', async () => {
