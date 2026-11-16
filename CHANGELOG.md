@@ -5,6 +5,25 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Added
+
+- **`/unstick` tells the person who ran it how the unstick went, in a
+  reply that only they see.** When a host's acknowledgement of `unstick`
+  says it can (`outcome: true`, with the agent's name), discord-mcpl asks
+  that host how the unstick went, and waits for the answer as long as the
+  interaction's token lasts, 15 minutes from the command. A give-up gives
+  the refusal's category ("The provider refused each rerun. Category:
+  `…`."). A rerun's turn that failed gives its type and HTTP status where
+  the host has them, and says that the unstick stays in force and that its
+  result comes in the channel. discord-mcpl then asks again while the
+  token lasts, so a later give-up's category reaches the person too; a
+  failure with the same type and status as the last one sent isn't sent
+  again. An unstick that the agent's end or the host's stop cut short says
+  so. A cleared one gets no second reply: the host's report in the channel
+  says it. Discord shows the reply to that person alone, and
+  discord-mcpl's debug log doesn't hold the category, the type or the
+  status. With a host that doesn't say it can, `/unstick` works as before.
+
 ## 0.7.1 — 2026-11-10
 
 ### Changed

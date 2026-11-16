@@ -176,6 +176,25 @@ function errorText(err: unknown): string {
   }
 }
 
+function unstickOutcomeLine(answer: unknown): string | undefined {
+  if (!isJsonObject(answer) || answer.ok !== true) return undefined;
+  const cause = isJsonObject(answer.cause) ? answer.cause : undefined;
+  if (answer.outcome === 'gave-up' && typeof cause?.category === 'string' && cause.category !== '') {
+    return `The provider refused each rerun. Category: \`${cause.category}\`.`;
+  }
+  if (answer.outcome === 'turn-failed') {
+    const type = typeof cause?.type === 'string' && cause.type !== '' ? cause.type : undefined;
+    const status = Number.isInteger(cause?.status) ? cause?.status : undefined;
+    const labels = type !== undefined
+      ? ` Type: \`${type}\`${status !== undefined ? `, HTTP ${status}` : ''}.`
+      : status !== undefined ? ` HTTP ${status}.` : '';
+    return `The rerun's turn failed.${labels} The unstick stays in force: the agent's next turn continues it, and its result comes in the channel.`;
+  }
+  if (answer.outcome === 'agent-ended') return 'The agent ended before the unstick did.';
+  if (answer.outcome === 'host-stopped') return 'The host stopped before the unstick ended.';
+  return undefined;
+}
+
 function lastVisibleLines(lastVisible: unknown, ifAbsent?: string): string[] {
   if (!isJsonObject(lastVisible)) return ifAbsent ? [ifAbsent] : [];
   const text = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined);
@@ -509,6 +528,8 @@ const IMAGE_FETCH_CEILING = 25 * 1024 * 1024;
 
 const MAX_TEXT_BYTES = 256 * 1024;
 const FETCH_TIMEOUT_MS = 15_000;
+// https://discord.com/developers/docs/interactions/receiving-and-responding#followup-messages: "Interaction tokens are valid for 15 minutes".
+const INTERACTION_TOKEN_MS = 15 * 60_000;
 const DEFAULT_ATTACHMENT_INLINE_MAX_BYTES = 5120;
 
 interface NormalizedImage {
@@ -1301,7 +1322,7 @@ export class DiscordMcplServer {
   }
 
   /**
-   * The host only acknowledges /unstick here, and posts the outcome to this
+   * The host acknowledges /unstick here, and posts the outcome to this
    * channel when the chain resolves.
    */
   private async handleUnstickCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1315,6 +1336,7 @@ export class DiscordMcplServer {
     dbg('slash:unstick', { max, userId: interaction.user.id, channelId: interaction.channelId });
     await interaction.deferReply();
 
+    let outcomeOf: string | undefined;
     try {
       const result = (await conn.sendRequest(
         'host/command',
@@ -1326,12 +1348,13 @@ export class DiscordMcplServer {
           requesterName: interaction.user.username,
         },
         30000,
-      )) as { ok?: boolean; error?: string; started?: boolean; cap?: number };
+      )) as { ok?: boolean; error?: string; started?: boolean; cap?: number; outcome?: boolean; agentName?: string };
 
       if (!result?.ok) {
         await interaction.editReply(`⚠️ Unstick failed: ${result?.error ?? 'unknown error'}`);
         return;
       }
+      if (result.outcome === true && typeof result.agentName === 'string' && result.agentName !== '') outcomeOf = result.agentName;
       await interaction.editReply(
         `🔧 Unsticking the agent — rewinding blocked turn(s) and re-running ` +
           `(up to **${result.cap ?? max ?? 3}**). I'll post the result here.`,
@@ -1339,6 +1362,34 @@ export class DiscordMcplServer {
     } catch (err) {
       dbg('slash:unstick-failed', { error: (err as Error).message });
       await interaction.editReply(`⚠️ Unstick failed: ${(err as Error).message}`);
+    }
+    if (outcomeOf !== undefined) await this.tellUnstickOutcome(interaction, conn, outcomeOf);
+  }
+
+  private async tellUnstickOutcome(interaction: ChatInputCommandInteraction, conn: McplConnection, agentName: string): Promise<void> {
+    let lastSent: string | undefined;
+    for (;;) {
+      const left = interaction.createdTimestamp + INTERACTION_TOKEN_MS - Date.now();
+      if (!(left > 0)) return;
+      let answer: unknown;
+      try {
+        answer = await conn.sendRequest('host/command', { command: 'unstick-outcome', agentName }, left);
+      } catch (err) {
+        dbg('slash:unstick-outcome-failed', { error: errorText(err) });
+        return;
+      }
+      const line = unstickOutcomeLine(answer);
+      if (line === undefined) return;
+      if (line !== lastSent) {
+        try {
+          await interaction.followUp({ content: line, flags: MessageFlags.Ephemeral });
+        } catch (err) {
+          dbg('slash:unstick-outcome-unsent', { error: errorText(err) });
+          return;
+        }
+        lastSent = line;
+      }
+      if (!isJsonObject(answer) || answer.outcome !== 'turn-failed') return;
     }
   }
 
