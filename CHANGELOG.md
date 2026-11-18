@@ -5,6 +5,21 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Changed
+
+- **A sender whose DM the DM list refuses is now told so by default.**
+  The delivery notice that `filters_update`'s `setDmNotice` controls
+  starts on in a new notice state. At the first start after an update,
+  a notice state with notices off and no sender in it is the old
+  default, so discord-mcpl turns notices on from that moment, and a DM
+  refused before the update gets no notice. A state that holds a sender
+  had notices on at some time, so its off is the agent's choice, and it
+  stays off. An agent that turned notices on and then off, with no
+  refused DM between, left no sender, so the update turns them on
+  again. The state file now records that the agent set the notice, so
+  `setDmNotice: false` holds through later starts. The file keeps its
+  version, so an older release reads it as before.
+
 ## 0.8.0 — 2026-11-16
 
 ### Added
