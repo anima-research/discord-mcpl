@@ -128,7 +128,7 @@ A server's channel list applies only when `guildIds` lists the server too.
 
 The list of servers decides which servers' channels discord-mcpl registers and delivers messages from. A server's channel list also limits what the agent can read there: `list_channels` leaves out a channel outside it, `list_channel_members`, `fetch_history`, `fetch_around` and a host's open with backscroll refuse one, and a channel name resolves only to a channel inside it. `latestFrom`, which `reply_message`, `add_reaction` and `remove_reaction` take in place of a message ID, picks only messages in channels and DMs the filters admit. A send to a channel given by its numeric ID isn't filtered.
 
-When the DM list refuses a DM, the agent can have the sender told so, by calling `filters_update` with `setDmNotice: true`. Notices are off by default. They go to each sender at most once per 24 hours, and to all senders together at most 10 times an hour.
+When the DM list refuses a DM, discord-mcpl sends the sender a notice that it didn't forward the DM, unless the DM was sent before notices were on. Notices go to each sender at most once per 24 hours, and to all senders together at most 10 times an hour. They are on by default, and the agent turns them off by calling `filters_update` with `setDmNotice: false`. An agent that turned them off before they were on by default sets it again after the update.
 
 ### Stored state
 
@@ -140,7 +140,7 @@ These files let state outlive a restart. State whose file has no path stays in m
 | `DISCORD_SUBSCRIPTIONS_FILE` | Legacy. A JSON array of channel IDs that discord-mcpl delivers messages from as soon as it starts, registering them as initially open, except a channel the agent has muted. It reads the file once and never writes it. The file's path also sets the default paths of the next two files. | No channels. |
 | `DISCORD_MUTED_CHANNELS_FILE` | The channels muted with `mute_channel`. | Beside the subscriptions file (`subs.json` gives `subs.muted.json`), or in memory if that's unset too. |
 | `DISCORD_REACTION_CHANNELS_FILE` | The channels where reaction visibility is on, as of its last save. `set_reaction_visibility`, `mute_channel` and closing a channel save it; opening a channel doesn't. | Beside the subscriptions file (`subs.json` gives `subs.reactions.json`), or in memory if that's unset too. |
-| `DISCORD_DM_NOTICES_FILE` | Whether DM notices are on, and each sender's notice limits, with no message text. Notices stop while the file can't be read or written. | `$XDG_STATE_HOME/discord-mcpl/<bot user ID>/dm-notices.json`, with `~/.local/state` in place of `$XDG_STATE_HOME` when that's unset. |
+| `DISCORD_DM_NOTICES_FILE` | Whether DM notices are on and whether the agent set that, and each sender's notice limits, with no message text. Notices stop while the file can't be read or written. A missing file is a new state, in which notices start on, so `setDmNotice: false` holds only where the file persists. | `$XDG_STATE_HOME/discord-mcpl/<bot user ID>/dm-notices.json`, with `~/.local/state` in place of `$XDG_STATE_HOME` when that's unset. |
 
 ### History and attachments
 

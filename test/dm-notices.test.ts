@@ -1,8 +1,8 @@
 import { describe, it, type TestContext } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   DM_NOTICE_CEILING_WINDOW_MS,
@@ -42,6 +42,29 @@ function fixture(t: TestContext, start = T0) {
 
 /** A message id Discord could assign at `ms` (plus a small increment). */
 const idAt = (ms: number, n = 0) => (BigInt(snowflakeAt(ms)) + BigInt(n)).toString();
+
+function readAs080(raw: unknown): { enabled: boolean } | null {
+  const SNOWFLAKE_RE = /^\d{1,20}$/;
+  const OUTCOMES = new Set<string>(['pending', 'sent', 'failed', 'unknown']);
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (r.version !== 1 || typeof r.floorId !== 'string' || !SNOWFLAKE_RE.test(r.floorId)) return null;
+  if (typeof r.enabled !== 'boolean') return null;
+  if (typeof r.senders !== 'object' || r.senders === null || Array.isArray(r.senders)) return null;
+  for (const v of Object.values(r.senders as Record<string, unknown>)) {
+    if (typeof v !== 'object' || v === null) return null;
+    const s = v as Record<string, unknown>;
+    if (typeof s.lastHandledId !== 'string' || !SNOWFLAKE_RE.test(s.lastHandledId)) return null;
+    if (s.lastNotice !== undefined) {
+      const n = s.lastNotice as Record<string, unknown> | null;
+      if (typeof n !== 'object' || n === null) return null;
+      if (typeof n.messageId !== 'string' || !SNOWFLAKE_RE.test(n.messageId)) return null;
+      if (typeof n.at !== 'number' || Number.isNaN(new Date(n.at).getTime())) return null;
+      if (typeof n.outcome !== 'string' || !OUTCOMES.has(n.outcome)) return null;
+    }
+  }
+  return { enabled: r.enabled };
+}
 
 describe('DM notice state', () => {
   it('notifies once per sender per day, and the reservation is on disk before the send', async (t) => {
@@ -137,6 +160,7 @@ describe('DM notice state', () => {
     const f = fixture(t);
     const state = f.make();
     await state.open(f.path);
+    await state.setEnabled(false);
     assert.equal(f.onDisk().floorId, snowflakeAt(T0), "a new state's floor is its creation");
     f.clock.set(T0 + HOUR);
     const reopened = f.make();
@@ -155,6 +179,7 @@ describe('DM notice state', () => {
     const f = fixture(t);
     const state = f.make();
     await state.open(f.path);
+    await state.setEnabled(false);
     const before = readFileSync(f.path, 'utf-8');
     const m1 = idAt(T0 + 1000);
     f.clock.set(T0 + 1000);
@@ -194,19 +219,15 @@ describe('DM notice state', () => {
     assert.equal(await state.decide(idAt(T0 + 1000), 'old-friend'), 'before-floor');
   });
 
-  it('is off until the resident turns it on, so a new state notifies no one', async (t) => {
+  it('is on from the start, so a new state tells a sender refused after it, and no one refused before it', async (t) => {
     const f = fixture(t);
     const state = f.make();
     await state.open(f.path);
-    assert.deepEqual([state.status().enabled, state.status().persisted], [false, true], 'off by default, and durable');
-    assert.equal(f.onDisk().enabled, false);
+    assert.deepEqual([state.status().enabled, state.status().persisted], [true, true], 'on by default, and durable');
+    assert.equal(f.onDisk().enabled, true);
+    assert.equal(await state.decide(idAt(T0 - 1000), 'earlier'), 'before-floor');
     f.clock.set(T0 + 1000);
-    assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'silenced');
-    f.clock.set(T0 + 1500);
-    assert.equal(await state.setEnabled(true), null);
-    assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'before-floor', 'a message refused while off stays unnotified');
-    f.clock.set(T0 + 2000);
-    assert.equal(await state.decide(idAt(T0 + 2000), 'stranger'), 'notify');
+    assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'notify');
   });
 
   it('keeps the resident\'s setting across a restart, in the same file', async (t) => {
@@ -280,10 +301,8 @@ describe('DM notice state', () => {
 
     rmSync(f.path);
     f.clock.set(T0 + HOUR);
-    assert.equal(await broken.decide(idAt(T0 + HOUR, 1), 'stranger'), 'silenced', 'a new file starts with notices off');
+    assert.equal(await broken.decide(idAt(T0 + HOUR, 1), 'stranger'), 'notify', 'a new file starts with notices on');
     assert.equal(broken.status().persisted, true);
-    await broken.setEnabled(true);
-    assert.equal(await broken.decide(idAt(T0 + HOUR, 2), 'stranger'), 'notify');
   });
 
   it('suspends notices when the reservation cannot be written', async (t) => {
@@ -407,7 +426,7 @@ describe('DM notice state', () => {
     assert.equal(state.status().error, 'opening');
     release();
     await opened;
-    assert.deepEqual(state.status(), { path: f.path, persisted: true, enabled: false });
+    assert.deepEqual(state.status(), { path: f.path, persisted: true, enabled: true });
   });
 
   describe('when the directory flush fails after the file was replaced, the state is what the file holds', () => {
@@ -487,6 +506,55 @@ describe('DM notice state', () => {
     await viaSetting.setEnabled(false);
     assert.deepEqual(f.interrupted, [{ authorId: 'stranger', messageId: idAt(T0 + 1000), at: T0 }]);
     assert.equal(f.onDisk().enabled, false);
+  });
+
+  it('writes a file that 0.8.0 reads with the same setting, so a step back keeps it', async (t) => {
+    const f = fixture(t);
+    const state = f.make();
+    await state.open(f.path);
+    assert.equal(readAs080(f.onDisk())?.enabled, true);
+    await state.setEnabled(false);
+    assert.equal(readAs080(f.onDisk())?.enabled, false);
+    await state.setEnabled(true);
+    assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'notify');
+    assert.equal(readAs080(f.onDisk())?.enabled, true, 'with a sender in it too');
+  });
+
+  it('turns a state saved by 0.8.0 on only once it can save it, and tells no one refused before that', async (t) => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return t.skip('needs POSIX permissions as non-root');
+    const f = fixture(t);
+    const stateDir = dirname(f.path);
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    const savedBy080 = JSON.stringify({ version: 1, floorId: snowflakeAt(T0 - HOUR), enabled: false, senders: {} });
+    writeFileSync(f.path, savedBy080);
+    const state = f.make();
+    chmodSync(stateDir, 0o500);
+    try {
+      await state.open(f.path);
+      assert.equal(state.status().persisted, false);
+      assert.equal(await state.decide(idAt(T0 + 1000), 'stranger'), 'suspended');
+      assert.equal(readFileSync(f.path, 'utf-8'), savedBy080, 'the file is left as it was');
+    } finally {
+      chmodSync(stateDir, 0o700);
+    }
+    f.clock.set(T0 + HOUR);
+    assert.equal(await state.decide(idAt(T0 + 2000), 'other'), 'before-floor', 'refused before the state was saved');
+    assert.equal(await state.decide(idAt(T0 + HOUR, 1), 'stranger'), 'notify');
+  });
+
+  it('settles an interrupted reservation in a state saved by 0.8.0 as it turns notices on', async (t) => {
+    const f = fixture(t);
+    mkdirSync(dirname(f.path), { recursive: true, mode: 0o700 });
+    const reserved = idAt(T0 - HOUR);
+    writeFileSync(f.path, JSON.stringify({
+      version: 1, floorId: snowflakeAt(T0 - 2 * HOUR), enabled: false,
+      senders: { stranger: { lastHandledId: reserved, lastNotice: { messageId: reserved, at: T0 - HOUR, outcome: 'pending' } } },
+    }));
+    const state = f.make();
+    await state.open(f.path);
+    assert.equal(state.status().enabled, true);
+    assert.deepEqual(f.interrupted, [{ authorId: 'stranger', messageId: reserved, at: T0 - HOUR }], 'reported once');
+    assert.deepEqual([f.onDisk().enabled, f.onDisk().senders.stranger.lastNotice.outcome], [true, 'unknown']);
   });
 
   it('resolves its default path per bot under XDG state, with an explicit override', () => {

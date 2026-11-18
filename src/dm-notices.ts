@@ -66,6 +66,7 @@ interface NoticeFile {
   version: 1;
   floorId: string;
   enabled: boolean;
+  chosen?: true;
   senders: Record<string, SenderState>;
 }
 
@@ -108,8 +109,11 @@ function parseNoticeFile(raw: unknown): NoticeFile | null {
     }
     senders[id] = { lastHandledId: s.lastHandledId, ...(lastNotice ? { lastNotice } : {}) };
   }
-  return { version: 1, floorId: r.floorId, enabled: r.enabled, senders };
+  return { version: 1, floorId: r.floorId, enabled: r.enabled, ...(r.chosen === true ? { chosen: true as const } : {}), senders };
 }
+
+const turnedOn = (file: NoticeFile, now: number): NoticeFile =>
+  file.enabled ? file : { ...file, enabled: true, floorId: laterSnowflake(file.floorId, snowflakeAt(now)) };
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -164,7 +168,7 @@ export class DmNoticeState {
       }
     }
     if (text === null) {
-      await this.commit({ version: 1, floorId: snowflakeAt(this.now()), enabled: false, senders: {} });
+      await this.commit({ version: 1, floorId: snowflakeAt(this.now()), enabled: true, senders: {} });
       return;
     }
     let parsed: NoticeFile | null = null;
@@ -176,17 +180,19 @@ export class DmNoticeState {
       this.error = `${path} is not a valid DM notice state file`;
       return;
     }
-    const pending = Object.entries(parsed.senders).filter(([, v]) => v.lastNotice?.outcome === 'pending');
-    if (!pending.length) {
-      this.file = parsed;
+    const update = !parsed.enabled && !parsed.chosen;
+    const opened = update ? turnedOn(parsed, this.now()) : parsed;
+    const pending = Object.entries(opened.senders).filter(([, v]) => v.lastNotice?.outcome === 'pending');
+    if (!update && !pending.length) {
+      this.file = opened;
       this.error = null;
       return;
     }
-    const senders = { ...parsed.senders };
+    const senders = { ...opened.senders };
     for (const [authorId, v] of pending) {
       senders[authorId] = { ...v, lastNotice: { ...v.lastNotice!, outcome: 'unknown' } };
     }
-    await this.commit({ ...parsed, senders });
+    await this.commit({ ...opened, senders });
     if (!this.file) return;
     for (const [authorId, v] of pending) {
       this.onInterrupted({ authorId, messageId: v.lastNotice!.messageId, at: v.lastNotice!.at });
@@ -227,10 +233,7 @@ export class DmNoticeState {
     return this.serially(async () => {
       if (!this.file && this.path) await this.load(this.path);
       if (!this.file) throw new Error(`DM notice state is unavailable: ${this.error ?? 'no path'}`);
-      const floorId = enabled && !this.file.enabled
-        ? laterSnowflake(this.file.floorId, snowflakeAt(this.now()))
-        : this.file.floorId;
-      const next: NoticeFile = { ...this.file, enabled, floorId };
+      const next: NoticeFile = { ...(enabled ? turnedOn(this.file, this.now()) : { ...this.file, enabled }), chosen: true };
       const error = await this.commit(next);
       if (error && this.file !== next) throw new Error(`could not save the DM notice setting: ${error}`);
       return error;

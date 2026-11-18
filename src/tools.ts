@@ -218,7 +218,7 @@ export const toolDefinitions: ToolDefinition[] = [
       'Show the active event filters: which guilds/channels can deliver events to you ' +
       '(guild whitelist, optional per-guild channel whitelist) and which users may DM you. ' +
       'null means unrestricted. dmNotice says whether senders of refused DMs get an automatic ' +
-      'delivery notice (off until you turn it on), and whether its state is `persisted` (notices are ' +
+      'delivery notice (on unless you turn it off), and whether its state is `persisted` (notices are ' +
       'suspended while it is not). Filters gate delivery, and the per-guild channel list also ' +
       'bounds list_channels, list_channel_members, fetch_history and fetch_around, which refuse ' +
       'a channel outside it. The bot must also be a ' +
@@ -278,10 +278,10 @@ export const toolDefinitions: ToolDefinition[] = [
           description:
             'Whether a sender whose DM the whitelist refuses gets an automatic delivery notice from this ' +
             'connection (at most once per 24 hours per sender, and at most 10 an hour across all senders; ' +
-            'it never quotes or forwards their message). Off by default, so refused DMs are dropped without ' +
-            'any notice until you set it true. Setting it false stops every notice not yet reserved; one already ' +
-            'being sent still goes out. Saved with the notice state, so it ' +
-            'works and survives restarts even when DISCORD_FILTERS_FILE is not configured. Omit to leave it unchanged.',
+            'it never quotes or forwards their message). On by default. Setting it false stops every notice ' +
+            'not yet reserved; one already being sent still goes out. Saved with the notice state, so it ' +
+            'works even when DISCORD_FILTERS_FILE is not configured, and survives restarts while the notice ' +
+            'state\'s file persists: a missing file starts a new state, with notices on. Omit to leave it unchanged.',
         },
       },
     },
