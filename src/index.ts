@@ -2,7 +2,7 @@
 
 import * as net from 'node:net';
 import { McplConnection } from '@animalabs/mcpl-core';
-import { DiscordAdapter } from './discord-adapter.js';
+import { DiscordAdapter, refusal } from './discord-adapter.js';
 import { DiscordMcplServer, serveStdio, serveTcp } from './server.js';
 import {
   resolveStartupFilters,
@@ -38,15 +38,9 @@ async function main(): Promise<void> {
     dmUsers: filters.dmUsers,
   });
 
-  const discordReady = new Promise<void>((resolve) => {
-    discord.onReady(() => {
-      console.error(`[discord-mcpl] Discord connected as bot ${discord.botUserId}`);
-      resolve();
-    });
+  discord.onReady(() => {
+    console.error(`[discord-mcpl] Discord connected as bot ${discord.botUserId}`);
   });
-
-  await discord.connect();
-  await discordReady;
 
   // Built before the server, so the initialize handshake can declare
   // channels.streaming. ./voice.js is imported only after the env check, inside
@@ -56,16 +50,38 @@ async function main(): Promise<void> {
   let voice = null as import('./voice.js').VoiceOutput | null;
   const vEnv = voiceEnv();
   if (vEnv) {
+    // Voice is built from the ready client, before the handshake, so a voice
+    // box connects first, and a failed login ends the process.
+    await discord.connect().catch((err) => {
+      throw new Error(
+        refusal(err) ??
+          `Discord login failed (${(err as Error).message}): with voice configured, discord-mcpl needs Discord to start`,
+      );
+    });
     try {
       const { createVoiceOutput } = await import('./voice.js');
       voice = await createVoiceOutput(vEnv, discord.rawClient);
     } catch (err) {
       console.error('[discord-mcpl] voice setup failed:', (err as Error).message, '— continuing text-only');
     }
+  } else {
+    // The host's handshake is answered at once, while Discord connects in the
+    // background, retrying while it can't be reached. A refusal no retry would
+    // change ends the process, before or after the handshake is answered.
+    discord.connectWithRetry().catch((err) => {
+      console.error('[discord-mcpl] Fatal error:', (err as Error).message);
+      process.exit(1);
+    });
   }
 
   const server = new DiscordMcplServer(discord, voice);
-  await server.setupDmRefusals();
+  // A notice file DISCORD_DM_NOTICES_FILE names opens before the host is
+  // served. One named by the bot's id waits for Discord's READY, which gives
+  // the id.
+  if (process.env.DISCORD_DM_NOTICES_FILE?.trim()) await server.openDmNotices();
+  void discord.whenReady().then(() => server.setupDmRefusals()).catch((err) => {
+    console.error('[discord-mcpl] DM refusal setup failed:', (err as Error).message);
+  });
 
   if (filtersFileBroken) {
     server.filtersState.markBroken('invalid');
@@ -106,12 +122,14 @@ async function main(): Promise<void> {
   }
 
   // Command registration needs the applications.commands scope; a failure shouldn't take down the surface.
-  try {
-    await server.setupSlashCommands();
-    console.error('[discord-mcpl] Slash commands registered');
-  } catch (err) {
-    console.error('[discord-mcpl] Slash command setup failed:', (err as Error).message);
-  }
+  void discord.whenReady().then(async () => {
+    try {
+      await server.setupSlashCommands();
+      console.error('[discord-mcpl] Slash commands registered');
+    } catch (err) {
+      console.error('[discord-mcpl] Slash command setup failed:', (err as Error).message);
+    }
+  });
 
   if (useStdio) {
     // Log to stderr: stdout is the protocol channel.
