@@ -649,13 +649,12 @@ describe('notices start on', () => {
     assert.deepEqual(h.notices, [{ channelId: 'dm-stranger', content: DM_NOTICE_TEXT }], 'a DM refused after it is told');
   });
 
-  it('keeps notices off at an update when the state holds a sender, since the resident turned them off', async (t) => {
+  it('turns notices on at an update even when the state remembers a sender', async (t) => {
     const noticesPath = savedBy080(t, { 'earlier-sender': { lastHandledId: snowflakeAt(Date.now() - HOUR) } });
     const h = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' });
     h.emit('stranger');
     await h.settle();
-    assert.deepEqual(h.notices, []);
-    assert.ok(h.logs.some((l) => /sender stranger.*notice silenced/.test(l)), h.logs.join('\n'));
+    assert.deepEqual(h.notices, [{ channelId: 'dm-stranger', content: DM_NOTICE_TEXT }]);
   });
 
   it('keeps notices off through restarts once the resident turns them off', async (t) => {
@@ -669,16 +668,6 @@ describe('notices start on', () => {
       assert.deepEqual(h.notices, [], `after the ${restart} restart`);
       assert.ok(h.logs.some((l) => /sender stranger.*notice silenced/.test(l)), `silenced after the ${restart} restart`);
     }
-  });
-
-  it('keeps notices on through a restart once the resident turns them on in a state that an update kept off', async (t) => {
-    const noticesPath = savedBy080(t, { 'earlier-sender': { lastHandledId: snowflakeAt(Date.now() - HOUR) } });
-    const first = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' });
-    await first.server.filtersUpdate({ setDmNotice: true });
-    const h = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' });
-    h.emit('stranger');
-    await h.settle();
-    assert.deepEqual(h.notices, [{ channelId: 'dm-stranger', content: DM_NOTICE_TEXT }]);
   });
 });
 

@@ -180,21 +180,19 @@ export class DmNoticeState {
       this.error = `${path} is not a valid DM notice state file`;
       return;
     }
-    if (!parsed.enabled && !parsed.chosen && !Object.keys(parsed.senders).length) {
-      await this.commit(turnedOn(parsed, this.now()));
-      return;
-    }
-    const pending = Object.entries(parsed.senders).filter(([, v]) => v.lastNotice?.outcome === 'pending');
-    if (!pending.length) {
-      this.file = parsed;
+    const update = !parsed.enabled && !parsed.chosen;
+    const opened = update ? turnedOn(parsed, this.now()) : parsed;
+    const pending = Object.entries(opened.senders).filter(([, v]) => v.lastNotice?.outcome === 'pending');
+    if (!update && !pending.length) {
+      this.file = opened;
       this.error = null;
       return;
     }
-    const senders = { ...parsed.senders };
+    const senders = { ...opened.senders };
     for (const [authorId, v] of pending) {
       senders[authorId] = { ...v, lastNotice: { ...v.lastNotice!, outcome: 'unknown' } };
     }
-    await this.commit({ ...parsed, senders });
+    await this.commit({ ...opened, senders });
     if (!this.file) return;
     for (const [authorId, v] of pending) {
       this.onInterrupted({ authorId, messageId: v.lastNotice!.messageId, at: v.lastNotice!.at });

@@ -8,24 +8,21 @@ in the git log and PR descriptions.
 ### Changed
 
 - **A sender whose DM the DM list refuses is now told so by default.**
-  The delivery notice that `filters_update`'s `setDmNotice` controls
-  starts on in a new notice state. At the first start after an update,
-  a notice state with notices off and no sender in it is the old
-  default, so discord-mcpl turns notices on from that moment, and a DM
-  refused before the update gets no notice. A state that holds a sender
-  had notices on at some time, so its off is the agent's choice, and it
-  stays off. An agent that turned notices off while its state held no
-  sender looks the same, so the update turns its notices on again. The
-  state file now records that the agent set the notice, so
-  `setDmNotice: false` holds through later starts. The file keeps its
-  version, so an older release reads it: after a step back, notices
-  stay as the file has them, on where the update turned them on. A save
-  by an older release drops the record of the agent's choice. A missing
-  file is a new state, so where the file doesn't persist,
-  `setDmNotice: false` lasts only until a restart. The descriptions of
-  `filters_get` and `filters_update` change with the default, so an
-  agent's prompt cache, where its host keeps one, misses once after the
-  update.
+  The delivery notice that `filters_update`'s `setDmNotice` controls is
+  on unless the agent sets it false. A state saved by an earlier release
+  can't tell the agent's off from the old default, so at the first start
+  after an update, discord-mcpl turns notices on from that moment
+  wherever they are off. A DM refused before the update gets no notice.
+  An agent that wants notices off sets `setDmNotice: false` again. From
+  this release the state file records that the agent set it, so it
+  holds through later starts. The file keeps its version, so an older
+  release reads it: after a step back, notices stay as the file has
+  them, and a save by an older release drops the record of the agent's
+  choice. A missing file is a new state, so where the file doesn't
+  persist, `setDmNotice: false` lasts only until a restart. The
+  descriptions of `filters_get` and `filters_update` change with the
+  default, so an agent's prompt cache, where its host keeps one, misses
+  once after the update.
 
 ## 0.8.0 — 2026-11-16
 

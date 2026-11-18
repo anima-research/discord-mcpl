@@ -542,6 +542,21 @@ describe('DM notice state', () => {
     assert.equal(await state.decide(idAt(T0 + HOUR, 1), 'stranger'), 'notify');
   });
 
+  it('settles an interrupted reservation in a state saved by 0.8.0 as it turns notices on', async (t) => {
+    const f = fixture(t);
+    mkdirSync(dirname(f.path), { recursive: true, mode: 0o700 });
+    const reserved = idAt(T0 - HOUR);
+    writeFileSync(f.path, JSON.stringify({
+      version: 1, floorId: snowflakeAt(T0 - 2 * HOUR), enabled: false,
+      senders: { stranger: { lastHandledId: reserved, lastNotice: { messageId: reserved, at: T0 - HOUR, outcome: 'pending' } } },
+    }));
+    const state = f.make();
+    await state.open(f.path);
+    assert.equal(state.status().enabled, true);
+    assert.deepEqual(f.interrupted, [{ authorId: 'stranger', messageId: reserved, at: T0 - HOUR }], 'reported once');
+    assert.deepEqual([f.onDisk().enabled, f.onDisk().senders.stranger.lastNotice.outcome], [true, 'unknown']);
+  });
+
   it('resolves its default path per bot under XDG state, with an explicit override', () => {
     assert.equal(
       resolveDmNoticesPath('bot1', { XDG_STATE_HOME: '/x/state' }),
