@@ -280,7 +280,8 @@ export const toolDefinitions: ToolDefinition[] = [
             'connection (at most once per 24 hours per sender, and at most 10 an hour across all senders; ' +
             'it never quotes or forwards their message). On by default. Setting it false stops every notice ' +
             'not yet reserved; one already being sent still goes out. Saved with the notice state, so it ' +
-            'works and survives restarts even when DISCORD_FILTERS_FILE is not configured. Omit to leave it unchanged.',
+            'works even when DISCORD_FILTERS_FILE is not configured, and survives restarts while the notice ' +
+            'state\'s file persists: a missing file starts a new state, with notices on. Omit to leave it unchanged.',
         },
       },
     },
