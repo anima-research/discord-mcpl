@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.9.0 — 2026-11-18
+
 ### Changed
 
 - **A sender whose DM the DM list refuses is now told so by default.**
