@@ -128,7 +128,7 @@ A server's channel list applies only when `guildIds` lists the server too.
 
 The list of servers decides which servers' channels discord-mcpl registers and delivers messages from. A server's channel list also limits what the agent can read there: `list_channels` leaves out a channel outside it, `list_channel_members`, `fetch_history`, `fetch_around` and a host's open with backscroll refuse one, and a channel name resolves only to a channel inside it. `latestFrom`, which `reply_message`, `add_reaction` and `remove_reaction` take in place of a message ID, picks only messages in channels and DMs the filters admit. A send to a channel given by its numeric ID isn't filtered.
 
-When the DM list refuses a DM, discord-mcpl sends the sender a notice that it didn't forward the DM, unless the DM was sent before notices were on. Notices go to each sender at most once per 24 hours, and to all senders together at most 10 times an hour. They are on by default, and the agent turns them off by calling `filters_update` with `setDmNotice: false`.
+When the DM list refuses a DM, discord-mcpl sends the sender a notice that it didn't forward the DM, unless the DM was sent before notices were on. Notices go to each sender at most once per 24 hours, and to all senders together at most 10 times an hour. They are on by default, and the agent turns them off by calling `filters_update` with `setDmNotice: false`. An agent that turned them off before they were on by default sets it again after the update.
 
 ### Stored state
 
