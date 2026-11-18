@@ -667,11 +667,12 @@ describe('notices start on', () => {
       h.emit('stranger');
       await h.settle();
       assert.deepEqual(h.notices, [], `after the ${restart} restart`);
+      assert.ok(h.logs.some((l) => /sender stranger.*notice silenced/.test(l)), `silenced after the ${restart} restart`);
     }
   });
 
-  it('keeps notices on through a restart once the resident turns them on in a state from before an update', async (t) => {
-    const noticesPath = savedBy080(t);
+  it('keeps notices on through a restart once the resident turns them on in a state that an update kept off', async (t) => {
+    const noticesPath = savedBy080(t, { 'earlier-sender': { lastHandledId: snowflakeAt(Date.now() - HOUR) } });
     const first = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' });
     await first.server.filtersUpdate({ setDmNotice: true });
     const h = await harness(t, { dmUsers: ['friend'], noticesPath, notices: 'as-saved' });
