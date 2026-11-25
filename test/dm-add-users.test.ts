@@ -102,7 +102,7 @@ describe('addDmUsers never stops anyone, and a call that stops someone says whom
     const a = await r.update({ setDmUsers: ['user-b'] });
     assert.deepEqual(r.reaches('user-a', 'user-b'), ['user-b']);
     assert.deepEqual(a.notes, [
-      "DMs were open to anyone. Now only these users can DM you: user-b. Everyone else's DMs stop now. To open DMs to anyone again, call setDmUsers with an empty list.",
+      "DMs were open to anyone. Now only these users can DM you: user-b. Everyone else's DMs stop now. To open DMs to anyone again, call filters_update with setDmUsers: [].",
     ]);
   });
 

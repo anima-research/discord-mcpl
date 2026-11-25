@@ -144,7 +144,7 @@ function dmListChangeNotes(before: readonly string[] | undefined, after: readonl
   if (!before?.length) {
     return [
       `DMs were open to anyone. Now only these users can DM you: ${users.join(', ')}. Everyone else's DMs stop now. ` +
-        'To open DMs to anyone again, call setDmUsers with an empty list.',
+        'To open DMs to anyone again, call filters_update with setDmUsers: [].',
     ];
   }
   const gained = users.filter((user) => !before.includes(user));
