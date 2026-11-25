@@ -5,6 +5,20 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+### Changed
+
+- **`filters_update` has a new parameter, `addDmUsers`.** It adds users
+  to the DM list, and it never stops anyone's DMs. If anyone can DM the
+  agent already, the call adds nothing, and its answer says so.
+- **The answer of `filters_update` now names whose DMs stopped.** If a
+  call changes a list, the answer names who gained access and who lost
+  it. A `setDmUsers` call that ends open DMs gets a warning. Everyone
+  else's DMs stop, and the warning says how to open DMs again.
+- **`setDmUsers` now names `addDmUsers` in its description.** With
+  `addDmUsers`, an agent lets one more user in.
+- The description of `filters_update` changes, so an agent's prompt
+  cache misses once after the update.
+
 ## 0.9.0 — 2026-11-18
 
 ### Changed
