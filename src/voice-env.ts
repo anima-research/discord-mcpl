@@ -44,6 +44,7 @@ export function voiceEnv(): VoiceEnv | null {
     guildId: guildId!, voiceChannelId, registryPath: registryPath!, voiceName: voiceName!,
     textChannels: channels.length ? channels : null, elevenKey: elevenKey!,
     vadThresholdDb: Number.isFinite(vadDb) ? vadDb : VAD_THRESHOLD_DB,
-    maxHoldMs: Number.isFinite(maxHold) && maxHold > 0 ? maxHold : null,
+    // Node's timer ceiling is 2^31-1 ms: setTimeout fires after 1 ms above it.
+    maxHoldMs: Number.isFinite(maxHold) && maxHold >= 1 ? Math.min(Math.trunc(maxHold), 2_147_483_647) : null,
   };
 }
