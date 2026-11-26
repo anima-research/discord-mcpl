@@ -277,7 +277,9 @@ export const toolDefinitions: ToolDefinition[] = [
         addDmUsers: {
           type: 'array',
           items: { type: 'string' },
-          description: "User ids to let DM you. Never stops anyone's DMs: while DMs are open to anyone, it changes nothing.",
+          description:
+            'User ids to let DM you, each a numeric id in quotes, such as "123456789012345678". A name is not accepted. ' +
+            "Never stops anyone's DMs: while DMs are open to anyone, it changes nothing.",
         },
         setDmNotice: {
           type: 'boolean',

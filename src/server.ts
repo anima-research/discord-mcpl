@@ -140,18 +140,26 @@ const holdsNumber = (value: unknown): boolean =>
 
 function dmListChangeNotes(before: readonly string[] | undefined, after: readonly string[] | undefined): string[] {
   if (!after?.length) return [];
-  const users = [...new Set(after)];
+  const listed = [...new Set(after)];
+  const added = listed.filter((entry) => !before?.includes(entry));
+  const notIds = added.filter((entry) => !isSnowflake(entry));
+  const notIdNote = notIds.length ? [`Not user ids, so they let no one in: ${notIds.join(', ')}.`] : [];
   if (!before?.length) {
+    const users = listed.filter(isSnowflake);
+    const who = users.length
+      ? `only these users can DM you: ${users.join(', ')}. Everyone else's DMs stop now.`
+      : 'no one can DM you.';
     return [
-      `DMs were open to anyone. Now only these users can DM you: ${users.join(', ')}. Everyone else's DMs stop now. ` +
-        'To open DMs to anyone again, call filters_update with setDmUsers: [].',
+      `DMs were open to anyone. Now ${who} To open DMs to anyone again, call filters_update with setDmUsers: [].`,
+      ...notIdNote,
     ];
   }
-  const gained = users.filter((user) => !before.includes(user));
-  const lost = [...new Set(before)].filter((user) => !after.includes(user));
+  const gained = added.filter(isSnowflake);
+  const lost = [...new Set(before)].filter((entry) => isSnowflake(entry) && !after.includes(entry));
   return [
     ...(gained.length ? [`Can DM you now: ${gained.join(', ')}.`] : []),
     ...(lost.length ? [`Can no longer DM you: ${lost.join(', ')}.`] : []),
+    ...notIdNote,
   ];
 }
 
@@ -2365,7 +2373,12 @@ export class DiscordMcplServer {
     ) ?? [];
     const removeGuilds = listOf('removeGuilds', ids('server'), id) ?? [];
     const setDmUsers = listOf('setDmUsers', ids('user'), id);
-    const addDmUsers = listOf('addDmUsers', ids('user'), id) ?? [];
+    const userId = (text: string): string | undefined => (isSnowflake(text.trim()) ? text.trim() : undefined);
+    const addDmUsers = listOf(
+      'addDmUsers',
+      "Discord user ids, each 17 to 20 digits in quotes (a name or @username isn't an id)",
+      userId,
+    ) ?? [];
     const setDmNotice = (args.setDmNotice ?? undefined) as boolean | undefined;
     const applyNotice = async (notes: string[]): Promise<void> => {
       if (setDmNotice === undefined) return;
@@ -2468,7 +2481,7 @@ export class DiscordMcplServer {
           'There is no DM list, and nothing was added.';
       }
     }
-    if (dmChange) notes.push(...dmListChangeNotes(current.dmUsers, next.dmUsers));
+    if (dmChange) notes.push(...dmListChangeNotes(this.discord.getFilters().dmUsers, next.dmUsers));
     if (addNote) notes.push(addNote);
 
     saveFiltersFile(path, next);

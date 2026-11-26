@@ -74,67 +74,99 @@ function resident(t: TestContext, contents: DiscordFilters) {
     return r.text;
   };
   const file = () => JSON.parse(readFileSync(path, 'utf8')) as DiscordFilters;
-  return { update, refusal, reaches, file };
+  const operatorWrites = (next: DiscordFilters) => writeFileSync(path, JSON.stringify(next));
+  return { update, refusal, reaches, file, operatorWrites };
 }
+
+const A = '100000000000000001';
+const B = '100000000000000002';
+const C = '100000000000000003';
+const reopen = 'To open DMs to anyone again, call filters_update with setDmUsers: [].';
 
 describe('addDmUsers never stops anyone, and a call that stops someone says whom', () => {
   it('from an open list, addDmUsers changes nothing and says that the user can already DM', async (t) => {
     const r = resident(t, {});
-    const a = await r.update({ addDmUsers: ['user-a'] });
+    const a = await r.update({ addDmUsers: [A] });
     assert.equal(r.file().dmUsers, undefined);
     assert.equal(a.applied.dmUsers, null);
-    assert.deepEqual(r.reaches('user-a', 'user-b'), ['user-a', 'user-b']);
-    assert.deepEqual(a.notes, ['DMs are open to anyone, so these users can already DM you: user-a. There is no DM list, and nothing was added.']);
+    assert.deepEqual(r.reaches(A, B), [A, B]);
+    assert.deepEqual(a.notes, [`DMs are open to anyone, so these users can already DM you: ${A}. There is no DM list, and nothing was added.`]);
   });
 
   it('from a list, addDmUsers keeps everyone listed, adds the user, and names a user already listed', async (t) => {
-    const r = resident(t, { dmUsers: ['user-a'] });
-    assert.deepEqual(r.reaches('user-a', 'user-b'), ['user-a']);
-    const a = await r.update({ addDmUsers: ['user-a', 'user-b'] });
-    assert.deepEqual(r.file().dmUsers, ['user-a', 'user-b']);
-    assert.deepEqual(r.reaches('user-a', 'user-b', 'user-c'), ['user-a', 'user-b']);
-    assert.deepEqual(a.notes, ['Can DM you now: user-b.', 'Already on the DM list: user-a.']);
+    const r = resident(t, { dmUsers: [A] });
+    assert.deepEqual(r.reaches(A, B), [A]);
+    const a = await r.update({ addDmUsers: [A, B] });
+    assert.deepEqual(r.file().dmUsers, [A, B]);
+    assert.deepEqual(r.reaches(A, B, C), [A, B]);
+    assert.deepEqual(a.notes, [`Can DM you now: ${B}.`, `Already on the DM list: ${A}.`]);
   });
 
   it('from an open list, setDmUsers says that everyone else is stopped, and how to open DMs again', async (t) => {
     const r = resident(t, {});
-    assert.deepEqual(r.reaches('user-a', 'user-b'), ['user-a', 'user-b']);
-    const a = await r.update({ setDmUsers: ['user-b'] });
-    assert.deepEqual(r.reaches('user-a', 'user-b'), ['user-b']);
+    assert.deepEqual(r.reaches(A, B), [A, B]);
+    const a = await r.update({ setDmUsers: [B] });
+    assert.deepEqual(r.reaches(A, B), [B]);
     assert.deepEqual(a.notes, [
-      "DMs were open to anyone. Now only these users can DM you: user-b. Everyone else's DMs stop now. To open DMs to anyone again, call filters_update with setDmUsers: [].",
+      `DMs were open to anyone. Now only these users can DM you: ${B}. Everyone else's DMs stop now. ${reopen}`,
     ]);
   });
 
   it('from a list, setDmUsers names whom it let in and whom it stopped', async (t) => {
-    const r = resident(t, { dmUsers: ['user-a', 'user-b'] });
-    const a = await r.update({ setDmUsers: ['user-b', 'user-c'] });
-    assert.deepEqual(r.reaches('user-a', 'user-b', 'user-c'), ['user-b', 'user-c']);
-    assert.deepEqual(a.notes, ['Can DM you now: user-c.', 'Can no longer DM you: user-a.']);
+    const r = resident(t, { dmUsers: [A, B] });
+    const a = await r.update({ setDmUsers: [B, C] });
+    assert.deepEqual(r.reaches(A, B, C), [B, C]);
+    assert.deepEqual(a.notes, [`Can DM you now: ${C}.`, `Can no longer DM you: ${A}.`]);
   });
 
   it('setDmUsers with an empty list opens DMs and names no one as stopped', async (t) => {
-    const r = resident(t, { dmUsers: ['user-a'] });
+    const r = resident(t, { dmUsers: [A] });
     const a = await r.update({ setDmUsers: [] });
-    assert.deepEqual(r.reaches('user-a', 'user-b'), ['user-a', 'user-b']);
+    assert.deepEqual(r.reaches(A, B), [A, B]);
     assert.deepEqual(a.notes, ['DM whitelist cleared — DMs from ANYONE are now delivered.']);
   });
 
   it('with setDmUsers and addDmUsers in one call, the list is set first and the users are added to it', async (t) => {
-    const r = resident(t, { dmUsers: ['user-a'] });
-    const a = await r.update({ setDmUsers: ['user-b'], addDmUsers: ['user-c'] });
-    assert.deepEqual(r.file().dmUsers, ['user-b', 'user-c']);
-    assert.deepEqual(a.notes, ['Can DM you now: user-b, user-c.', 'Can no longer DM you: user-a.']);
+    const r = resident(t, { dmUsers: [A] });
+    const a = await r.update({ setDmUsers: [B], addDmUsers: [C] });
+    assert.deepEqual(r.file().dmUsers, [B, C]);
+    assert.deepEqual(a.notes, [`Can DM you now: ${B}, ${C}.`, `Can no longer DM you: ${A}.`]);
     const open = resident(t, {});
-    const b = await open.update({ setDmUsers: ['user-b'], addDmUsers: ['user-c'] });
-    assert.deepEqual(open.reaches('user-a', 'user-b', 'user-c'), ['user-b', 'user-c']);
-    assert.match(b.notes[0] ?? '', /^DMs were open to anyone\. Now only these users can DM you: user-b, user-c\. Everyone else's DMs stop now\./);
+    const b = await open.update({ setDmUsers: [B], addDmUsers: [C] });
+    assert.deepEqual(open.reaches(A, B, C), [B, C]);
+    assert.match(b.notes[0] ?? '', new RegExp(`^DMs were open to anyone\\. Now only these users can DM you: ${B}, ${C}\\. Everyone else's DMs stop now\\.`));
   });
 
-  it('refuses an id in addDmUsers that is a number or not an id, and changes nothing', async (t) => {
-    const r = resident(t, { dmUsers: ['user-a'] });
+  it('addDmUsers takes user ids only: it refuses a number, a name or a mention, and changes nothing', async (t) => {
+    const r = resident(t, { dmUsers: [A] });
     assert.match(await r.refusal({ addDmUsers: [123] }), /ids must be strings in quotes/);
-    assert.match(await r.refusal({ addDmUsers: ['two words'] }), /addDmUsers takes a list of user ids/);
-    assert.match(await r.refusal({ addDmUsers: 'user-b' }), /addDmUsers takes a list of user ids/);
+    assert.match(await r.refusal({ addDmUsers: ['@alice'] }), /addDmUsers takes a list of Discord user ids, .*"@alice" isn't one/);
+    assert.match(await r.refusal({ addDmUsers: [`<@${B}>`] }), /addDmUsers takes a list of Discord user ids/);
+    assert.match(await r.refusal({ addDmUsers: B }), /addDmUsers takes a list of Discord user ids/);
+  });
+
+  it('an entry that is not a user id is named as letting no one in, never as a user who can DM', async (t) => {
+    const open = resident(t, {});
+    const a = await open.update({ setDmUsers: ['@alice'] });
+    assert.deepEqual(open.reaches(A, B), []);
+    assert.deepEqual(a.notes, [`DMs were open to anyone. Now no one can DM you. ${reopen}`, 'Not user ids, so they let no one in: @alice.']);
+    const listed = resident(t, { dmUsers: [A] });
+    const b = await listed.update({ setDmUsers: [A, '@bob'] });
+    assert.deepEqual(b.notes, ['Not user ids, so they let no one in: @bob.']);
+    const c = await listed.update({ setDmUsers: [A] });
+    assert.deepEqual(c.notes, []);
+  });
+
+  it('the answer compares with the list in force, so an operator edit not yet applied is named too', async (t) => {
+    const listed = resident(t, { dmUsers: [A] });
+    listed.operatorWrites({ dmUsers: [B] });
+    const a = await listed.update({ addDmUsers: [C] });
+    assert.deepEqual(listed.reaches(A, B, C), [B, C]);
+    assert.deepEqual(a.notes, [`Can DM you now: ${B}, ${C}.`, `Can no longer DM you: ${A}.`]);
+    const open = resident(t, {});
+    open.operatorWrites({ dmUsers: [A] });
+    const b = await open.update({ addDmUsers: [B] });
+    assert.deepEqual(open.reaches(A, B, C), [A, B]);
+    assert.deepEqual(b.notes, [`DMs were open to anyone. Now only these users can DM you: ${A}, ${B}. Everyone else's DMs stop now. ${reopen}`]);
   });
 });
