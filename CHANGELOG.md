@@ -5,6 +5,8 @@ in the git log and PR descriptions.
 
 ## Unreleased
 
+## 0.10.0 — 2026-11-28
+
 ### Added
 
 - **`filters_update` has a new parameter, `addDmUsers`.** It adds users
@@ -24,6 +26,15 @@ in the git log and PR descriptions.
   `addDmUsers`, an agent lets one more user in.
 - The input schema of `filters_update` changes. If an agent's host keeps
   a prompt cache, the cache misses once after the update.
+
+### Fixed
+
+- **An expired voice reply's receipt never reports a shorter wait than
+  its hold.** Node's timer can fire about a millisecond early, so
+  `queuedMs` could read 19 under a hold of 20.
+  `DISCORD_VOICE_MAX_HOLD_MS` now takes whole milliseconds from 1 to
+  2147483647, which is Node's timer ceiling. A larger value is clamped
+  to that ceiling (#41).
 
 ## 0.9.0 — 2026-11-18
 
