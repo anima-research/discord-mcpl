@@ -132,11 +132,36 @@ const INSPECTION_TOOLS: ReadonlySet<string> = new Set(['fetch_history', 'fetch_a
 
 export const ID_ARGUMENTS: readonly string[] = [
   'channelId', 'messageId', 'userId', 'guildId', 'categoryId', 'before', 'after', 'latestFrom',
-  'addGuilds', 'removeGuilds', 'setDmUsers',
+  'addGuilds', 'removeGuilds', 'setDmUsers', 'addDmUsers',
 ];
 
 const holdsNumber = (value: unknown): boolean =>
   typeof value === 'number' || (Array.isArray(value) && value.some((item) => typeof item === 'number'));
+
+function dmListChangeNotes(before: readonly string[] | undefined, after: readonly string[] | undefined): string[] {
+  if (!after?.length) return [];
+  const listed = [...new Set(after)];
+  const added = listed.filter((entry) => !before?.includes(entry));
+  const notIds = added.filter((entry) => !isSnowflake(entry));
+  const notIdNote = notIds.length ? [`Not user ids, so they let no one in: ${notIds.join(', ')}.`] : [];
+  if (!before?.length) {
+    const users = listed.filter(isSnowflake);
+    const who = users.length
+      ? `only these users can DM you: ${users.join(', ')}. Everyone else's DMs stop now.`
+      : 'no one can DM you.';
+    return [
+      `DMs were open to anyone. Now ${who} To open DMs to anyone again, call filters_update with setDmUsers: [].`,
+      ...notIdNote,
+    ];
+  }
+  const gained = added.filter(isSnowflake);
+  const lost = [...new Set(before)].filter((entry) => isSnowflake(entry) && !after.includes(entry));
+  return [
+    ...(gained.length ? [`Can DM you now: ${gained.join(', ')}.`] : []),
+    ...(lost.length ? [`Can no longer DM you: ${lost.join(', ')}.`] : []),
+    ...notIdNote,
+  ];
+}
 
 const listed = (items: string[]): string =>
   items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items.join('');
@@ -2348,6 +2373,12 @@ export class DiscordMcplServer {
     ) ?? [];
     const removeGuilds = listOf('removeGuilds', ids('server'), id) ?? [];
     const setDmUsers = listOf('setDmUsers', ids('user'), id);
+    const userId = (text: string): string | undefined => (isSnowflake(text.trim()) ? text.trim() : undefined);
+    const addDmUsers = listOf(
+      'addDmUsers',
+      "Discord user ids, each 17 to 20 digits in quotes (a name or @username isn't an id)",
+      userId,
+    ) ?? [];
     const setDmNotice = (args.setDmNotice ?? undefined) as boolean | undefined;
     const applyNotice = async (notes: string[]): Promise<void> => {
       if (setDmNotice === undefined) return;
@@ -2359,7 +2390,8 @@ export class DiscordMcplServer {
       );
       if (unconfirmed) notes.push(`The notice setting is in effect but not confirmed durable: ${unconfirmed}`);
     };
-    const filterChange = addGuilds.length > 0 || removeGuilds.length > 0 || setDmUsers !== undefined;
+    const dmChange = setDmUsers !== undefined || addDmUsers.length > 0;
+    const filterChange = addGuilds.length > 0 || removeGuilds.length > 0 || dmChange;
     if (setDmNotice !== undefined && !filterChange) {
       const notes: string[] = [];
       await applyNotice(notes);
@@ -2436,6 +2468,21 @@ export class DiscordMcplServer {
       next.dmUsers = setDmUsers.length ? setDmUsers : undefined;
       if (!setDmUsers.length) notes.push('DM whitelist cleared — DMs from ANYONE are now delivered.');
     }
+    let addNote: string | undefined;
+    if (addDmUsers.length) {
+      const listedBefore = next.dmUsers;
+      if (listedBefore) {
+        const already = addDmUsers.filter((user) => listedBefore.includes(user));
+        next.dmUsers = [...new Set([...listedBefore, ...addDmUsers])];
+        if (already.length) addNote = `Already on the DM list: ${[...new Set(already)].join(', ')}.`;
+      } else {
+        addNote =
+          `DMs are open to anyone, so these users can already DM you: ${[...new Set(addDmUsers)].join(', ')}. ` +
+          'There is no DM list, and nothing was added.';
+      }
+    }
+    if (dmChange) notes.push(...dmListChangeNotes(this.discord.getFilters().dmUsers, next.dmUsers));
+    if (addNote) notes.push(addNote);
 
     saveFiltersFile(path, next);
     const diff = this.discord.updateFilters(next);

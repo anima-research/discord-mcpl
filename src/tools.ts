@@ -270,8 +270,16 @@ export const toolDefinitions: ToolDefinition[] = [
           type: 'array',
           items: { type: 'string' },
           description:
-            'Replace the DM-user whitelist with these user ids. CAREFUL: an empty array ' +
-            'means UNRESTRICTED (DMs from anyone), matching the env-unset semantics. Omit to leave DMs unchanged.',
+            'Replace the DM-user whitelist with these user ids. To let one more user DM you, use addDmUsers. ' +
+            'CAREFUL: an empty array means UNRESTRICTED (DMs from anyone), matching the env-unset semantics. ' +
+            'Omit to leave DMs unchanged.',
+        },
+        addDmUsers: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'User ids to let DM you, each a numeric id in quotes, such as "123456789012345678". A name is not accepted. ' +
+            "Never stops anyone's DMs: while DMs are open to anyone, it changes nothing.",
         },
         setDmNotice: {
           type: 'boolean',
